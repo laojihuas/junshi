@@ -112,7 +112,7 @@ const DB = {
             console.error('[DB] createSession error:', error.code, error.message, error.details);
             // 给出更友好的错误提示
             if (error.code === '42501') {
-                console.error('[DB] RLS 策略拒绝了创建会话。请在 Supabase 中执行 supabase/schema.sql');
+                console.error('[DB] RLS 策略拒绝了创建会话，请检查 Supabase 权限配置');
             } else if (error.code === '23503') {
                 console.error('[DB] 用户 profile 不存在，无法创建会话');
             }

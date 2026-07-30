@@ -117,17 +117,11 @@ const Friends = {
                     Utils.toast('已添加 ' + name);
                     await this.load();
                 } else {
-                    Utils.toast('添加失败，请查看下方弹窗');
-                    // 弹出初始化向导
-                    const wizard = document.getElementById('setup-wizard');
-                    if (wizard) wizard.style.display = 'flex';
+                    Utils.toast('添加失败，请重试');
                 }
             } catch (e) {
                 console.error('[军师] 创建好友失败:', e);
                 Utils.toast('添加失败，请重试');
-                // 弹出初始化向导
-                const wizard = document.getElementById('setup-wizard');
-                if (wizard) wizard.style.display = 'flex';
             } finally {
                 Utils.hideLoading();
             }
