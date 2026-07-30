@@ -124,13 +124,7 @@ const App = {
             Friends.showCreateModal();
         });
 
-        // 新建好友弹窗确认/取消
-        document.getElementById('new-friend-confirm').addEventListener('click', () => {
-            // 在 Friends.showCreateModal 中处理
-        });
-        document.getElementById('new-friend-cancel').addEventListener('click', () => {
-            document.getElementById('modal-new-friend').classList.remove('active');
-        });
+        // 新建好友弹窗 - 事件处理移至 Friends.showCreateModal()
 
         // 聊天返回按钮
         document.getElementById('chat-back').addEventListener('click', () => {

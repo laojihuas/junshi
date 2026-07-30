@@ -1,7 +1,16 @@
 -- ============================================================
 -- 军师 - 恋爱聊天指导工具 · 数据库 Schema
--- Supabase SQL 初始化脚本
+-- Supabase SQL 初始化脚本（idempotent - 可重复运行）
 -- ============================================================
+
+-- ============================================================
+-- 第 0 步：基础 GRANT 权限（关键修复！）
+-- Supabase 的 anon 和 authenticated 角色需要这些权限才能访问表
+-- ============================================================
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_role;
 
 -- 0. 扩展用户表（Supabase Auth 自动生成 auth.users，通过触发器同步到 public.profiles）
 CREATE TABLE IF NOT EXISTS public.profiles (
@@ -18,7 +27,14 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 自动创建 profile 的触发器
+-- 显式授权（防止 Supabase 默认权限丢失）
+GRANT SELECT, INSERT, UPDATE ON public.profiles TO anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.chat_sessions TO anon, authenticated;
+GRANT SELECT, INSERT ON public.chat_messages TO anon, authenticated;
+GRANT SELECT ON public.activation_codes TO anon, authenticated;
+GRANT INSERT, UPDATE ON public.activation_codes TO authenticated;
+
+-- 自动创建 profile 的触发器（SECURITY DEFINER 绕过 RLS）
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -27,7 +43,8 @@ BEGIN
         NEW.id,
         NEW.email,
         NEW.phone
-    );
+    )
+    ON CONFLICT (id) DO NOTHING;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -91,32 +108,67 @@ CREATE TRIGGER update_chat_sessions_updated_at
     BEFORE UPDATE ON public.chat_sessions
     FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
+-- ============================================================
 -- 5. Row Level Security (RLS) 策略
+-- ============================================================
+
 -- 开启 RLS
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chat_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activation_codes ENABLE ROW LEVEL SECURITY;
 
+-- 清理旧策略（让脚本可重复运行）
+DROP POLICY IF EXISTS "users_read_own_profile" ON public.profiles;
+DROP POLICY IF EXISTS "users_update_own_profile" ON public.profiles;
+DROP POLICY IF EXISTS "users_insert_own_profile" ON public.profiles;
+DROP POLICY IF EXISTS "users_manage_own_sessions" ON public.chat_sessions;
+DROP POLICY IF EXISTS "users_select_own_sessions" ON public.chat_sessions;
+DROP POLICY IF EXISTS "users_insert_own_sessions" ON public.chat_sessions;
+DROP POLICY IF EXISTS "users_update_own_sessions" ON public.chat_sessions;
+DROP POLICY IF EXISTS "users_delete_own_sessions" ON public.chat_sessions;
+DROP POLICY IF EXISTS "users_read_own_messages" ON public.chat_messages;
+DROP POLICY IF EXISTS "users_insert_own_messages" ON public.chat_messages;
+DROP POLICY IF EXISTS "public_read_activation_codes" ON public.activation_codes;
+
 -- profiles：用户只能看/改自己的数据
 CREATE POLICY "users_read_own_profile"
     ON public.profiles FOR SELECT
+    TO authenticated
     USING (auth.uid() = id);
 
 CREATE POLICY "users_update_own_profile"
     ON public.profiles FOR UPDATE
+    TO authenticated
     USING (auth.uid() = id)
     WITH CHECK (auth.uid() = id);
 
--- chat_sessions：用户只能看/改自己的会话
-CREATE POLICY "users_manage_own_sessions"
-    ON public.chat_sessions FOR ALL
+-- chat_sessions：拆分为明确的四个策略
+CREATE POLICY "users_select_own_sessions"
+    ON public.chat_sessions FOR SELECT
+    TO authenticated
+    USING (auth.uid() = user_id);
+
+CREATE POLICY "users_insert_own_sessions"
+    ON public.chat_sessions FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "users_update_own_sessions"
+    ON public.chat_sessions FOR UPDATE
+    TO authenticated
     USING (auth.uid() = user_id)
     WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "users_delete_own_sessions"
+    ON public.chat_sessions FOR DELETE
+    TO authenticated
+    USING (auth.uid() = user_id);
 
 -- chat_messages：通过会话归属控制
 CREATE POLICY "users_read_own_messages"
     ON public.chat_messages FOR SELECT
+    TO authenticated
     USING (
         EXISTS (
             SELECT 1 FROM public.chat_sessions
@@ -127,6 +179,7 @@ CREATE POLICY "users_read_own_messages"
 
 CREATE POLICY "users_insert_own_messages"
     ON public.chat_messages FOR INSERT
+    TO authenticated
     WITH CHECK (
         EXISTS (
             SELECT 1 FROM public.chat_sessions
@@ -135,13 +188,14 @@ CREATE POLICY "users_insert_own_messages"
         )
     );
 
--- activation_codes：公开可读（用于验证），但更新需通过 Edge Function
+-- activation_codes：公开可读（用于验证）
 CREATE POLICY "public_read_activation_codes"
     ON public.activation_codes FOR SELECT
+    TO anon, authenticated
     USING (true);
 
 -- ============================================================
--- 6. 管理后台需要的视图（可选）
+-- 6. 管理员后台需要的视图（可选）
 -- ============================================================
 CREATE OR REPLACE VIEW public.admin_user_stats AS
 SELECT
@@ -162,5 +216,19 @@ LEFT JOIN public.chat_sessions cs ON cs.user_id = p.id
 LEFT JOIN public.chat_messages cm ON cm.session_id IN (SELECT id FROM public.chat_sessions WHERE user_id = p.id)
 GROUP BY p.id, p.email, p.phone, p.nickname, p.usage_count, p.is_vip, p.vip_expires_at, p.activated_at, p.created_at, p.device_id;
 
--- 给管理员角色授权（需要在 Supabase 中创建 admin 角色并分配用户）
--- 实际使用时，通过 Edge Function 的管理接口来操作
+-- ============================================================
+-- 7. 自动补建缺失 profile（如果之前注册的用户没创建 profile）
+-- ============================================================
+INSERT INTO public.profiles (id, email, phone)
+SELECT au.id, au.email, au.phone
+FROM auth.users au
+LEFT JOIN public.profiles p ON p.id = au.id
+WHERE p.id IS NULL
+ON CONFLICT (id) DO NOTHING;
+
+-- ============================================================
+-- 8. 诊断查询（运行后可以查看权限和策略是否正确）
+-- ============================================================
+-- 取消注释下面这行可以查看 chat_sessions 的权限和策略：
+-- SELECT grantee, privilege_type FROM information_schema.role_table_grants WHERE table_name = 'chat_sessions';
+-- SELECT policyname, cmd, qual, with_check FROM pg_policies WHERE tablename = 'chat_sessions';

@@ -51,7 +51,12 @@ const DB = {
             .eq('id', userId)
             .single();
         if (error) {
-            console.error('[DB] getProfile error:', error);
+            // 区分"记录不存在"和真正的错误
+            if (error.code === 'PGRST116') {
+                console.warn('[DB] 用户 profile 不存在:', userId);
+                return null;
+            }
+            console.error('[DB] getProfile error:', error.code, error.message, error.details);
             return null;
         }
         return data;
@@ -83,7 +88,7 @@ const DB = {
             .eq('user_id', userId)
             .order('updated_at', { ascending: false });
         if (error) {
-            console.error('[DB] getSessions error:', error);
+            console.error('[DB] getSessions error:', error.code, error.message, error.details);
             return [];
         }
         return data || [];
@@ -104,7 +109,13 @@ const DB = {
             .select()
             .single();
         if (error) {
-            console.error('[DB] createSession error:', error);
+            console.error('[DB] createSession error:', error.code, error.message, error.details);
+            // 给出更友好的错误提示
+            if (error.code === '42501') {
+                console.error('[DB] RLS 策略拒绝了创建会话。请在 Supabase 中执行 supabase/schema.sql');
+            } else if (error.code === '23503') {
+                console.error('[DB] 用户 profile 不存在，无法创建会话');
+            }
             return null;
         }
         return data;

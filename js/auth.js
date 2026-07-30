@@ -119,24 +119,44 @@ const Auth = {
 
     // 获取设备指纹
     async _getDeviceId() {
+        // 动态加载 FingerprintJS（避免 ESM 报错影响其他脚本）
         try {
-            if (typeof FingerprintJS !== 'undefined') {
+            if (typeof FingerprintJS === 'undefined' && !this._fpLoading) {
+                this._fpLoading = true;
+                await this._loadFingerprintJS();
+            }
+            if (typeof FingerprintJS !== 'undefined' && typeof FingerprintJS.load === 'function') {
                 const fp = await FingerprintJS.load();
                 const result = await fp.get();
                 return result.visitorId;
             }
         } catch (e) {
-            console.warn('[军师] FingerprintJS 加载失败，使用备用方案');
+            console.warn('[军师] FingerprintJS 加载失败，使用备用方案:', e.message || e);
         }
-        // 备用指纹方案
+        // 备用指纹方案（不依赖外部库）
         const fallback = [
             navigator.userAgent || '',
             navigator.language || '',
             screen.width || '',
             screen.height || '',
-            navigator.platform || ''
+            navigator.platform || '',
+            new Date().getTimezoneOffset() || ''
         ].join('|');
         return 'fp_' + this._hashString(fallback);
+    },
+
+    // 动态加载 FingerprintJS UMD
+    _loadFingerprintJS() {
+        return new Promise((resolve) => {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@4/dist/fp.umd.min.js';
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => resolve(); // 加载失败也 resolve，让备用方案生效
+            document.head.appendChild(script);
+            // 5秒超时，避免等待太久
+            setTimeout(resolve, 5000);
+        });
     },
 
     _hashString(str) {

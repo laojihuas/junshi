@@ -101,13 +101,35 @@ const Friends = {
                 Utils.toast('请输入好友昵称');
                 return;
             }
+
+            // 检查登录状态
+            if (!Auth.currentUser) {
+                Utils.toast('请先登录');
+                return;
+            }
+
             closeModal();
-            const session = await DB.createSession(Auth.currentUser.id, name);
-            if (session) {
-                Utils.toast('已添加 ' + name);
-                await this.load();
-            } else {
+            Utils.showLoading();
+
+            try {
+                const session = await DB.createSession(Auth.currentUser.id, name);
+                if (session) {
+                    Utils.toast('已添加 ' + name);
+                    await this.load();
+                } else {
+                    Utils.toast('添加失败，请查看下方弹窗');
+                    // 弹出初始化向导
+                    const wizard = document.getElementById('setup-wizard');
+                    if (wizard) wizard.style.display = 'flex';
+                }
+            } catch (e) {
+                console.error('[军师] 创建好友失败:', e);
                 Utils.toast('添加失败，请重试');
+                // 弹出初始化向导
+                const wizard = document.getElementById('setup-wizard');
+                if (wizard) wizard.style.display = 'flex';
+            } finally {
+                Utils.hideLoading();
             }
         };
 
