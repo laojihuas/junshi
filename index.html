@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>军师 - 聊天指导</title>
+    <meta name="description" content="军师 - 你的微信聊天指导助手">
+    <meta name="theme-color" content="#2E3238">
+
+    <!-- 样式 -->
+    <link rel="stylesheet" href="css/style.css">
+
+    <!-- 外部依赖 -->
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <script src="https://openfpcdn.io/fingerprintjs/v4"></script>
+
+    <!-- 配置文件（如存在则加载，否则回退到 example） -->
+    <script src="config.js"></script>
+    <script>
+        // 如果 config.js 未加载或未配置，加载 example
+        if (!window.APP_CONFIG) {
+            document.write('<script src="config.example.js"><\/script>');
+        }
+    </script>
+</head>
+<body>
+    <!-- Toast 提示 -->
+    <div id="toast" class="toast"></div>
+
+    <!-- 加载指示器 -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-spinner"></div>
+    </div>
+
+    <!-- ============================================================
+         页面：登录/注册
+         ============================================================ -->
+    <div id="page-auth" class="page">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <div class="icon">🧠</div>
+                <h1>军师</h1>
+                <p>恋爱聊天指导助手</p>
+            </div>
+
+            <div class="auth-tabs">
+                <div class="auth-tab active" data-form="login">登录</div>
+                <div class="auth-tab" data-form="register">注册</div>
+            </div>
+
+            <!-- 登录 -->
+            <div id="form-login" class="auth-form active">
+                <input id="login-email" class="input" type="email" placeholder="邮箱地址" autocomplete="email" inputmode="email">
+                <input id="login-password" class="input" type="password" placeholder="密码" autocomplete="current-password">
+                <button id="login-btn" class="btn btn-primary btn-block">登录</button>
+            </div>
+
+            <!-- 注册 -->
+            <div id="form-register" class="auth-form">
+                <input id="register-email" class="input" type="email" placeholder="邮箱地址" autocomplete="email" inputmode="email">
+                <input id="register-password" class="input" type="password" placeholder="密码（至少6位）" autocomplete="new-password">
+                <input id="register-confirm" class="input" type="password" placeholder="确认密码" autocomplete="new-password">
+                <button id="register-btn" class="btn btn-primary btn-block">注册</button>
+            </div>
+
+            <div class="auth-extra">
+                注册即表示同意 <a href="#">服务条款</a> 和 <a href="#">隐私政策</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         页面：好友列表
+         ============================================================ -->
+    <div id="page-friends" class="page">
+        <div class="friends-header">
+            <h1>军师</h1>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <span id="header-status" class="status-badge">加载中...</span>
+                <button id="logout-btn" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:4px;" title="退出登录">⏻</button>
+            </div>
+        </div>
+
+        <div id="friends-list" class="friends-list">
+            <div class="empty-state">
+                <div class="empty-icon">💬</div>
+                <p>加载中...</p>
+            </div>
+        </div>
+
+        <button id="fab-add-friend" class="fab" title="新建好友">+</button>
+    </div>
+
+    <!-- ============================================================
+         页面：聊天窗口
+         ============================================================ -->
+    <div id="page-chat" class="page">
+        <div class="chat-header">
+            <div id="chat-back" class="chat-back">‹</div>
+            <div id="chat-title" class="chat-header-title">聊天</div>
+        </div>
+
+        <div id="chat-messages" class="chat-messages">
+            <div class="empty-state" style="padding: 40px 20px;">
+                <div class="empty-icon" style="font-size: 48px;">💬</div>
+                <p style="font-size: 14px;">开始对话吧</p>
+            </div>
+        </div>
+
+        <div class="chat-input-area">
+            <button id="chat-paste-btn" class="chat-paste-btn" title="粘贴">📋</button>
+            <textarea id="chat-input" class="chat-input" rows="1" placeholder="粘贴对方的话，我来帮你回..." enterkeyhint="send"></textarea>
+            <button id="chat-send-btn" class="chat-send-btn">发送</button>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：新建好友
+         ============================================================ -->
+    <div id="modal-new-friend" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">新建好友</div>
+            <div class="modal-body">
+                <input id="new-friend-input" class="input" type="text" placeholder="输入好友昵称" maxlength="20">
+            </div>
+            <div class="modal-footer">
+                <button id="new-friend-cancel" class="btn btn-outline">取消</button>
+                <button id="new-friend-confirm" class="btn btn-primary">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：付费墙
+         ============================================================ -->
+    <div id="paywall-overlay" class="paywall-overlay">
+        <div class="paywall-card">
+            <div class="paywall-icon">🧠</div>
+            <div class="paywall-title">免费试用已结束</div>
+            <div class="paywall-subtitle" id="paywall-tries-desc">50 次免费试用已用完</div>
+
+            <div class="paywall-price" id="paywall-price">¥88<small>/月</small></div>
+            <div class="paywall-desc">
+                解锁无限次聊天指导<br>
+                随时随地获得回复建议
+            </div>
+
+            <hr class="paywall-divider">
+
+            <div class="paywall-activation">
+                <input id="activation-input" class="input" type="text" placeholder="输入激活码" maxlength="20" autocomplete="off">
+                <button id="activate-btn" class="btn btn-primary btn-block">激活会员</button>
+                <a id="paywall-buy-link" class="paywall-buy-link" href="#">还没有激活码？去购买 →</a>
+            </div>
+
+            <button id="paywall-close-btn" class="paywall-close">稍后再说</button>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         JavaScript 模块
+         ============================================================ -->
+    <script src="js/utils.js"></script>
+    <script src="js/supabase.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/friends.js"></script>
+    <script src="js/chat.js"></script>
+    <script src="js/paywall.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

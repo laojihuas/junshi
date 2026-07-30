@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>军师 - 管理后台</title>
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <style>
+        :root {
+            --green: #07C160;
+            --dark: #2E3238;
+            --bg: #F5F5F5;
+            --card: #FFFFFF;
+            --text: #191919;
+            --muted: #999;
+            --danger: #E53935;
+            --border: #E6E6E6;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 14px;
+            min-height: 100vh;
+        }
+        .header {
+            background: var(--dark);
+            color: white;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header h1 { font-size: 18px; }
+        .header .status { font-size: 12px; color: #aaa; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+        .stat-card .label { font-size: 13px; color: var(--muted); }
+        .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+
+        .card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #FAFAFA;
+            font-weight: 600;
+            color: var(--muted);
+            font-size: 12px;
+        }
+        tr:hover td { background: #F9F9F9; }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .badge-vip { background: #FFF3CD; color: #856404; }
+        .badge-free { background: #E8F5E9; color: #2E7D32; }
+        .badge-expired { background: #FFEBEE; color: #C62828; }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+        .btn:active { transform: scale(0.97); }
+        .btn-primary { background: var(--green); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-outline { background: transparent; border: 1px solid var(--border); }
+
+        .form-row {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .form-group label { font-size: 12px; color: var(--muted); }
+        .input {
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+        }
+        .input:focus { border-color: var(--green); }
+        .input-num { width: 80px; }
+        .input-code { width: 200px; font-family: monospace; letter-spacing: 1px; }
+
+        .code-display {
+            font-family: monospace;
+            background: #F5F5F5;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .toast {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 9999;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; }
+
+        .tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--border);
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            color: var(--muted);
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: all 0.2s;
+        }
+        .tab.active { color: var(--green); border-bottom-color: var(--green); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+    </style>
+</head>
+<body>
+    <div id="toast" class="toast"></div>
+
+    <div class="header">
+        <div>
+            <h1>⚙️ 军师 - 管理后台</h1>
+            <div class="status" id="login-status">未登录</div>
+        </div>
+        <div>
+            <button id="login-admin-btn" class="btn btn-primary">登录</button>
+            <button id="logout-admin-btn" class="btn btn-outline" style="display:none;color:#fff;border-color:#fff;">退出</button>
+        </div>
+    </div>
+
+    <div class="container" id="admin-container" style="display:none;">
+        <!-- 统计卡片 -->
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card">
+                <div class="label">总用户数</div>
+                <div class="value" id="stat-users">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">VIP 用户</div>
+                <div class="value" id="stat-vip">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">总调用次数</div>
+                <div class="value" id="stat-calls">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">已用激活码</div>
+                <div class="value" id="stat-codes-used">-</div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" data-tab="users">用户管理</div>
+            <div class="tab" data-tab="codes">激活码管理</div>
+        </div>
+
+        <!-- 用户管理 -->
+        <div id="tab-users" class="tab-content active">
+            <div class="card">
+                <div class="card-title">
+                    <span>用户列表</span>
+                    <span style="font-size:12px;color:var(--muted);" id="user-count">共 0 人</span>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>邮箱</th>
+                                <th>昵称</th>
+                                <th>状态</th>
+                                <th>使用次数</th>
+                                <th>VIP 到期</th>
+                                <th>设备 ID</th>
+                                <th>注册时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-tbody">
+                            <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- 激活码管理 -->
+        <div id="tab-codes" class="tab-content">
+            <div class="card">
+                <div class="card-title">
+                    <span>生成激活码</span>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>生成数量</label>
+                        <input id="gen-count" class="input input-num" type="number" value="10" min="1" max="200">
+                    </div>
+                    <button id="gen-codes-btn" class="btn btn-primary">批量生成</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-title">
+                    <span>激活码列表</span>
+                    <span style="font-size:12px;color:var(--muted);" id="codes-count">共 0 个</span>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>激活码</th>
+                                <th>状态</th>
+                                <th>使用用户</th>
+                                <th>使用时间</th>
+                                <th>创建时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="codes-tbody">
+                            <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
+                    <button id="export-codes-btn" class="btn btn-outline">📥 导出为 CSV</button>
+                    <span style="font-size:12px;color:var(--muted);">可导入发卡平台</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 登录区域 -->
+    <div id="login-area" class="container" style="max-width:400px;margin-top:80px;">
+        <div class="card" style="text-align:center;padding:40px;">
+            <div style="font-size:48px;margin-bottom:16px;">🔐</div>
+            <h2 style="margin-bottom:16px;">管理员登录</h2>
+            <input id="admin-email" class="input" type="email" placeholder="管理员邮箱" style="margin-bottom:12px;">
+            <input id="admin-password" class="input" type="password" placeholder="密码" style="margin-bottom:16px;">
+            <button id="admin-login-btn" class="btn btn-primary btn-block">登录后台</button>
+            <p style="margin-top:12px;font-size:12px;color:var(--muted);">需在 Supabase 中将该用户设为管理员</p>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // 管理后台 JavaScript
+        // ============================================================
+        let sb = null;
+        let currentUser = null;
+
+        function toast(msg) {
+            const el = document.getElementById('toast');
+            el.textContent = msg;
+            el.classList.add('show');
+            setTimeout(() => el.classList.remove('show'), 2500);
+        }
+
+        // 读取配置
+        async function initSupabase() {
+            // 尝试从父目录的 config.js 读取配置
+            try {
+                const resp = await fetch('../config.js');
+                const text = await resp.text();
+                eval(text);
+                const config = window.APP_CONFIG;
+                if (config && config.supabase) {
+                    sb = supabase.createClient(config.supabase.url, config.supabase.anonKey, {
+                        auth: { storageKey: 'junshi-admin-auth' }
+                    });
+                    return true;
+                }
+            } catch(e) {}
+            // 手动输入
+            const url = prompt('请输入 Supabase URL:');
+            const key = prompt('请输入 Supabase anon key:');
+            if (url && key) {
+                sb = supabase.createClient(url, key, { auth: { storageKey: 'junshi-admin-auth' } });
+                return true;
+            }
+            return false;
+        }
+
+        // 检查管理员权限（通过自定义声明或 profiles 表）
+        async function isAdmin(userId) {
+            if (!sb) return false;
+            try {
+                const { data, error } = await sb
+                    .from('profiles')
+                    .select('is_admin')
+                    .eq('id', userId)
+                    .single();
+                if (error) return false;
+                return data.is_admin === true;
+            } catch(e) {
+                // 如果没有 is_admin 字段，通过 Supabase 的 raw_user_meta_data 判断
+                const { data: { user } } = await sb.auth.getUser();
+                return user?.user_metadata?.is_admin === true;
+            }
+        }
+
+        // 获取统计数据
+        async function loadStats() {
+            if (!sb) return;
+            const { data: users } = await sb.from('profiles').select('id, is_vip, usage_count');
+            const { data: codes } = await sb.from('activation_codes').select('id, used');
+            const { count: msgCount } = await sb.from('chat_messages').select('*', { count: 'exact', head: true });
+
+            if (users) {
+                document.getElementById('stat-users').textContent = users.length;
+                document.getElementById('stat-vip').textContent = users.filter(u => u.is_vip).length;
+                document.getElementById('stat-calls').textContent = users.reduce((s, u) => s + (u.usage_count || 0), 0);
+            }
+            if (codes) {
+                document.getElementById('stat-codes-used').textContent = codes.filter(c => c.used).length + '/' + codes.length;
+            }
+        }
+
+        // 加载用户列表
+        async function loadUsers() {
+            if (!sb) return;
+            const { data, error } = await sb.from('profiles').select('*').order('created_at', { ascending: false });
+            if (error || !data) {
+                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);">加载失败</td></tr>';
+                return;
+            }
+            document.getElementById('user-count').textContent = '共 ' + data.length + ' 人';
+            document.getElementById('users-tbody').innerHTML = data.map(u => {
+                let badge = '<span class="badge badge-free">免费</span>';
+                if (u.is_vip) {
+                    if (u.vip_expires_at && new Date(u.vip_expires_at) < new Date()) {
+                        badge = '<span class="badge badge-expired">VIP 已过期</span>';
+                    } else {
+                        badge = '<span class="badge badge-vip">VIP</span>';
+                    }
+                }
+                return `<tr>
+                    <td class="code-display">${(u.id || '').slice(0, 8)}...</td>
+                    <td>${u.email || u.phone || '-'}</td>
+                    <td>${u.nickname || '-'}</td>
+                    <td>${badge}</td>
+                    <td>${u.usage_count || 0}</td>
+                    <td>${u.vip_expires_at ? new Date(u.vip_expires_at).toLocaleDateString() : '-'}</td>
+                    <td class="code-display">${u.device_id ? u.device_id.slice(0,10) + '...' : '-'}</td>
+                    <td>${new Date(u.created_at).toLocaleDateString()}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // 加载激活码
+        async function loadCodes() {
+            if (!sb) return;
+            const { data, error } = await sb.from('activation_codes').select('*').order('created_at', { ascending: false });
+            if (error || !data) {
+                document.getElementById('codes-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">加载失败</td></tr>';
+                return;
+            }
+            document.getElementById('codes-count').textContent = '共 ' + data.length + ' 个';
+            document.getElementById('codes-tbody').innerHTML = data.map(c => {
+                const badge = c.used
+                    ? '<span class="badge badge-expired">已使用</span>'
+                    : '<span class="badge badge-free">未使用</span>';
+                return `<tr>
+                    <td class="code-display">${c.code}</td>
+                    <td>${badge}</td>
+                    <td>${c.used_by ? c.used_by.slice(0,8) + '...' : '-'}</td>
+                    <td>${c.used_at ? new Date(c.used_at).toLocaleString() : '-'}</td>
+                    <td>${new Date(c.created_at).toLocaleString()}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // 生成激活码
+        async function generateCodes(count) {
+            if (!sb) return;
+            const codes = [];
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+            for (let i = 0; i < count; i++) {
+                let code = '';
+                for (let j = 0; j < 16; j++) {
+                    code += chars[Math.floor(Math.random() * chars.length)];
+                    if (j % 4 === 3 && j < 15) code += '-';
+                }
+                codes.push({ code });
+            }
+            const { error } = await sb.from('activation_codes').insert(codes);
+            if (error) {
+                toast('生成失败：' + error.message);
+            } else {
+                toast('成功生成 ' + count + ' 个激活码');
+                loadCodes();
+                loadStats();
+            }
+        }
+
+        // 导出激活码 CSV
+        function exportCodesCSV() {
+            const rows = document.querySelectorAll('#codes-tbody tr');
+            let csv = '激活码,状态,使用用户,使用时间,创建时间\n';
+            rows.forEach(tr => {
+                const tds = tr.querySelectorAll('td');
+                if (tds.length >= 5) {
+                    const row = [
+                        tds[0].textContent,
+                        tds[1].textContent.includes('未使用') ? '未使用' : '已使用',
+                        tds[2].textContent,
+                        tds[3].textContent,
+                        tds[4].textContent
+                    ];
+                    csv += row.join(',') + '\n';
+                }
+            });
+            const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = '军师-激活码-' + new Date().toISOString().slice(0,10) + '.csv';
+            a.click();
+            URL.revokeObjectURL(url);
+            toast('导出成功');
+        }
+
+        // ============================================================
+        // 事件绑定
+        // ============================================================
+        document.addEventListener('DOMContentLoaded', async () => {
+            const ok = await initSupabase();
+            if (!ok) {
+                document.getElementById('login-status').textContent = '配置失败';
+                return;
+            }
+
+            // 检查会话
+            const { data: { session } } = await sb.auth.getSession();
+            if (session) {
+                const admin = await isAdmin(session.user.id);
+                if (admin) {
+                    currentUser = session.user;
+                    document.getElementById('login-area').style.display = 'none';
+                    document.getElementById('admin-container').style.display = 'block';
+                    document.getElementById('login-status').textContent = '管理员：' + session.user.email;
+                    document.getElementById('login-admin-btn').style.display = 'none';
+                    document.getElementById('logout-admin-btn').style.display = 'inline-block';
+                    loadStats();
+                    loadUsers();
+                    loadCodes();
+                }
+            }
+
+            // 管理员登录
+            document.getElementById('admin-login-btn').addEventListener('click', async () => {
+                const email = document.getElementById('admin-email').value.trim();
+                const password = document.getElementById('admin-password').value;
+                if (!email || !password) { toast('请填写邮箱和密码'); return; }
+                const { data, error } = await sb.auth.signInWithPassword({ email, password });
+                if (error) { toast('登录失败：' + error.message); return; }
+                const admin = await isAdmin(data.user.id);
+                if (!admin) {
+                    toast('该用户不是管理员');
+                    await sb.auth.signOut();
+                    return;
+                }
+                currentUser = data.user;
+                document.getElementById('login-area').style.display = 'none';
+                document.getElementById('admin-container').style.display = 'block';
+                document.getElementById('login-status').textContent = '管理员：' + data.user.email;
+                document.getElementById('login-admin-btn').style.display = 'none';
+                document.getElementById('logout-admin-btn').style.display = 'inline-block';
+                loadStats();
+                loadUsers();
+                loadCodes();
+            });
+
+            // 退出
+            document.getElementById('logout-admin-btn').addEventListener('click', async () => {
+                await sb.auth.signOut();
+                currentUser = null;
+                document.getElementById('login-area').style.display = 'block';
+                document.getElementById('admin-container').style.display = 'none';
+                document.getElementById('login-status').textContent = '未登录';
+                document.getElementById('login-admin-btn').style.display = 'inline-block';
+                document.getElementById('logout-admin-btn').style.display = 'none';
+            });
+
+            // Tab 切换
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.addEventListener('click', () => {
+                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                    tab.classList.add('active');
+                    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+                });
+            });
+
+            // 生成激活码
+            document.getElementById('gen-codes-btn').addEventListener('click', () => {
+                const count = parseInt(document.getElementById('gen-count').value) || 10;
+                if (count > 200) { toast('单次最多生成 200 个'); return; }
+                if (!confirm('确定生成 ' + count + ' 个激活码？')) return;
+                generateCodes(count);
+            });
+
+            // 导出 CSV
+            document.getElementById('export-codes-btn').addEventListener('click', exportCodesCSV);
+        });
+    </script>
+</body>
+</html>

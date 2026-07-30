@@ -1,0 +1,875 @@
+/* ============================================================
+   军师 - 恋爱聊天指导工具 · 样式表
+   微信绿白风格 · 移动优先
+   ============================================================ */
+
+:root {
+    --wechat-green: #07C160;
+    --wechat-green-dark: #06AD56;
+    --wechat-green-light: #D4F4E2;
+    --wechat-bg: #EDEDED;
+    --wechat-header: #2E3238;
+    --wechat-header-light: #EDEDED;
+    --white: #FFFFFF;
+    --text-primary: #191919;
+    --text-secondary: #666666;
+    --text-muted: #999999;
+    --border-color: #E6E6E6;
+    --danger: #E53935;
+    --shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+    --radius: 8px;
+    --radius-lg: 16px;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Reset */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+    font-size: 16px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    background: var(--wechat-bg);
+    overflow: hidden;
+    user-select: none;
+}
+
+/* ============================================================
+   通用组件
+   ============================================================ */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 24px;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-decoration: none;
+    outline: none;
+}
+
+.btn:active {
+    transform: scale(0.97);
+}
+
+.btn-primary {
+    background: var(--wechat-green);
+    color: var(--white);
+}
+
+.btn-primary:active {
+    background: var(--wechat-green-dark);
+}
+
+.btn-block {
+    display: flex;
+    width: 100%;
+}
+
+.btn-danger {
+    background: var(--danger);
+    color: var(--white);
+}
+
+.btn-outline {
+    background: transparent;
+    border: 1.5px solid var(--wechat-green);
+    color: var(--wechat-green);
+}
+
+.btn-sm {
+    padding: 6px 14px;
+    font-size: 13px;
+    border-radius: 6px;
+}
+
+.input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1.5px solid var(--border-color);
+    border-radius: var(--radius);
+    font-size: 16px;
+    outline: none;
+    transition: border-color 0.2s;
+    background: var(--white);
+    color: var(--text-primary);
+}
+
+.input:focus {
+    border-color: var(--wechat-green);
+}
+
+/* Toast 提示 */
+.toast {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) scale(0.8);
+    background: rgba(0, 0, 0, 0.75);
+    color: var(--white);
+    padding: 12px 24px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    z-index: 9999;
+    opacity: 0;
+    transition: all 0.3s ease;
+    pointer-events: none;
+    text-align: center;
+    max-width: 80%;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+}
+
+/* ============================================================
+   页面容器
+   ============================================================ */
+.page {
+    display: none;
+    height: 100%;
+    flex-direction: column;
+    background: var(--white);
+    position: relative;
+}
+
+.page.active {
+    display: flex;
+}
+
+/* ============================================================
+   登录 / 注册页 (#page-auth)
+   ============================================================ */
+#page-auth {
+    background: var(--white);
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
+}
+
+.auth-container {
+    width: 100%;
+    max-width: 360px;
+}
+
+.auth-logo {
+    text-align: center;
+    margin-bottom: 40px;
+}
+
+.auth-logo .icon {
+    width: 80px;
+    height: 80px;
+    background: var(--wechat-green);
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    font-size: 40px;
+    color: var(--white);
+    box-shadow: 0 8px 24px rgba(7, 193, 96, 0.3);
+}
+
+.auth-logo h1 {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.auth-logo p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.auth-tabs {
+    display: flex;
+    margin-bottom: 24px;
+    border-bottom: 2px solid var(--border-color);
+}
+
+.auth-tab {
+    flex: 1;
+    text-align: center;
+    padding: 12px 0;
+    font-size: 15px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all 0.2s;
+}
+
+.auth-tab.active {
+    color: var(--wechat-green);
+    border-bottom-color: var(--wechat-green);
+}
+
+.auth-form {
+    display: none;
+}
+
+.auth-form.active {
+    display: block;
+}
+
+.auth-form .input {
+    margin-bottom: 14px;
+}
+
+.auth-form .btn {
+    margin-top: 8px;
+}
+
+.auth-divider {
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    margin: 16px 0;
+    position: relative;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+    content: '';
+    display: inline-block;
+    width: 60px;
+    height: 1px;
+    background: var(--border-color);
+    vertical-align: middle;
+    margin: 0 10px;
+}
+
+.auth-extra {
+    text-align: center;
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 16px;
+}
+
+.auth-extra a {
+    color: var(--wechat-green);
+    text-decoration: none;
+}
+
+/* ============================================================
+   好友列表页 (#page-friends)
+   ============================================================ */
+#page-friends {
+    background: var(--white);
+}
+
+.friends-header {
+    background: var(--wechat-header);
+    color: var(--white);
+    padding: 48px 16px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.friends-header h1 {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.friends-header .status-badge {
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.2);
+    padding: 3px 10px;
+    border-radius: 12px;
+}
+
+.friends-list {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.friend-item {
+    display: flex;
+    align-items: center;
+    padding: 14px 16px;
+    border-bottom: 1px solid #F5F5F5;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.friend-item:active {
+    background: #F0F0F0;
+}
+
+.friend-avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: var(--white);
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.friend-info {
+    flex: 1;
+    margin-left: 12px;
+    min-width: 0;
+}
+
+.friend-name {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-preview {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.friend-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    margin-left: 8px;
+    align-self: flex-start;
+    padding-top: 2px;
+}
+
+/* 空状态 */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    padding: 40px;
+}
+
+.empty-state .empty-icon {
+    font-size: 64px;
+    margin-bottom: 16px;
+    opacity: 0.5;
+}
+
+.empty-state p {
+    font-size: 14px;
+    text-align: center;
+    line-height: 1.8;
+}
+
+/* 新建好友浮动按钮 */
+.fab {
+    position: fixed;
+    bottom: 24px;
+    right: 20px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--wechat-green);
+    color: var(--white);
+    border: none;
+    font-size: 28px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(7, 193, 96, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    z-index: 10;
+}
+
+.fab:active {
+    transform: scale(0.92);
+    box-shadow: 0 2px 8px rgba(7, 193, 96, 0.3);
+}
+
+/* ============================================================
+   聊天窗口页 (#page-chat)
+   ============================================================ */
+#page-chat {
+    background: var(--wechat-bg);
+}
+
+.chat-header {
+    background: var(--wechat-header);
+    color: var(--white);
+    padding: 44px 16px 10px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.chat-back {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 20px;
+    margin-right: 8px;
+    border-radius: 50%;
+    transition: background 0.2s;
+}
+
+.chat-back:active {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.chat-header-title {
+    flex: 1;
+    font-size: 17px;
+    font-weight: 600;
+    text-align: center;
+    margin-right: 32px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 聊天消息区域 */
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    -webkit-overflow-scrolling: touch;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.chat-messages .loading-dots {
+    align-self: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.chat-messages .loading-dots span {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    animation: dotPulse 1.4s infinite ease-in-out both;
+}
+
+.chat-messages .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+.chat-messages .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+.chat-messages .loading-dots span:nth-child(3) { animation-delay: 0s; }
+
+@keyframes dotPulse {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+}
+
+/* 聊天气泡 */
+.message {
+    max-width: 85%;
+    display: flex;
+    flex-direction: column;
+    animation: msgIn 0.25s ease-out;
+}
+
+@keyframes msgIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.message.user {
+    align-self: flex-end;
+}
+
+.message.assistant {
+    align-self: flex-start;
+}
+
+.message-content {
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 15px;
+    line-height: 1.6;
+    word-break: break-word;
+    position: relative;
+}
+
+.message.user .message-content {
+    background: var(--wechat-green-light);
+    color: var(--text-primary);
+    border-bottom-right-radius: 2px;
+}
+
+.message.assistant .message-content {
+    background: var(--white);
+    color: var(--text-primary);
+    border-bottom-left-radius: 2px;
+}
+
+.message-time {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+    padding: 0 4px;
+}
+
+.message.user .message-time {
+    text-align: right;
+}
+
+/* 回复的复制按钮 */
+.message-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--wechat-green);
+    cursor: pointer;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border: 1px solid var(--wechat-green);
+    border-radius: 4px;
+    background: transparent;
+    transition: all 0.2s;
+}
+
+.message-copy-btn:active {
+    background: var(--wechat-green);
+    color: var(--white);
+}
+
+.message.assistant .message-footer {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+/* 聊天输入区 */
+.chat-input-area {
+    background: var(--white);
+    padding: 10px 12px;
+    padding-bottom: calc(10px + var(--safe-bottom));
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    border-top: 1px solid var(--border-color);
+    flex-shrink: 0;
+}
+
+.chat-input {
+    flex: 1;
+    border: none;
+    outline: none;
+    font-size: 16px;
+    padding: 8px 0;
+    max-height: 100px;
+    resize: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: inherit;
+    line-height: 1.5;
+}
+
+.chat-input::placeholder {
+    color: var(--text-muted);
+}
+
+.chat-paste-btn {
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: #F5F5F5;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 18px;
+    color: var(--text-secondary);
+    flex-shrink: 0;
+    transition: background 0.2s;
+}
+
+.chat-paste-btn:active {
+    background: #E0E0E0;
+}
+
+.chat-send-btn {
+    padding: 8px 20px;
+    background: var(--wechat-green);
+    color: var(--white);
+    border: none;
+    border-radius: 6px;
+    font-size: 15px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.2s;
+}
+
+.chat-send-btn:active {
+    background: var(--wechat-green-dark);
+}
+
+.chat-send-btn:disabled {
+    background: #CCC;
+    cursor: not-allowed;
+}
+
+/* ============================================================
+   新建好友弹窗
+   ============================================================ */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+}
+
+.modal-overlay.active {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--white);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    width: 100%;
+    max-width: 340px;
+    animation: modalIn 0.25s ease-out;
+}
+
+@keyframes modalIn {
+    from { opacity: 0; transform: scale(0.9) translateY(20px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    text-align: center;
+}
+
+.modal-body {
+    margin-bottom: 16px;
+}
+
+.modal-footer {
+    display: flex;
+    gap: 12px;
+}
+
+.modal-footer .btn {
+    flex: 1;
+}
+
+/* ============================================================
+   付费弹窗
+   ============================================================ */
+.paywall-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.paywall-overlay.active {
+    display: flex;
+}
+
+.paywall-card {
+    background: var(--white);
+    border-radius: var(--radius-lg);
+    padding: 28px 24px;
+    width: 100%;
+    max-width: 340px;
+    text-align: center;
+    animation: modalIn 0.3s ease-out;
+}
+
+.paywall-icon {
+    width: 64px;
+    height: 64px;
+    background: var(--wechat-green);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    font-size: 32px;
+    color: var(--white);
+}
+
+.paywall-title {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.paywall-subtitle {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+}
+
+.paywall-price {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--wechat-green);
+    margin-bottom: 4px;
+}
+
+.paywall-price small {
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--text-secondary);
+}
+
+.paywall-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-bottom: 20px;
+    line-height: 1.6;
+}
+
+.paywall-divider {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 16px 0;
+}
+
+.paywall-activation {
+    margin-top: 16px;
+}
+
+.paywall-activation .input {
+    margin-bottom: 10px;
+    text-align: center;
+    letter-spacing: 2px;
+    font-size: 15px;
+    text-transform: uppercase;
+}
+
+.paywall-buy-link {
+    display: inline-block;
+    color: var(--wechat-green);
+    font-size: 13px;
+    text-decoration: none;
+    margin-top: 8px;
+}
+
+.paywall-buy-link:active {
+    text-decoration: underline;
+}
+
+.paywall-close {
+    margin-top: 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    text-decoration: underline;
+}
+
+/* ============================================================
+   Toast / 加载指示器
+   ============================================================ */
+.loading-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255,255,255,0.8);
+    z-index: 300;
+    align-items: center;
+    justify-content: center;
+}
+
+.loading-overlay.active {
+    display: flex;
+}
+
+.loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border-color);
+    border-top-color: var(--wechat-green);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+   响应式调整
+   ============================================================ */
+@media (min-width: 480px) {
+    body {
+        max-width: 480px;
+        margin: 0 auto;
+        border-left: 1px solid var(--border-color);
+        border-right: 1px solid var(--border-color);
+        box-shadow: 0 0 20px rgba(0,0,0,0.08);
+    }
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+    width: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #CCC;
+    border-radius: 4px;
+}
