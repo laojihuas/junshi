@@ -57,7 +57,11 @@ Deno.serve(async (req) => {
 
   try {
     // [v3] history: 本窗口对话历史数组（[{role, content}]），可为空
-    //       system_prompt: 后台统一提示词，前端用户不可见，可为空
+    //       system_prompt: 前端可选的统一提示词（用户不可见）
+    // [v3.1] 统一提示词服务端兜底：无论前端是否传 system_prompt，
+    //        服务端都会保证拿到"最新的统一提示词"——
+    //        前端传了 → 使用前端值（实时获取，与后台一致）
+    //        前端没传（旧版本前端）→ 服务端自动从 app_config 读取注入
     const { query, knowledge_base_id, history, system_prompt } = await req.json();
     const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
 
@@ -70,6 +74,7 @@ Deno.serve(async (req) => {
     const token = authHeader.replace('Bearer ', '');
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
     const authResp = await fetch(`${supabaseUrl}/auth/v1/user`, {
       headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey }
@@ -78,6 +83,12 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: '认证失败' }), { headers, status: 401 });
     }
     const user = await authResp.json();
+
+    // [v3.1] 统一提示词兜底：前端未提供时，服务端读取 app_config 注入
+    let effectivePrompt = (typeof system_prompt === 'string') ? system_prompt : '';
+    if (!effectivePrompt.trim()) {
+      effectivePrompt = await fetchSystemPrompt(supabaseUrl, serviceRoleKey);
+    }
 
     // ---- 查询 profile ----
     const profileResp = await fetch(
@@ -125,7 +136,7 @@ Deno.serve(async (req) => {
 
     if (imaKey && imaClientId && kbId) {
       try {
-        reply = await buildKnowledgeReply(imaClientId, imaKey, kbId, query.trim(), history, system_prompt);
+        reply = await buildKnowledgeReply(imaClientId, imaKey, kbId, query.trim(), history, effectivePrompt);
         hitKnowledge = reply !== '';
       } catch (e) {
         console.error('IMA error:', e.message);
@@ -162,7 +173,7 @@ Deno.serve(async (req) => {
       // [v3 调试] 回显本次请求携带的上下文，用于确认
       // system_prompt / history 是否真正到达 ima-proxy（前端不可见提示词内容，仅回显长度）
       _debug: {
-        system_prompt_len: (system_prompt || '').length,
+        system_prompt_len: (effectivePrompt || '').length,
         history_len: Array.isArray(history) ? history.length : 0,
         kb_hits: hitKnowledge,
       },
@@ -173,6 +184,29 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ error: '服务器错误' }), { headers, status: 500 });
   }
 });
+
+// ============================================================
+// [v3.1] 从 app_config 读取统一提示词（service_role，绕过 RLS）
+// 供"前端未传 system_prompt"时服务端兜底注入。
+// 读取失败返回空字符串（不影响主流程）。
+// ============================================================
+async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): Promise<string> {
+  try {
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt`,
+      { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+    );
+    if (!resp.ok) {
+      console.warn('fetchSystemPrompt failed:', resp.status);
+      return '';
+    }
+    const rows = await resp.json();
+    return (rows?.[0]?.system_prompt) || '';
+  } catch (e) {
+    console.warn('fetchSystemPrompt error:', e.message);
+    return '';
+  }
+}
 
 // ============================================================
 // 核心：基于知识库构建回复
