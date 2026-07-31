@@ -134,23 +134,57 @@ Deno.serve(async (req) => {
     let reply = '';
     let hitKnowledge = false;
 
+    // [v4] 多级回复生成：
+    //   1) 知识库参考：search_knowledge → 0命中时浏览回退（标题匹配），拉取原文
+    //   2) LLM 生成：system_prompt(统一提示词) + history(会话上下文) + query(当前内容)
+    //       + 知识库参考资料，一起发给 LLM，得到专业答复
+    //   3) LLM 未配置/失败 → 知识库内容拼装
+    //   4) 全部失败 → 通用建议
+    // 多会话隔离：history 由前端按"窗口×好友"从 sessionStorage 传递，
+    // ima-proxy 本身无状态，天然实现多用户多会话互不干扰。
+
+    let kbItems: any[] = [];
+    let kbFallback = false;
     if (imaKey && imaClientId && kbId) {
       try {
-        reply = await buildKnowledgeReply(imaClientId, imaKey, kbId, query.trim(), history, effectivePrompt);
-        hitKnowledge = reply !== '';
+        // 1. 检索知识库（search → 浏览回退），前 3 条拉取原文
+        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, query.trim(), history, effectivePrompt);
+        if (kbItems.length === 0) {
+          const browseItems = await browseKbByTitle(imaClientId, imaKey, kbId, query.trim());
+          if (browseItems.length > 0) {
+            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, 3));
+            kbFallback = true;
+          }
+        }
+        hitKnowledge = kbItems.length > 0;
       } catch (e) {
-        console.error('IMA error:', e.message);
+        console.error('知识库检索失败:', e.message);
       }
     }
 
-    // ---- 降级回复（未命中知识库 / 凭证缺失）----
+    // 2. LLM 生成专业答复（提示词 + 上下文 + 当前内容 + 知识库参考）
+    const llmKey = Deno.env.get('LLM_API_KEY') || '';
+    if (llmKey) {
+      try {
+        reply = await buildLlmReply(llmKey, effectivePrompt, history, query.trim(), kbItems, kbFallback);
+      } catch (e) {
+        console.error('LLM error:', e.message);
+      }
+    }
+
+    // 3. LLM 未配置/失败 → 知识库拼装（原有行为）
+    if (!reply && kbItems.length > 0) {
+      reply = assembleKbReply(kbItems, kbFallback);
+    }
+
+    // 4. 降级回复（LLM 与知识库均不可用）
     if (!reply) {
       const fallbacks = [
         `关于"${query}"，建议你：\n1️⃣ 先认可对方的感受\n2️⃣ 表达你的真实想法\n3️⃣ 用开放性问题引导对话`,
         `针对"${query}"，可以这样回：\n"嗯嗯，我明白你的意思。有空可以多聊聊~"`,
         `回应"${query}"的思路：先表示理解 → 表达看法 → 反问对方。三步法最自然。`,
       ];
-      const reason = !(imaKey && imaClientId)
+      const reason = !(imaKey && imaClientId) && !llmKey
         ? '（知识库服务未配置，以下为通用建议）'
         : '（未检索到知识库相关内容，以下为通用建议）';
       reply = reason + '\n\n' + fallbacks[Math.floor(Math.random() * fallbacks.length)];
@@ -209,44 +243,36 @@ async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): P
 }
 
 // ============================================================
-// 核心：基于知识库构建回复
-// [v3] history / system_prompt 透传给 IMA（对话上下文 + 统一提示词）
-// [v3.2] search_knowledge 0 命中时回退：递归浏览知识库按标题匹配关键词，
-//        缓解 IMA 中文检索偶发异常导致的"知识库掉线"问题
+// [v4] 检索知识库并拉取前 3 条原文，返回 [{media_id,title,content}]
+// search_knowledge 优先；携带 history/system_prompt 透传（容错回退）
 // ============================================================
-async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: string, query: string, history?: any[], systemPrompt?: string): Promise<string> {
-  // 1. 提取搜索关键词
+async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, query: string, history?: any[], systemPrompt?: string): Promise<any[]> {
   const keywords = extractKeywords(query);
+  const items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
+  if (items.length === 0) return [];
+  return fetchItemsContent(clientId, apiKey, items.slice(0, 3));
+}
 
-  // 2. 搜索（整句 + 关键词，合并去重）
-  let items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
-
-  // 2.1 [v3.2] 回退：检索 0 命中时，递归浏览知识库按标题匹配
-  let usedFallbackBrowse = false;
-  if (items.length === 0) {
-    const browseItems = await browseKbByTitle(clientId, apiKey, kbId, query);
-    if (browseItems.length > 0) {
-      items = browseItems;
-      usedFallbackBrowse = true;
-    }
-  }
-
-  if (items.length === 0) return '';
-
-  // 3. 对前 3 个 markdown 文档获取原文
-  const topItems = items.slice(0, 3);
-  const withContent = await Promise.all(
-    topItems.map(async (item) => ({
+// ============================================================
+// [v4] 对条目批量拉取 markdown 原文
+// ============================================================
+async function fetchItemsContent(clientId: string, apiKey: string, items: any[]): Promise<any[]> {
+  return Promise.all(
+    items.map(async (item) => ({
       ...item,
       content: await fetchDocContent(clientId, apiKey, item),
     }))
   );
+}
 
-  // 4. 组装回复
+// ============================================================
+// [v4] 知识库内容拼装回复（无 LLM 时的降级路径，原有行为）
+// ============================================================
+function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
   const lines: string[] = [usedFallbackBrowse
     ? '（检索服务异常，已按标题匹配到知识库相关资料，给你参考：）'
     : '根据知识库的资料，给你参考：', ''];
-  withContent.forEach((item, i) => {
+  items.forEach((item, i) => {
     lines.push(`【建议 ${i + 1}】${item.title}`);
     const summary = item.content || '';
     if (summary) {
@@ -257,8 +283,83 @@ async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: strin
     lines.push('');
   });
   lines.push('结合实际情况灵活回应。');
-
   return lines.join('\n');
+}
+
+// ============================================================
+// [v4] LLM 生成专业答复 —— 核心实现
+// 将「统一提示词 + 会话上下文(history) + 当前内容(query) +
+// 知识库参考资料」一起发送给 LLM（OpenAI 兼容接口），
+// 得到真正基于提示词与上下文的专业回复。
+//
+// 多会话隔离：messages 中的 history 来自各窗口 sessionStorage，
+// 每次请求独立组装，ima-proxy 无状态 → 多用户多会话互不干扰。
+//
+// 环境变量：
+//   LLM_API_KEY  必填（腾讯混元 / DeepSeek / OpenAI 等 API Key）
+//   LLM_BASE_URL 默认 https://api.hunyuan.cloud.tencent.com/v1
+//   LLM_MODEL    默认 hunyuan-lite（免费额度）
+// ============================================================
+async function buildLlmReply(
+  llmKey: string,
+  systemPrompt: string,
+  history: any[],
+  query: string,
+  kbItems: any[],
+  kbFallback: boolean
+): Promise<string> {
+  const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.hunyuan.cloud.tencent.com/v1';
+  const llmModel = Deno.env.get('LLM_MODEL') || 'hunyuan-lite';
+
+  // 组装 system 提示词：统一提示词 + 知识库参考资料
+  let systemContent = systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。';
+  if (kbItems.length > 0) {
+    const kbText = kbItems
+      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${item.content || ''}`)
+      .join('\n\n');
+    systemContent += `\n\n以下是从知识库检索到的参考资料，回答时优先参考这些资料的内容和风格：\n${kbText}`;
+    if (kbFallback) {
+      systemContent += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
+    }
+  }
+
+  // 组装 messages：system + 会话上下文 history + 当前问题
+  const messages: any[] = [{ role: 'system', content: systemContent }];
+  if (Array.isArray(history) && history.length > 0) {
+    // 只保留 role 合法的历史，且截取最近 20 条控制上下文长度
+    const valid = history
+      .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string')
+      .slice(-20)
+      .map((h) => ({ role: h.role, content: h.content }));
+    messages.push(...valid);
+  }
+  messages.push({ role: 'user', content: query });
+
+  const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${llmKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: llmModel,
+      messages,
+      temperature: 0.7,
+      max_tokens: 800,
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error('LLM 返回内容为空');
+  }
+  return content.trim();
 }
 
 // ============================================================
