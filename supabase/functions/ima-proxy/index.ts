@@ -14,6 +14,13 @@
 //   POST https://ima.qq.com/openapi/wiki/v1/get_media_info
 //   Headers: ima-openapi-clientid, ima-openapi-apikey
 //
+// [v3 新增] 多窗口会话 + 统一提示词支持：
+//   请求体新增可选参数 history（对话历史数组 [{role, content}]）
+//   与 system_prompt（后台统一管理的系统提示词，前端用户不可见）。
+//   二者随 search_knowledge 请求体透传给 IMA；
+//   若 IMA 拒绝附加参数，自动回退为不带附加参数的原始调用，
+//   保证原有功能不受影响。
+//
 // 环境变量：
 //   IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES
 // ============================================================
@@ -49,7 +56,9 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { query, knowledge_base_id } = await req.json();
+    // [v3] history: 本窗口对话历史数组（[{role, content}]），可为空
+    //       system_prompt: 后台统一提示词，前端用户不可见，可为空
+    const { query, knowledge_base_id, history, system_prompt } = await req.json();
     const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
 
     if (!query || !query.trim()) {
@@ -116,7 +125,7 @@ Deno.serve(async (req) => {
 
     if (imaKey && imaClientId && kbId) {
       try {
-        reply = await buildKnowledgeReply(imaClientId, imaKey, kbId, query.trim());
+        reply = await buildKnowledgeReply(imaClientId, imaKey, kbId, query.trim(), history, system_prompt);
         hitKnowledge = reply !== '';
       } catch (e) {
         console.error('IMA error:', e.message);
@@ -160,13 +169,14 @@ Deno.serve(async (req) => {
 
 // ============================================================
 // 核心：基于知识库构建回复
+// [v3] history / system_prompt 透传给 IMA（对话上下文 + 统一提示词）
 // ============================================================
-async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: string, query: string): Promise<string> {
+async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: string, query: string, history?: any[], systemPrompt?: string): Promise<string> {
   // 1. 提取搜索关键词
   const keywords = extractKeywords(query);
 
   // 2. 搜索（整句 + 关键词，合并去重）
-  const items = await searchKb(clientId, apiKey, kbId, query, keywords);
+  const items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
   if (items.length === 0) return '';
 
   // 3. 对前 3 个 markdown 文档获取原文
@@ -230,8 +240,9 @@ function extractKeywords(query: string): string[] {
 // ============================================================
 // 搜索知识库：整句 + 关键词（bigram），合并去重
 // 每个关键词取前 2 条，总上限 6 条，控制耗时与噪声
+// [v3] 附加 history / system_prompt 透传；若 IMA 拒绝附加参数则回退
 // ============================================================
-async function searchKb(clientId: string, apiKey: string, kbId: string, query: string, keywords: string[]): Promise<any[]> {
+async function searchKb(clientId: string, apiKey: string, kbId: string, query: string, keywords: string[], history?: any[], systemPrompt?: string): Promise<any[]> {
   const results: any[] = [];
   const seen = new Set<string>();
 
@@ -241,11 +252,7 @@ async function searchKb(clientId: string, apiKey: string, kbId: string, query: s
     if (results.length >= 6) break;
 
     try {
-      const data = await callIma(clientId, apiKey, 'search_knowledge', {
-        query: q,
-        knowledge_base_id: kbId,
-        cursor: '',
-      });
+      const data = await callSearch(clientId, apiKey, kbId, q, history, systemPrompt);
       const list = (data?.info_list || []).slice(0, 2);
       for (const item of list) {
         // 跳过文件夹（media_type=99）与纯图片/音视频
@@ -262,6 +269,36 @@ async function searchKb(clientId: string, apiKey: string, kbId: string, query: s
   }
 
   return results;
+}
+
+// ============================================================
+// [v3] search_knowledge 统一调用（带 history/system_prompt 透传 + 容错回退）
+// 先尝试携带附加参数；若 IMA 返回错误（可能不支持这些参数），
+// 去掉附加参数重试一次，确保原有检索功能不受影响。
+// ============================================================
+async function callSearch(clientId: string, apiKey: string, kbId: string, q: string, history?: any[], systemPrompt?: string): Promise<any> {
+  const baseBody: any = { query: q, knowledge_base_id: kbId, cursor: '' };
+
+  // 仅当存在有效附加数据时才携带（历史数组需为 [{role, content}] 结构）
+  const hasHistory = Array.isArray(history) && history.length > 0 &&
+    history.every((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
+  const hasPrompt = typeof systemPrompt === 'string' && systemPrompt.trim() !== '';
+
+  if (!hasHistory && !hasPrompt) {
+    return callIma(clientId, apiKey, 'search_knowledge', baseBody);
+  }
+
+  const extraBody = { ...baseBody };
+  if (hasHistory) extraBody.history = history.slice(-20); // 最多携带最近 20 条
+  if (hasPrompt) extraBody.system_prompt = systemPrompt;
+
+  try {
+    return await callIma(clientId, apiKey, 'search_knowledge', extraBody);
+  } catch (e) {
+    // IMA 不接受附加参数 → 回退为原始调用（不抛错，保持兼容）
+    console.warn(`IMA search with extra params failed (${e.message}), retry without extra params`);
+    return callIma(clientId, apiKey, 'search_knowledge', baseBody);
+  }
 }
 
 // ============================================================

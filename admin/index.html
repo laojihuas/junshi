@@ -133,6 +133,23 @@
         .input-num { width: 80px; }
         .input-code { width: 200px; font-family: monospace; letter-spacing: 1px; }
 
+        /* 提示词管理 */
+        .prompt-textarea {
+            width: 100%;
+            min-height: 240px;
+            padding: 12px 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.7;
+            font-family: inherit;
+            outline: none;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        .prompt-textarea:focus { border-color: var(--green); }
+        .prompt-textarea:disabled { background: #FAFAFA; color: #999; }
+
         .code-display {
             font-family: monospace;
             background: #F5F5F5;
@@ -216,6 +233,7 @@
         <div class="tabs">
             <div class="tab active" data-tab="users">用户管理</div>
             <div class="tab" data-tab="codes">激活码管理</div>
+            <div class="tab" data-tab="prompt">提示词管理</div>
         </div>
 
         <!-- 用户管理 -->
@@ -286,6 +304,26 @@
                 <div style="margin-top:12px;display:flex;gap:8px;align-items:center;">
                     <button id="export-codes-btn" class="btn btn-outline">📥 导出为 CSV</button>
                     <span style="font-size:12px;color:var(--muted);">可导入发卡平台</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- 提示词管理（统一 system_prompt，对前端用户完全隐藏） -->
+        <div id="tab-prompt" class="tab-content">
+            <div class="card">
+                <div class="card-title">
+                    <span>统一提示词（system_prompt）</span>
+                    <span style="font-size:12px;color:var(--muted);">所有好友/窗口共用，修改后立即生效</span>
+                </div>
+                <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+                    该提示词作为 IMA 请求的 system_prompt 随每次对话发送，前端用户不可见。
+                    修改保存后，所有用户下次发送消息时立即使用新提示词。
+                </p>
+                <textarea id="prompt-textarea" class="prompt-textarea" placeholder="输入统一提示词内容..." spellcheck="false"></textarea>
+                <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+                    <button id="prompt-save-btn" class="btn btn-primary">保存提示词</button>
+                    <button id="prompt-reload-btn" class="btn btn-outline">重新加载</button>
+                    <span id="prompt-status" style="font-size:12px;color:var(--muted);"></span>
                 </div>
             </div>
         </div>
@@ -482,6 +520,93 @@
         }
 
         // ============================================================
+        // [统一提示词管理] 加载 / 保存 system_prompt
+        // 通过 Edge Function 访问（前端用户无此入口，提示词完全隐藏）
+        // ============================================================
+        function getPromptUrls() {
+            const cfg = window.APP_CONFIG || {};
+            const base = (cfg.supabase && cfg.supabase.url)
+                ? cfg.supabase.url.replace(/\/$/, '') + '/functions/v1'
+                : '';
+            return {
+                getUrl: (cfg.prompt && cfg.prompt.getUrl) || base + '/prompt-get',
+                updateUrl: (cfg.prompt && cfg.prompt.updateUrl) || base + '/prompt-update'
+            };
+        }
+
+        async function getSessionToken() {
+            if (!sb) return '';
+            const { data: { session } } = await sb.auth.getSession();
+            return session?.access_token || '';
+        }
+
+        // 加载当前统一提示词
+        async function loadPrompt() {
+            const { getUrl } = getPromptUrls();
+            const status = document.getElementById('prompt-status');
+            const textarea = document.getElementById('prompt-textarea');
+            textarea.disabled = true;
+            status.textContent = '加载中...';
+            try {
+                const resp = await fetch(getUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + (await getSessionToken())
+                    },
+                    body: '{}'
+                });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                textarea.value = data.system_prompt || '';
+                status.textContent = data.system_prompt
+                    ? '已加载（最后更新于后台数据库）'
+                    : '当前为空，可填写后保存';
+            } catch (e) {
+                console.error('加载提示词失败:', e);
+                status.textContent = '加载失败：请确认 prompt-get 函数已部署';
+            } finally {
+                textarea.disabled = false;
+            }
+        }
+
+        // 保存统一提示词（仅管理员，由后台校验权限）
+        async function savePrompt() {
+            const { updateUrl } = getPromptUrls();
+            const textarea = document.getElementById('prompt-textarea');
+            const saveBtn = document.getElementById('prompt-save-btn');
+            const status = document.getElementById('prompt-status');
+            const systemPrompt = textarea.value;
+            if (!systemPrompt.trim()) {
+                if (!confirm('提示词为空，确定保存吗？')) return;
+            }
+            saveBtn.disabled = true;
+            status.textContent = '保存中...';
+            try {
+                const resp = await fetch(updateUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + (await getSessionToken())
+                    },
+                    body: JSON.stringify({ system_prompt: systemPrompt })
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.success) {
+                    throw new Error(data.error || 'HTTP ' + resp.status);
+                }
+                status.textContent = '✅ 已保存，所有用户下次发送消息时立即生效';
+                toast('提示词保存成功');
+            } catch (e) {
+                console.error('保存提示词失败:', e);
+                status.textContent = '保存失败：' + (e.message || '请检查 prompt-update 函数是否已部署');
+                toast('保存失败：' + (e.message || '未知错误'));
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        // ============================================================
         // 事件绑定
         // ============================================================
         document.addEventListener('DOMContentLoaded', async () => {
@@ -505,6 +630,7 @@
                     loadStats();
                     loadUsers();
                     loadCodes();
+                    loadPrompt();
                 }
             }
 
@@ -530,6 +656,7 @@
                 loadStats();
                 loadUsers();
                 loadCodes();
+                loadPrompt();
             });
 
             // 退出
@@ -563,6 +690,13 @@
 
             // 导出 CSV
             document.getElementById('export-codes-btn').addEventListener('click', exportCodesCSV);
+
+            // [统一提示词管理] 保存 / 重新加载
+            document.getElementById('prompt-save-btn').addEventListener('click', savePrompt);
+            document.getElementById('prompt-reload-btn').addEventListener('click', () => {
+                document.getElementById('prompt-textarea').value = '';
+                loadPrompt();
+            });
         });
     </script>
 </body>

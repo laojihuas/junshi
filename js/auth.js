@@ -114,6 +114,10 @@ const Auth = {
         await sb.auth.signOut();
         this.currentUser = null;
         this.currentProfile = null;
+        // [多窗口会话] 退出登录时清空当前窗口的会话数据
+        if (typeof WindowSession !== 'undefined') {
+            WindowSession.clear();
+        }
         App.navigate('auth');
     },
 

@@ -17,6 +17,15 @@ window.APP_CONFIG = {
         knowledgeBaseId: 'nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI='
     },
 
+    // [统一提示词管理] 后台提示词接口（Edge Function）
+    // 前端用户不可见提示词内容，仅在发送消息时实时获取并随请求发送
+    prompt: {
+        // 获取统一提示词（登录用户可调，前端每次发送消息前调用）
+        getUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/prompt-get',
+        // 更新统一提示词（仅管理员可调，管理后台使用）
+        updateUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/prompt-update'
+    },
+
     // 激活码相关
     activation: {
         verifyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/activate-code'

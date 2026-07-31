@@ -11,6 +11,10 @@ const App = {
         // 检查配置
         this._checkConfig();
 
+        // [多窗口会话] 初始化窗口级会话（生成/恢复窗口会话ID与对话历史）
+        // 必须最先执行：刷新保留会话，新开/复制标签页生成新会话
+        WindowSession.init();
+
         // 初始化 Supabase 客户端
         getSupabaseClient();
 

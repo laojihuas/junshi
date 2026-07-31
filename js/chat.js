@@ -26,6 +26,10 @@ const Chat = {
         this.currentFriendName = session.friend_name;
         document.getElementById('chat-title').textContent = session.friend_name;
 
+        // [多窗口会话] 记录当前窗口正在对话的好友，
+        // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
+        WindowSession.setActiveFriend(sessionId);
+
         // 加载消息
         this.messages = await DB.getMessages(sessionId);
         this.renderMessages();
@@ -128,6 +132,9 @@ const Chat = {
             this.renderMessages();
         }
 
+        // [多窗口会话] 将用户消息追加到本窗口（该好友）的对话历史
+        WindowSession.append(this.currentSessionId, 'user', text);
+
         // 2. 显示加载中
         const container = document.getElementById('chat-messages');
         const loadingEl = document.createElement('div');
@@ -139,7 +146,14 @@ const Chat = {
 
         // 3. 调用 IMA API
         try {
-            const reply = await this._callIMA(text);
+            // [统一提示词] 每次发送前实时获取后台最新的统一 system_prompt
+            //（提示词对前端用户完全隐藏：只作为请求体参数传递，不渲染、不存储）
+            const systemPrompt = await this._getSystemPrompt();
+
+            // [多窗口会话] 读取本窗口该好友的对话历史作为 AI 上下文
+            const history = WindowSession.getHistory(this.currentSessionId);
+
+            const reply = await this._callIMA(text, { history, system_prompt: systemPrompt });
             container.removeChild(loadingEl);
 
             if (reply) {
@@ -149,6 +163,9 @@ const Chat = {
                     this.messages.push(assistantMsg);
                     this.renderMessages();
                 }
+
+                // [多窗口会话] 将助手回复追加到本窗口（该好友）的对话历史
+                WindowSession.append(this.currentSessionId, 'assistant', reply);
 
                 // 记录使用次数
                 await this._incrementUsage();
@@ -235,7 +252,9 @@ const Chat = {
     },
 
     // 调用 IMA API
-    async _callIMA(query) {
+    // [多窗口会话] opts.history：本窗口的对话历史数组（[{role, content}]）
+    // [统一提示词] opts.system_prompt：后台统一管理的系统提示词（用户不可见）
+    async _callIMA(query, opts = {}) {
         const config = window.APP_CONFIG?.ima;
         if (!config || !config.proxyUrl) {
             // 降级：返回模拟回复（开发调试用）
@@ -243,16 +262,26 @@ const Chat = {
         }
 
         try {
+            const body = {
+                query: query,
+                knowledge_base_id: config.knowledgeBaseId
+            };
+            // 附带窗口对话历史（若存在）
+            if (opts.history && opts.history.length > 0) {
+                body.history = opts.history;
+            }
+            // 附带后台统一提示词（若获取成功）
+            if (opts.system_prompt) {
+                body.system_prompt = opts.system_prompt;
+            }
+
             const response = await fetch(config.proxyUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + (await this._getSessionToken())
                 },
-                body: JSON.stringify({
-                    query: query,
-                    knowledge_base_id: config.knowledgeBaseId
-                })
+                body: JSON.stringify(body)
             });
 
             if (!response.ok) {
@@ -266,6 +295,34 @@ const Chat = {
         } catch (e) {
             console.error('[军师] IMA API 调用失败，使用降级回复:', e);
             return this._mockReply(query);
+        }
+    },
+
+    // [统一提示词] 从后台获取当前统一的 system_prompt
+    // 每次发送消息时实时调用，保证管理员修改后立即对所有用户生效。
+    // 失败时返回空字符串（不阻塞对话，保持原有功能可用）。
+    async _getSystemPrompt() {
+        const config = window.APP_CONFIG?.prompt;
+        if (!config || !config.getUrl) return '';
+
+        try {
+            const response = await fetch(config.getUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + (await this._getSessionToken())
+                },
+                body: '{}'
+            });
+            if (!response.ok) {
+                console.warn('[军师] 获取统一提示词失败:', response.status);
+                return '';
+            }
+            const data = await response.json();
+            return data.system_prompt || '';
+        } catch (e) {
+            console.warn('[军师] 获取统一提示词异常（降级为空提示词）:', e);
+            return '';
         }
     },
 
