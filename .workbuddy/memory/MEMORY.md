@@ -45,3 +45,18 @@
   - Secrets: `POST https://api.supabase.com/v1/projects/{ref}/secrets`
   - 部署（云端打包）: `POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart/form-data（metadata JSON + file 源码），`/functions/{slug}/deploy` 是错误路径
   - **执行任意 SQL**: `POST /v1/projects/{ref}/database/query`，body `{"query":"..."}`，成功返回 201/空数组（无需进 Dashboard）
+
+## PWA 添加到桌面（v20260731-late2）
+
+- **4 道防打扰**（`js/install-prompt.js` 的 PWAInstall 对象）：
+  1. 已从桌面打开（`display-mode:standalone` / `navigator.standalone`）
+  2. 已安装成功（`appinstalled` → localStorage `pwa_installed=1` 永久）
+  3. 拒绝冷却（递增）：第 1 次 7 天 / 第 2 次 30 天 / 第 3 次起永久
+  4. 环境检查：必须已登录 + 在 friends 首页 + 浏览器支持
+- **触发点**：App.init() 登录成功路径 + 登录按钮 async 成功路径 → `PWAInstall.maybeShow()`（内部 `setTimeout 2000ms` + `_inflight` 防重复）
+- **Android Chrome**：`beforeinstallprompt` 拦截 → `deferredPrompt.prompt()` → `userChoice.outcome==='accepted'` 走 appinstalled 路径
+- **iOS Safari**：不支持，必须图文引导（分享按钮 → 添加到主屏幕），3 步教程
+- **Service Worker**（`sw.js`）：网络优先 + 失败回退缓存，**只缓存同源**（Supabase/IMA/DeepSeek 跨域不缓存，避免陈旧 API 响应）；`navigator.serviceWorker.register('sw.js')` 在 `'load'` 事件内执行
+- **图标生成**：Python managed venv + Pillow（`C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe`），字体 `C:\Windows\Fonts\simhei.ttf`；脚本放 `C:\Users\Administrator\AppData\Local\Temp\` 不入库
+- **帽子云静态托管**支持 PWA 完整特性（需 HTTPS + manifest.json + SW）
+- 文件：`manifest.json` / `sw.js` / `js/install-prompt.js` / `icons/{icon-192,icon-512,apple-touch-icon}.png`
