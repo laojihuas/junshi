@@ -27,8 +27,7 @@ const Friends = {
                 headerStatus.textContent = '👑 VIP · ' + expires;
                 headerStatus.style.background = 'rgba(255, 215, 0, 0.25)';
             } else {
-                const remaining = Math.max(0, (window.APP_CONFIG?.product?.freeTries || 50) - (p.usage_count || 0));
-                headerStatus.textContent = '免费剩余 ' + remaining + ' 次';
+                headerStatus.textContent = '免费用户';
                 headerStatus.style.background = 'rgba(255,255,255,0.2)';
             }
         }
