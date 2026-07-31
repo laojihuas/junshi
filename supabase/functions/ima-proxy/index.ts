@@ -211,13 +211,26 @@ async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): P
 // ============================================================
 // 核心：基于知识库构建回复
 // [v3] history / system_prompt 透传给 IMA（对话上下文 + 统一提示词）
+// [v3.2] search_knowledge 0 命中时回退：递归浏览知识库按标题匹配关键词，
+//        缓解 IMA 中文检索偶发异常导致的"知识库掉线"问题
 // ============================================================
 async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: string, query: string, history?: any[], systemPrompt?: string): Promise<string> {
   // 1. 提取搜索关键词
   const keywords = extractKeywords(query);
 
   // 2. 搜索（整句 + 关键词，合并去重）
-  const items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
+  let items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
+
+  // 2.1 [v3.2] 回退：检索 0 命中时，递归浏览知识库按标题匹配
+  let usedFallbackBrowse = false;
+  if (items.length === 0) {
+    const browseItems = await browseKbByTitle(clientId, apiKey, kbId, query);
+    if (browseItems.length > 0) {
+      items = browseItems;
+      usedFallbackBrowse = true;
+    }
+  }
+
   if (items.length === 0) return '';
 
   // 3. 对前 3 个 markdown 文档获取原文
@@ -230,7 +243,9 @@ async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: strin
   );
 
   // 4. 组装回复
-  const lines: string[] = ['根据知识库的资料，给你参考：', ''];
+  const lines: string[] = [usedFallbackBrowse
+    ? '（检索服务异常，已按标题匹配到知识库相关资料，给你参考：）'
+    : '根据知识库的资料，给你参考：', ''];
   withContent.forEach((item, i) => {
     lines.push(`【建议 ${i + 1}】${item.title}`);
     const summary = item.content || '';
@@ -244,6 +259,49 @@ async function buildKnowledgeReply(clientId: string, apiKey: string, kbId: strin
   lines.push('结合实际情况灵活回应。');
 
   return lines.join('\n');
+}
+
+// ============================================================
+// [v3.2] 回退浏览：递归遍历知识库（含子文件夹），收集所有条目，
+// 用 bigram 关键词匹配标题，返回最多 5 条。
+// 用于 search_knowledge 中文检索 0 命中的兜底。
+// ============================================================
+async function browseKbByTitle(clientId: string, apiKey: string, kbId: string, query: string): Promise<any[]> {
+  const keywords = extractKeywords(query);
+  if (!keywords.length) return [];
+
+  const all: any[] = [];
+
+  async function walk(folderId: string): Promise<void> {
+    try {
+      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 100 };
+      if (folderId) body.folder_id = folderId;
+      const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
+      const list = data?.knowledge_list || [];
+      for (const item of list) {
+        if (item.media_type === 99) {
+          // 文件夹：递归进入（用 folder_id 或 media_id 作为子文件夹 ID）
+          const fid = item.folder_id || item.media_id || '';
+          if (fid) await walk(fid);
+        } else {
+          all.push(item);
+        }
+      }
+    } catch (e) {
+      console.error(`browse folder "${folderId}" failed:`, e.message);
+    }
+  }
+
+  try { await walk(''); } catch (e) { console.error('browseKbByTitle error:', e.message); return []; }
+
+  // 标题匹配（关键词命中或整句包含）
+  const matches = all.filter((item: any) => {
+    if ([2, 6, 8, 10, 12, 16, 17, 18, 19].includes(item.media_type)) return false;
+    const title = item.title || '';
+    return keywords.some((k) => title.includes(k)) || (query.length > 1 && title.includes(query));
+  });
+
+  return matches.slice(0, 5);
 }
 
 // ============================================================
