@@ -27,6 +27,8 @@ const App = {
         if (loggedIn) {
             await Friends.load();
             this.navigate('friends');
+            // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导（4 道防打扰：standalone/已安装/冷却/未登录）
+            PWAInstall.maybeShow();
         } else {
             this.navigate('auth');
         }
@@ -79,6 +81,8 @@ const App = {
                 Utils.toast('登录成功');
                 await Friends.load();
                 App.navigate('friends');
+                // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导
+                PWAInstall.maybeShow();
             } else {
                 Utils.toast(result.message);
             }

@@ -1148,3 +1148,68 @@ textarea.input {
     background: #333;
     border-radius: 4px;
 }
+
+/* ============================================================
+   PWA 安装引导弹窗
+   ============================================================ */
+.pwa-install-card {
+    max-width: 340px;
+    text-align: center;
+}
+.pwa-install-icon {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 14px;
+}
+.pwa-install-icon img {
+    width: 72px;
+    height: 72px;
+    border-radius: 16px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.pwa-install-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 16px;
+}
+.pwa-install-steps {
+    text-align: left;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    margin-bottom: 4px;
+}
+.pwa-step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 13px;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+.pwa-step + .pwa-step {
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.pwa-step-num {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #2EE084, #06A559);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.pwa-step-text {
+    flex: 1;
+}
+.pwa-step-icon {
+    font-size: 16px;
+    opacity: 0.85;
+    flex-shrink: 0;
+}
