@@ -29,6 +29,21 @@ create policy "app_config_read"
 -- 写入策略：仅允许 service_role（不创建任何 anon/authenticated 写策略，
 -- 即普通用户无法通过 REST 直接修改提示词）
 
+-- 2.5 表级权限（关键！RLS 策略只管行级，表级 GRANT 缺失会报
+--     permission denied for table app_config）
+--     service_role：完整读写（prompt-get / prompt-update 使用）
+--     anon / authenticated：仅可读（纵深防御）
+grant select, insert, update, delete on public.app_config to service_role;
+grant select on public.app_config to anon, authenticated;
+
+-- 2.6 service_role 显式 RLS 全权策略（双保险，配合 BYPASSRLS）
+drop policy if exists "app_config_service_role_all" on public.app_config;
+create policy "app_config_service_role_all"
+  on public.app_config for all
+  to service_role
+  using (true)
+  with check (true);
+
 -- 3. 初始化默认提示词（恋爱聊天指导场景，可按需修改，
 --    之后在管理后台"提示词管理"中随时调整）
 insert into public.app_config (id, system_prompt)
