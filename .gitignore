@@ -1,1 +1,33 @@
+# 部署脚本（可能含一次性 access token，禁止入库）
 deploy*.js
+
+# ============================================================
+# 敏感文件保护（防止密钥/凭证误提交到公开仓库）
+# 本项目为公开仓库（github.com/laojihuas/junshi），严禁提交：
+#   - Supabase access token / service role key / PAT
+#   - IMA API Key / Client ID（只放 ~/.config/ima/ 或云端 secrets）
+#   - 任何 LLM API Key（DeepSeek / 混元 / OpenAI 等）
+# ============================================================
+
+# 环境变量与密钥文件
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.key
+*.secret
+*.token
+credentials*
+secrets*
+secret*.json
+
+# 临时与备份（可能被误命名后提交）
+*.tmp
+*.bak
+*.log
+
+# 注意：config.js 被 git 跟踪（帽子云部署依赖），
+# 其中仅含 Supabase anon key（公开发布 key，数据安全靠 RLS）
+# 与 IMA knowledgeBaseId / 函数 URL，不含任何密码级凭证。
+# 若未来 config.js 需要加入敏感配置，请改为从云端/环境变量读取。
