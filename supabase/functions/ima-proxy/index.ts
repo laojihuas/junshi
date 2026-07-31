@@ -159,6 +159,13 @@ Deno.serve(async (req) => {
       from_knowledge_base: hitKnowledge,
       usage_count: profile.usage_count + (vipValid ? 0 : 1),
       is_vip: vipValid,
+      // [v3 调试] 回显本次请求携带的上下文，用于确认
+      // system_prompt / history 是否真正到达 ima-proxy（前端不可见提示词内容，仅回显长度）
+      _debug: {
+        system_prompt_len: (system_prompt || '').length,
+        history_len: Array.isArray(history) ? history.length : 0,
+        kb_hits: hitKnowledge,
+      },
     }), { headers, status: 200 });
 
   } catch (error: any) {
