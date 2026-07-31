@@ -61,20 +61,32 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: '无权限：仅管理员可修改提示词' }), { headers, status: 403 });
     }
 
-    // ---- 更新统一提示词（app_config 单行表，id=1，upsert 保证行存在）----
-    const updateResp = await fetch(`${supabaseUrl}/rest/v1/app_config?id=eq.1`, {
-      method: 'PATCH',
-      headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=representation' },
+    // ---- 更新统一提示词（用 upsert POST + Prefer merge-duplicates）----
+    // 用 upsert 而非 PATCH：因为 app_config 表是单行表，upsert 在主键冲突时
+    // 自动走 update 路径；且 upsert 不受 PostgREST PATCH schema 缓存影响。
+    const upsertResp = await fetch(`${supabaseUrl}/rest/v1/app_config`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=representation'
+      },
       body: JSON.stringify({
+        id: 1,
         system_prompt: system_prompt,
         updated_by: user.id,
         updated_at: new Date().toISOString()
       })
     });
 
-    if (!updateResp.ok) {
-      console.error('prompt-update PATCH failed:', updateResp.status, await updateResp.text());
-      return new Response(JSON.stringify({ error: '保存失败，请检查 app_config 表是否存在' }), { headers, status: 500 });
+    if (!upsertResp.ok) {
+      const errText = await upsertResp.text();
+      console.error('prompt-update upsert failed:', upsertResp.status, errText);
+      // 返回真实错误供诊断（不向用户暴露太多细节）
+      return new Response(JSON.stringify({
+        error: `保存失败 [${upsertResp.status}]: ${errText.slice(0, 300)}`
+      }), { headers, status: 500 });
     }
 
     return new Response(JSON.stringify({
@@ -85,6 +97,6 @@ Deno.serve(async (req) => {
 
   } catch (error: any) {
     console.error('prompt-update error:', error.message);
-    return new Response(JSON.stringify({ error: '服务器错误' }), { headers, status: 500 });
+    return new Response(JSON.stringify({ error: '服务器错误: ' + (error.message || '未知') }), { headers, status: 500 });
   }
 });
