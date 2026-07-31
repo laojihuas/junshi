@@ -135,6 +135,23 @@ const DB = {
         return true;
     },
 
+    // [长按管理] 更新会话（昵称 / 备注）
+    async updateSession(sessionId, updates) {
+        const sb = getSupabaseClient();
+        if (!sb) return null;
+        const { data, error } = await sb
+            .from('chat_sessions')
+            .update(updates)
+            .eq('id', sessionId)
+            .select()
+            .single();
+        if (error) {
+            console.error('[DB] updateSession error:', error);
+            return null;
+        }
+        return data;
+    },
+
     // ---- 聊天消息 ----
     async getMessages(sessionId) {
         const sb = getSupabaseClient();

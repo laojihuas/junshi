@@ -24,6 +24,20 @@
 - **统一提示词**：前端每次发送前调 prompt-get 获取最新 system_prompt（失败降级空串不阻塞），与 history 一起经 ima-proxy 透传 IMA；提示词不存储不渲染，前端不可见；后台"提示词管理"tab 编辑，prompt-update 服务端用 service_role 校验 profiles.is_admin
 - **ima-proxy v3 容错**：`callSearch()` 先带附加参数调 search_knowledge，IMA 拒绝时去参重试（原有功能不受影响）
 
+## LLM 生成 + 用户简介（v5，ima-proxy v15）
+
+- **架构**：前端(query+窗口×好友history) → ima-proxy → [IMA知识库检索=参考] + [DeepSeek 生成专业答复]；提示词/简介服务端注入
+- **LLM 配置**（secrets）：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
+- **我的简介**：`profiles.bio`（varchar 200，SQL `supabase/sql/002_profiles_bio.sql`）；前端好友页 ✎ 按钮弹窗编辑（friends.js showBioModal/saveBio）；ima-proxy 从 profile 读 bio 注入 system，组装顺序：统一提示词 > 用户简介 > 知识库参考(system) + 会话上下文(messages) + 当前内容(user)
+- **多会话隔离**：history 由前端 WindowSession（sessionStorage，窗口×好友）传递，ima-proxy 无状态
+
+## 暗色主题 + 好友长按管理（v20260731-late）
+
+- **全局暗色**（`css/style.css` 全部重写）：`--bg-page:#000` / `--bg-elevated:#1C1C1E` / 顶部导航多层 CSS 渐变（深紫蓝星空+星点）作图底；主标题"军师"+ 副标题"你专属的恋爱顾问"；聊天气泡用绿色渐变
+- **好友备注**：`chat_sessions.note`（varchar 30，SQL `supabase/sql/003_chat_sessions_note.sql`）；列表 `.friend-name` 内追加 `.friend-note` 绿色描边小标签
+- **长按 Action Sheet**：touchstart/mousedown 计时 600ms 触发 → 底部弹出"改名/备注"+"删除"+"取消"（index.html #action-sheet）；navigator.vibrate(15) 触觉反馈；触发后阻止 click 进入聊天
+- **编辑好友弹窗**（#modal-edit-friend）：昵称(20字) + 备注(30字)；保存调 `DB.updateSession`；Enter 友好（昵称框 Enter 跳备注，备注框 Enter 提交）
+
 ## 关键技术点
 
 - **ima-proxy v2 搜索策略**：IMA `search_knowledge` 是关键词搜索（非 AI 对话），整句/3-4 字长词返回空；**bigram（2 字窗口）命中率最高**（"不回"25条/"高冷"26条）。Edge Function 用两阶段 bigram 提取（双实义字优先）→ 多关键词轮询搜索合并 → `get_media_info` 拉取 markdown 原文 → 清洗导航/元数据后拼装回复

@@ -204,6 +204,19 @@ const App = {
                 await Auth.logout();
             }
         });
+
+        // [长按管理] Action Sheet - 按钮点击分发
+        document.getElementById('action-sheet').addEventListener('click', (e) => {
+            const item = e.target.closest('.sheet-item');
+            if (!item) return;
+            Friends.handleSheetAction(item.dataset.action);
+        });
+        // 点击遮罩关闭
+        document.getElementById('action-sheet').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) {
+                Friends._hideActionSheet();
+            }
+        });
     }
 };
 

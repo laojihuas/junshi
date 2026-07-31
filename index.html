@@ -76,11 +76,14 @@
          ============================================================ -->
     <div id="page-friends" class="page">
         <div class="friends-header">
-            <h1>军师</h1>
-            <div style="display:flex;align-items:center;gap:8px;">
+            <div class="header-title">
+                <h1>军师</h1>
+                <span class="header-sub">你专属的恋爱顾问</span>
+            </div>
+            <div class="header-actions">
                 <span id="header-status" class="status-badge">加载中...</span>
-                <button id="bio-btn" style="background:none;border:none;color:#fff;font-size:16px;cursor:pointer;padding:4px;" title="我的简介">✎</button>
-                <button id="logout-btn" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:4px;" title="退出登录">⏻</button>
+                <button id="bio-btn" class="icon-btn" title="我的简介">✎</button>
+                <button id="logout-btn" class="icon-btn" title="退出登录">⏻</button>
             </div>
         </div>
 
@@ -130,6 +133,54 @@
                 <button id="new-friend-cancel" class="btn btn-outline">取消</button>
                 <button id="new-friend-confirm" class="btn btn-primary">确定</button>
             </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：编辑好友（改名 / 备注）
+         ============================================================ -->
+    <div id="modal-edit-friend" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">编辑好友</div>
+            <div class="modal-body">
+                <div class="field">
+                    <span class="field-label">昵称</span>
+                    <input id="edit-friend-name" class="input" type="text" placeholder="好友昵称" maxlength="20">
+                </div>
+                <div class="field">
+                    <span class="field-label">备注（可选，用于标记年龄、身高、关系等）</span>
+                    <input id="edit-friend-note" class="input" type="text" placeholder="例如：25岁/165/同事" maxlength="30">
+                </div>
+                <div class="field-hint">备注会直接显示在好友名字后面，方便快速识别</div>
+            </div>
+            <div class="modal-footer">
+                <button id="edit-friend-cancel" class="btn btn-outline">取消</button>
+                <button id="edit-friend-save" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         长按好友 - 底部 Action Sheet（改名 / 备注 / 删除）
+         ============================================================ -->
+    <div id="action-sheet" class="action-sheet-overlay">
+        <div class="action-sheet">
+            <div class="action-sheet-header">
+                <span class="sheet-name" id="sheet-friend-name">好友</span>
+                长按操作
+            </div>
+            <button class="sheet-item" data-action="rename">
+                <span class="sheet-icon">✎</span>
+                <span>改名 / 备注</span>
+            </button>
+            <button class="sheet-item" data-action="delete">
+                <span class="sheet-icon">🗑</span>
+                <span>删除</span>
+            </button>
+            <button class="sheet-item sheet-cancel" data-action="cancel">
+                <span class="sheet-icon">×</span>
+                <span>取消</span>
+            </button>
         </div>
     </div>
 

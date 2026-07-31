@@ -4,6 +4,8 @@
 
 const Friends = {
     sessions: [],
+    // [长按管理] 当前选中的 session（Action Sheet 用）
+    _currentSession: null,
 
     async load() {
         if (!Auth.currentUser) return;
@@ -44,13 +46,16 @@ const Friends = {
         container.innerHTML = this.sessions.map(s => {
             const initial = s.friend_name ? s.friend_name.charAt(0).toUpperCase() : '?';
             const timeAgo = this._timeAgo(s.updated_at || s.created_at);
+            const noteHtml = s.note
+                ? `<span class="friend-note" title="${this._escapeHtml(s.note)}">${this._escapeHtml(s.note)}</span>`
+                : '';
             return `
                 <div class="friend-item" data-session-id="${s.id}">
                     <div class="friend-avatar" style="background: ${s.avatar_color || '#07C160'}">
                         ${initial}
                     </div>
                     <div class="friend-info">
-                        <div class="friend-name">${this._escapeHtml(s.friend_name)}</div>
+                        <div class="friend-name">${this._escapeHtml(s.friend_name)}${noteHtml}</div>
                         <div class="friend-preview">${s.last_message || '点击开始对话'}</div>
                     </div>
                     <div class="friend-time">${timeAgo}</div>
@@ -65,20 +70,37 @@ const Friends = {
                 Chat.open(sessionId);
             });
 
-            // 长按删除
+            // [长按管理] 桌面端用 mousedown 计时，移动端用 touchstart
             let longPressTimer = null;
-            el.addEventListener('touchstart', () => {
+            let longPressed = false;
+            const startPress = () => {
+                longPressed = false;
                 longPressTimer = setTimeout(() => {
+                    longPressed = true;
                     const sessionId = el.dataset.sessionId;
-                    this._confirmDelete(sessionId);
-                }, 800);
-            });
-            el.addEventListener('touchend', () => {
+                    this._showActionSheet(sessionId);
+                    // 触觉反馈（支持的设备）
+                    if (navigator.vibrate) navigator.vibrate(15);
+                }, 600);
+            };
+            const cancelPress = () => {
                 clearTimeout(longPressTimer);
-            });
-            el.addEventListener('touchmove', () => {
+            };
+            const endPress = (e) => {
                 clearTimeout(longPressTimer);
-            });
+                // 如果触发了长按，阻止 click 进入聊天
+                if (longPressed) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                }
+            };
+
+            el.addEventListener('touchstart', startPress, { passive: true });
+            el.addEventListener('touchend', endPress);
+            el.addEventListener('touchmove', cancelPress);
+            el.addEventListener('mousedown', startPress);
+            el.addEventListener('mouseup', endPress);
+            el.addEventListener('mouseleave', cancelPress);
         });
     },
 
@@ -134,6 +156,119 @@ const Friends = {
         input.onkeydown = (e) => {
             if (e.key === 'Enter') confirmBtn.click();
         };
+    },
+
+    // [长按管理] 弹出底部 Action Sheet
+    _showActionSheet(sessionId) {
+        const session = this.sessions.find(s => s.id === sessionId);
+        if (!session) return;
+
+        this._currentSession = session;
+        const overlay = document.getElementById('action-sheet');
+        const nameEl = document.getElementById('sheet-friend-name');
+        nameEl.textContent = session.friend_name + (session.note ? ' · ' + session.note : '');
+        overlay.classList.add('active');
+    },
+
+    // [长按管理] 关闭 Action Sheet
+    _hideActionSheet() {
+        document.getElementById('action-sheet').classList.remove('active');
+        this._currentSession = null;
+    },
+
+    // [长按管理] Action Sheet 按钮分发
+    handleSheetAction(action) {
+        const session = this._currentSession;
+        if (!session) return;
+
+        switch (action) {
+            case 'rename':
+                this._hideActionSheet();
+                setTimeout(() => this.showEditModal(session), 200);
+                break;
+            case 'delete':
+                this._hideActionSheet();
+                setTimeout(() => this._confirmDelete(session.id), 200);
+                break;
+            case 'cancel':
+            default:
+                this._hideActionSheet();
+        }
+    },
+
+    // [长按管理] 编辑好友（改名 + 备注）
+    showEditModal(session) {
+        const overlay = document.getElementById('modal-edit-friend');
+        const nameInput = document.getElementById('edit-friend-name');
+        const noteInput = document.getElementById('edit-friend-note');
+        const saveBtn = document.getElementById('edit-friend-save');
+        const cancelBtn = document.getElementById('edit-friend-cancel');
+
+        nameInput.value = session.friend_name || '';
+        noteInput.value = session.note || '';
+        overlay.classList.add('active');
+        setTimeout(() => nameInput.focus(), 100);
+
+        const closeModal = () => overlay.classList.remove('active');
+
+        const onSave = async () => {
+            const name = nameInput.value.trim();
+            const note = noteInput.value.trim();
+
+            if (!name) {
+                Utils.toast('昵称不能为空');
+                nameInput.focus();
+                return;
+            }
+            if (name.length > 20) {
+                Utils.toast('昵称不能超过 20 字');
+                return;
+            }
+            if (note.length > 30) {
+                Utils.toast('备注不能超过 30 字');
+                return;
+            }
+
+            // 检查是否实际修改
+            if (name === session.friend_name && note === (session.note || '')) {
+                closeModal();
+                return;
+            }
+
+            closeModal();
+            Utils.showLoading();
+
+            const updated = await DB.updateSession(session.id, {
+                friend_name: name,
+                note: note
+            });
+            Utils.hideLoading();
+
+            if (updated) {
+                Utils.toast('已保存');
+                await this.load();
+            } else {
+                Utils.toast('保存失败，请重试');
+            }
+        };
+
+        saveBtn.onclick = onSave;
+        cancelBtn.onclick = closeModal;
+        overlay.onclick = (e) => {
+            if (e.target === overlay) closeModal();
+        };
+        // 回车保存
+        const onKey = (e) => {
+            if (e.key === 'Enter' && e.target === nameInput) {
+                e.preventDefault();
+                noteInput.focus();
+            } else if (e.key === 'Enter' && e.target === noteInput) {
+                e.preventDefault();
+                onSave();
+            }
+        };
+        nameInput.onkeydown = onKey;
+        noteInput.onkeydown = onKey;
     },
 
     async _confirmDelete(sessionId) {
