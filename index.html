@@ -82,8 +82,12 @@
             </div>
             <div class="header-actions">
                 <span id="header-status" class="status-badge">加载中...</span>
-                <button id="bio-btn" class="icon-btn" title="我的简介">✎</button>
-                <button id="logout-btn" class="icon-btn" title="退出登录">⏻</button>
+                <button id="bio-btn" class="icon-btn" title="我的简介">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                </button>
+                <button id="logout-btn" class="icon-btn" title="退出登录">
+                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
+                </button>
             </div>
         </div>
 
@@ -102,7 +106,9 @@
          ============================================================ -->
     <div id="page-chat" class="page">
         <div class="chat-header">
-            <div id="chat-back" class="chat-back">‹</div>
+            <div id="chat-back" class="chat-back" title="返回">
+                <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            </div>
             <div id="chat-title" class="chat-header-title">聊天</div>
         </div>
 
@@ -114,7 +120,7 @@
         </div>
 
         <div class="chat-input-area">
-            <button id="chat-paste-btn" class="chat-paste-btn" title="粘贴">📋</button>
+            <button id="chat-paste-btn" class="chat-paste-btn" title="粘贴并发送">📋</button>
             <textarea id="chat-input" class="chat-input" rows="1" placeholder="粘贴对方的话，我来帮你回..." enterkeyhint="send"></textarea>
             <button id="chat-send-btn" class="chat-send-btn">发送</button>
         </div>

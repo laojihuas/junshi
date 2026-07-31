@@ -185,17 +185,27 @@ const Chat = {
         input.focus();
     },
 
-    // 粘贴文本
+    // [粘贴并发送] 读取剪贴板 → 填入输入框 → 自动发送（无需再点发送）
     async paste() {
+        if (!this.currentSessionId) {
+            Utils.toast('请先进入一个好友会话');
+            return;
+        }
         try {
             const text = await navigator.clipboard.readText();
+            if (!text || !text.trim()) {
+                Utils.toast('剪贴板为空');
+                return;
+            }
             const input = document.getElementById('chat-input');
             input.value = text;
-            input.focus();
             // 自动调整高度
             input.style.height = 'auto';
             input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+            // 自动发送
+            await this.send();
         } catch (e) {
+            console.error('[军师] 读取剪贴板失败:', e);
             Utils.toast('无法读取剪贴板，请手动粘贴');
         }
     },

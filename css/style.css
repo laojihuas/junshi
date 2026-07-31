@@ -280,7 +280,7 @@ textarea.input {
 .friends-header {
     position: relative;
     color: #fff;
-    padding: 56px 18px 18px;
+    padding: calc(14px + env(safe-area-inset-top, 0px)) 16px 10px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -322,11 +322,12 @@ textarea.input {
 .friends-header .header-title {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 0px;
+    line-height: 1.15;
 }
 
 .friends-header .header-title h1 {
-    font-size: 20px;
+    font-size: 17px;
     font-weight: 700;
     letter-spacing: 0.5px;
     background: linear-gradient(120deg, #fff 0%, #E0C3FC 100%);
@@ -337,7 +338,7 @@ textarea.input {
 }
 
 .friends-header .header-title .header-sub {
-    font-size: 11px;
+    font-size: 10px;
     color: rgba(255, 255, 255, 0.7);
     letter-spacing: 1px;
     font-weight: 400;
@@ -350,14 +351,15 @@ textarea.input {
 }
 
 .friends-header .header-actions .status-badge {
-    font-size: 11px;
+    font-size: 10px;
     background: rgba(0, 0, 0, 0.4);
     border: 1px solid rgba(255,255,255,0.15);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    padding: 4px 10px;
+    padding: 3px 8px;
     border-radius: 12px;
     color: #fff;
+    white-space: nowrap;
 }
 
 .friends-header .header-actions .icon-btn {
@@ -366,15 +368,18 @@ textarea.input {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0,0,0,0.4);
-    border: 1px solid rgba(255,255,255,0.1);
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    background: rgba(60, 30, 80, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.22);
     color: #fff;
-    font-size: 16px;
     border-radius: 50%;
     cursor: pointer;
     transition: all 0.2s;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.friends-header .header-actions .icon-btn svg {
+    display: block;
 }
 
 .friends-header .header-actions .icon-btn:active {
@@ -529,7 +534,7 @@ textarea.input {
 .chat-header {
     position: relative;
     color: #fff;
-    padding: 52px 16px 14px;
+    padding: calc(14px + env(safe-area-inset-top, 0px)) 12px 6px;
     display: flex;
     align-items: center;
     flex-shrink: 0;
@@ -542,18 +547,23 @@ textarea.input {
     border-bottom: 1px solid rgba(255,255,255,0.06);
 }
 
+/* 返回按钮：微信风格大箭头（44pt 热区 + 28px 图标） */
 .chat-back {
-    width: 32px;
-    height: 32px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    font-size: 22px;
-    margin-right: 8px;
+    margin-right: 0;
+    margin-left: -10px;
     border-radius: 50%;
     color: #fff;
     transition: background 0.2s;
+}
+
+.chat-back svg {
+    display: block;
 }
 
 .chat-back:active {
@@ -565,7 +575,7 @@ textarea.input {
     font-size: 17px;
     font-weight: 600;
     text-align: center;
-    margin-right: 32px;
+    margin-right: 34px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
