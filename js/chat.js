@@ -7,7 +7,7 @@ const Chat = {
     currentFriendName: '',
     messages: [],
 
-    async open(sessionId) {
+    async open(sessionId, restoreContext = false) {
         this.currentSessionId = sessionId;
 
         // 获取会话信息
@@ -20,7 +20,9 @@ const Chat = {
 
         if (!session) {
             Utils.toast('会话不存在');
-            return;
+            // 记录失效（好友可能已被删除），清除残留恢复标记
+            WindowSession.saveLastView('friends');
+            return false;
         }
 
         this.currentFriendName = session.friend_name;
@@ -30,12 +32,32 @@ const Chat = {
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
         WindowSession.setActiveFriend(sessionId);
 
+        // [杀进程恢复] 记录当前停留的聊天页（localStorage），
+        // 切后台被浏览器回收后，回来自动恢复到本页面
+        WindowSession.saveLastView('chat', sessionId, session.friend_name);
+
         // 加载消息
         this.messages = await DB.getMessages(sessionId);
+
+        // [杀进程恢复] 仅在恢复路径（restoreContext=true）且窗口历史为空时，
+        // 从数据库最近消息重建 AI 上下文：浏览器回收页面进程后 sessionStorage
+        // 会丢失，导致 AI 不记得之前的对话；用数据库持久化消息补回最近 50 条。
+        // 注意：正常点击进入好友不重建，保持"多窗口会话隔离"设计
+        if (restoreContext) {
+            const history = WindowSession.getHistory(sessionId);
+            if (history.length === 0 && this.messages.length > 0) {
+                const recent = this.messages
+                    .slice(-50)
+                    .map(m => ({ role: m.role, content: m.content }));
+                WindowSession.setHistory(sessionId, recent);
+            }
+        }
+
         this.renderMessages();
 
         // 切换到聊天页面
         App.navigate('chat');
+        return true;
     },
 
     renderMessages() {
@@ -212,6 +234,8 @@ const Chat = {
 
     // 返回好友列表
     back() {
+        // 回到好友列表：清除"最后查看"记录，下次启动默认进好友页
+        WindowSession.saveLastView('friends');
         Friends.load();
         App.navigate('friends');
     },

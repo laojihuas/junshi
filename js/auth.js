@@ -117,6 +117,8 @@ const Auth = {
         // [多窗口会话] 退出登录时清空当前窗口的会话数据
         if (typeof WindowSession !== 'undefined') {
             WindowSession.clear();
+            // [杀进程恢复] 同时清除"最后查看页"记录，避免登录其他账号后误恢复
+            WindowSession.clearLastView();
         }
         App.navigate('auth');
     },

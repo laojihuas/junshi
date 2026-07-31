@@ -26,8 +26,23 @@ const App = {
 
         if (loggedIn) {
             await Friends.load();
-            this.navigate('friends');
-            // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导（4 道防打扰：standalone/已安装/冷却/未登录）
+
+            // [杀进程恢复] 上次停留在聊天页（切后台被浏览器回收后重新加载）→
+            // 自动恢复到该聊天会话，不再每次都回到好友列表
+            const lastView = WindowSession.getLastView();
+            if (lastView && lastView.friendId) {
+                // restoreContext=true：杀进程后 sessionStorage 丢失，
+                // 从数据库重建最近 50 条对话作为 AI 上下文
+                const restored = await Chat.open(lastView.friendId, true);
+                if (!restored) {
+                    this.navigate('friends');
+                }
+            } else {
+                this.navigate('friends');
+            }
+
+            // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导（4 道防打扰：standalone/已安装/冷却/未登录；
+            // 仅好友列表页弹出，恢复聊天页时 currentPage 非 friends 不会触发）
             PWAInstall.maybeShow();
         } else {
             this.navigate('auth');

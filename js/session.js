@@ -112,6 +112,59 @@ const WindowSession = {
     },
 
     // ----------------------------------------------------------
+    // 最后查看页面（localStorage 持久化，用于杀进程后恢复）
+    // 场景：聊天页切到其他 App，浏览器回收页面进程，回来时页面
+    //       重新加载。sessionStorage 会丢失，但 localStorage 保留，
+    //       据此自动恢复到原聊天页。
+    // ----------------------------------------------------------
+    STORAGE_VIEW_KEY: 'junshi_last_view',
+
+    // 记录当前停留页面：page='chat' 需带好友信息；page='friends' 清除记录
+    saveLastView(page, friendId, friendName) {
+        try {
+            if (page === 'chat' && friendId) {
+                localStorage.setItem(this.STORAGE_VIEW_KEY, JSON.stringify({
+                    page: 'chat',
+                    friendId: friendId,
+                    friendName: friendName || ''
+                }));
+            } else {
+                localStorage.removeItem(this.STORAGE_VIEW_KEY);
+            }
+        } catch (e) { /* localStorage 不可用时忽略 */ }
+    },
+
+    // 读取上次停留页面（无记录 / 记录无效返回 null）
+    getLastView() {
+        try {
+            const raw = localStorage.getItem(this.STORAGE_VIEW_KEY);
+            if (!raw) return null;
+            const v = JSON.parse(raw);
+            if (!v || v.page !== 'chat' || !v.friendId) return null;
+            return v;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    // 清除最后查看记录（退出登录时调用）
+    clearLastView() {
+        try {
+            localStorage.removeItem(this.STORAGE_VIEW_KEY);
+        } catch (e) { /* 忽略 */ }
+    },
+
+    // 批量导入某好友的对话历史（杀进程后 sessionStorage 丢失，
+    // 从数据库最近消息重建 AI 上下文时使用）
+    setHistory(friendSessionId, history) {
+        this._ensureInit();
+        const fid = friendSessionId || this._data.activeFriend;
+        if (!fid) return;
+        this._data.conversations[fid] = Array.isArray(history) ? history.slice(0, 50) : [];
+        this._save();
+    },
+
+    // ----------------------------------------------------------
     // 内部方法
     // ----------------------------------------------------------
     _ensureInit() {
