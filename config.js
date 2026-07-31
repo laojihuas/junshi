@@ -14,7 +14,7 @@ window.APP_CONFIG = {
         // IMA API 代理的 Supabase Edge Function URL（部署后填入）
         proxyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/ima-proxy',
         // 知识库 ID（在 IMA 开放平台创建知识库后填入）
-        knowledgeBaseId: 'YOUR_KNOWLEDGE_BASE_ID'
+        knowledgeBaseId: 'nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI='
     },
 
     // 激活码相关
