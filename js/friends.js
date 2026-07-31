@@ -147,6 +147,48 @@ const Friends = {
         }
     },
 
+    // [我的简介] 打开编辑弹窗（加载当前简介到文本域）
+    showBioModal() {
+        const overlay = document.getElementById('modal-bio');
+        const input = document.getElementById('bio-input');
+        const count = document.getElementById('bio-count');
+
+        // 从当前 profile 加载已有简介
+        input.value = (Auth.currentProfile && Auth.currentProfile.bio) || '';
+        count.textContent = input.value.length + ' / 200';
+        overlay.classList.add('active');
+        setTimeout(() => input.focus(), 100);
+    },
+
+    // [我的简介] 保存简介（写 profiles.bio，服务端对话时自动注入）
+    async saveBio() {
+        const overlay = document.getElementById('modal-bio');
+        const input = document.getElementById('bio-input');
+        const text = input.value.trim();
+
+        if (!Auth.currentUser) {
+            Utils.toast('请先登录');
+            return;
+        }
+        if (text.length > 200) {
+            Utils.toast('简介不能超过 200 字');
+            return;
+        }
+
+        Utils.showLoading();
+        const updated = await DB.updateProfile(Auth.currentUser.id, { bio: text });
+        Utils.hideLoading();
+
+        if (updated) {
+            // 同步内存中的 profile，后续发送消息时由 ima-proxy 服务端读取注入
+            Auth.currentProfile.bio = text;
+            overlay.classList.remove('active');
+            Utils.toast(text ? '简介已保存，对话会自动引用' : '已清空简介');
+        } else {
+            Utils.toast('保存失败，请重试');
+        }
+    },
+
     _timeAgo(dateStr) {
         if (!dateStr) return '';
         const now = Date.now();

@@ -79,6 +79,7 @@
             <h1>军师</h1>
             <div style="display:flex;align-items:center;gap:8px;">
                 <span id="header-status" class="status-badge">加载中...</span>
+                <button id="bio-btn" style="background:none;border:none;color:#fff;font-size:16px;cursor:pointer;padding:4px;" title="我的简介">✎</button>
                 <button id="logout-btn" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:4px;" title="退出登录">⏻</button>
             </div>
         </div>
@@ -128,6 +129,25 @@
             <div class="modal-footer">
                 <button id="new-friend-cancel" class="btn btn-outline">取消</button>
                 <button id="new-friend-confirm" class="btn btn-primary">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：我的简介（个性化内容，注入到会话生成上下文）
+         组装顺序：统一提示词 > 我的简介 > 会话上下文 > 当前内容
+         ============================================================ -->
+    <div id="modal-bio" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">我的简介</div>
+            <div class="modal-body">
+                <textarea id="bio-input" class="input" rows="6" maxlength="200"
+                    placeholder="可填写个人简介，例如名字、年龄、爱好、经历等等，会在对话中自动引用"></textarea>
+                <div class="bio-count" id="bio-count">0 / 200</div>
+            </div>
+            <div class="modal-footer">
+                <button id="bio-cancel" class="btn btn-outline">取消</button>
+                <button id="bio-save" class="btn btn-primary">保存</button>
             </div>
         </div>
     </div>

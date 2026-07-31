@@ -30,3 +30,4 @@
 - **无 CLI 部署 Edge Function**（本机 supabase CLI 2.110 为 Bun 编译，CPU 不支持报 Illegal instruction）：
   - Secrets: `POST https://api.supabase.com/v1/projects/{ref}/secrets`
   - 部署（云端打包）: `POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart/form-data（metadata JSON + file 源码），`/functions/{slug}/deploy` 是错误路径
+  - **执行任意 SQL**: `POST /v1/projects/{ref}/database/query`，body `{"query":"..."}`，成功返回 201/空数组（无需进 Dashboard）

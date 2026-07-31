@@ -162,11 +162,13 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 2. LLM 生成专业答复（提示词 + 上下文 + 当前内容 + 知识库参考）
+    // 2. LLM 生成专业答复（提示词 + 简介 + 上下文 + 当前内容 + 知识库参考）
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
     if (llmKey) {
       try {
-        reply = await buildLlmReply(llmKey, effectivePrompt, history, query.trim(), kbItems, kbFallback);
+        // [v5] 读取用户个人简介（profiles.bio，200字上限），注入生成上下文
+        const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
+        reply = await buildLlmReply(llmKey, effectivePrompt, userBio, history, query.trim(), kbItems, kbFallback);
       } catch (e) {
         console.error('LLM error:', e.message);
       }
@@ -288,21 +290,27 @@ function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
 
 // ============================================================
 // [v4] LLM 生成专业答复 —— 核心实现
-// 将「统一提示词 + 会话上下文(history) + 当前内容(query) +
-// 知识库参考资料」一起发送给 LLM（OpenAI 兼容接口），
-// 得到真正基于提示词与上下文的专业回复。
+// 将「统一提示词 + 用户简介(bio) + 会话上下文(history) +
+// 当前内容(query) + 知识库参考资料」一起发送给 LLM
+// （OpenAI 兼容接口），得到真正基于提示词与上下文的专业回复。
 //
-// 多会话隔离：messages 中的 history 来自各窗口 sessionStorage，
-// 每次请求独立组装，ima-proxy 无状态 → 多用户多会话互不干扰。
+// 组装顺序（system → messages → user）：
+//   统一提示词 > 用户简介 > 知识库参考资料（system）
+//   会话上下文 history（messages）
+//   当前内容 query（最后一条 user）
+//
+// 多会话隔离：history 来自各窗口 sessionStorage，每次请求独立组装，
+// ima-proxy 无状态 → 多用户多会话互不干扰。
 //
 // 环境变量：
-//   LLM_API_KEY  必填（腾讯混元 / DeepSeek / OpenAI 等 API Key）
+//   LLM_API_KEY  必填（DeepSeek / 混元 / OpenAI 等 API Key）
 //   LLM_BASE_URL 默认 https://api.hunyuan.cloud.tencent.com/v1
-//   LLM_MODEL    默认 hunyuan-lite（免费额度）
+//   LLM_MODEL    默认 hunyuan-lite
 // ============================================================
 async function buildLlmReply(
   llmKey: string,
   systemPrompt: string,
+  userBio: string,
   history: any[],
   query: string,
   kbItems: any[],
@@ -311,8 +319,14 @@ async function buildLlmReply(
   const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.hunyuan.cloud.tencent.com/v1';
   const llmModel = Deno.env.get('LLM_MODEL') || 'hunyuan-lite';
 
-  // 组装 system 提示词：统一提示词 + 知识库参考资料
+  // 组装 system 提示词：统一提示词 > 用户简介 > 知识库参考资料
   let systemContent = systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。';
+
+  // [v5] 用户个人简介（个性化内容，位于提示词之后）
+  if (userBio && userBio.trim()) {
+    systemContent += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${userBio.trim()}`;
+  }
+
   if (kbItems.length > 0) {
     const kbText = kbItems
       .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${item.content || ''}`)

@@ -128,6 +128,28 @@ const App = {
             Friends.showCreateModal();
         });
 
+        // [我的简介] 打开编辑弹窗
+        document.getElementById('bio-btn').addEventListener('click', () => {
+            Friends.showBioModal();
+        });
+
+        // [我的简介] 保存 / 取消 / 字数实时计数 / 点击遮罩关闭
+        document.getElementById('bio-save').addEventListener('click', () => {
+            Friends.saveBio();
+        });
+        document.getElementById('bio-cancel').addEventListener('click', () => {
+            document.getElementById('modal-bio').classList.remove('active');
+        });
+        document.getElementById('bio-input').addEventListener('input', (e) => {
+            const len = e.target.value.length;
+            document.getElementById('bio-count').textContent = len + ' / 200';
+        });
+        document.getElementById('modal-bio').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) {
+                e.currentTarget.classList.remove('active');
+            }
+        });
+
         // 新建好友弹窗 - 事件处理移至 Friends.showCreateModal()
 
         // 聊天返回按钮

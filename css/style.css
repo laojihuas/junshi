@@ -698,6 +698,25 @@ html, body {
     flex: 1;
 }
 
+/* [我的简介] 弹窗：多行文本域与字数计数 */
+#modal-bio .modal-content {
+    max-width: 380px;
+}
+#bio-input {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 120px;
+    resize: vertical;
+    line-height: 1.6;
+    font-family: inherit;
+}
+.bio-count {
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: right;
+}
+
 /* ============================================================
    付费弹窗
    ============================================================ */
