@@ -56,6 +56,8 @@ const WindowSession = {
         }
 
         console.log('[军师] 窗口会话已初始化: ' + this.getId() + ' (navigation: ' + navType + ')');
+        // 诊断日志（排查"秒切回好友列表"问题：区分 reload / 杀进程 / 新开页面）
+        try { Utils.dlog('ws', 'init navType=' + navType + ' kept=' + (existing ? (navType === 'reload' || navType === 'back_forward') : false)); } catch (e) {}
         return this._data;
     },
 

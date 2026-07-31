@@ -252,5 +252,32 @@
     <script src="js/paywall.js"></script>
     <script src="js/install-prompt.js"></script>
     <script src="js/app.js"></script>
+
+    <!-- ============================================================
+         诊断面板（排查"秒切回好友列表"问题）
+         在网址后加 #debug 打开；日志存 localStorage（无敏感信息）
+         ============================================================ -->
+    <div id="debug-panel" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:#000;color:#7CFC9A;font:11px/1.5 monospace;padding:12px;overflow:auto;white-space:pre-wrap;">
+        <div style="margin-bottom:8px;">
+            <b style="font-size:14px;color:#fff;">🔍 诊断日志</b>
+            <button onclick="document.getElementById('debug-log').textContent=(localStorage.getItem('junshi_debug_log')||'(empty)');" style="margin-left:8px;padding:3px 10px;background:#07C160;color:#fff;border:none;border-radius:4px;">刷新</button>
+            <button onclick="localStorage.removeItem('junshi_debug_log');document.getElementById('debug-log').textContent='(cleared)';" style="margin-left:6px;padding:3px 10px;background:#333;color:#fff;border:none;border-radius:4px;">清空</button>
+            <button onclick="document.getElementById('debug-panel').style.display='none';" style="margin-left:6px;padding:3px 10px;background:#666;color:#fff;border:none;border-radius:4px;">关闭</button>
+        </div>
+        <pre id="debug-log" style="margin:0;"></pre>
+    </div>
+    <script>
+        // #debug 显示诊断面板
+        (function () {
+            function showDebug() {
+                var panel = document.getElementById('debug-panel');
+                if (!panel || location.hash !== '#debug') return;
+                panel.style.display = 'block';
+                document.getElementById('debug-log').textContent = localStorage.getItem('junshi_debug_log') || '(empty)';
+            }
+            window.addEventListener('hashchange', showDebug);
+            if (location.hash === '#debug') showDebug();
+        })();
+    </script>
 </body>
 </html>

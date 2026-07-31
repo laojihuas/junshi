@@ -9,6 +9,7 @@ const Chat = {
 
     async open(sessionId, restoreContext = false) {
         this.currentSessionId = sessionId;
+        Utils.dlog('chat.open', 'session=' + sessionId + ' restore=' + restoreContext);
 
         // 获取会话信息
         const sb = getSupabaseClient();
@@ -22,6 +23,7 @@ const Chat = {
             Utils.toast('会话不存在');
             // 记录失效（好友可能已被删除），清除残留恢复标记
             WindowSession.saveLastView('friends');
+            Utils.dlog('chat.open', 'session NOT FOUND');
             return false;
         }
 

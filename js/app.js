@@ -31,9 +31,17 @@ const App = {
             // 自动恢复到该聊天会话，不再每次都回到好友列表
             const lastView = WindowSession.getLastView();
             if (lastView && lastView.friendId) {
-                // restoreContext=true：杀进程后 sessionStorage 丢失，
-                // 从数据库重建最近 50 条对话作为 AI 上下文
-                const restored = await Chat.open(lastView.friendId, true);
+                let restored = false;
+                try {
+                    // restoreContext=true：杀进程后 sessionStorage 丢失，
+                    // 从数据库重建最近 50 条对话作为 AI 上下文
+                    restored = await Chat.open(lastView.friendId, true);
+                } catch (e) {
+                    // 恢复异常（网络/查询失败等）绝不能中断初始化，
+                    // 更不能再把用户卡在半路，安全回退好友列表
+                    console.error('[军师] 恢复会话异常:', e);
+                    Utils.dlog('init', 'restore chat FAILED: ' + (e && e.message));
+                }
                 if (!restored) {
                     this.navigate('friends');
                 }
@@ -48,10 +56,13 @@ const App = {
             this.navigate('auth');
         }
 
+        Utils.dlog('init', 'done currentPage=' + this.currentPage);
+
         console.log('[军师] 初始化完成');
     },
 
     navigate(page) {
+        const from = this.currentPage;
         // 隐藏所有页面
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         const target = document.getElementById('page-' + page);
@@ -59,6 +70,8 @@ const App = {
             target.classList.add('active');
             this.currentPage = page;
         }
+        // 诊断日志：记录每次页面切换（排查"秒切回好友列表"问题）
+        try { Utils.dlog('nav', (from || '?') + ' -> ' + page); } catch (e) {}
     },
 
     _checkConfig() {

@@ -3,7 +3,7 @@
 // 简单缓存壳：让"已添加桌面"的 PWA 打开更快、断网也能进首页
 // ============================================================
 
-const CACHE_NAME = 'junshi-v1';
+const CACHE_NAME = 'junshi-v2';
 const PRECACHE = [
   './',
   './index.html',

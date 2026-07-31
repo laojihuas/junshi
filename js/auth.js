@@ -23,14 +23,28 @@ const Auth = {
         this.currentProfile = await DB.getProfile(session.user.id);
 
         // 监听认证状态变化
+        // 注意：这里【不能】导航页面！
+        //   SIGNED_IN 事件在页面初始化恢复会话、token 自动刷新、多标签页同步等
+        //   场景都会被触发，回调是异步的——若在此处 App.navigate('friends')，
+        //   会把已经停留在聊天页的用户"秒切"回好友列表（用户切后台再回来时复现）。
+        //   登录/恢复后的导航统一由 app.js 显式控制。
         sb.auth.onAuthStateChange(async (event, session) => {
+            try {
+                Utils.dlog('auth-event', 'event=' + event + ' session=' + (session ? 'yes' : 'no'));
+            } catch (e) { /* 日志失败忽略 */ }
+
             if (event === 'SIGNED_IN' && session) {
+                // 仅同步状态，不导航（导航由 app.js 登录流程控制）
                 this.currentUser = session.user;
                 this.currentProfile = await DB.getProfile(session.user.id);
-                App.navigate('friends');
             } else if (event === 'SIGNED_OUT') {
                 this.currentUser = null;
                 this.currentProfile = null;
+                // 同步清理窗口会话与"最后查看页"记录
+                if (typeof WindowSession !== 'undefined') {
+                    WindowSession.clear();
+                    WindowSession.clearLastView();
+                }
                 App.navigate('auth');
             }
         });
