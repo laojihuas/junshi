@@ -160,7 +160,13 @@ Deno.serve(async (req) => {
     const llmModel = Deno.env.get('LLM_MODEL') || 'deepseek-chat';
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
-    const memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+    let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+
+    // [v7] 套路打断："/" 开头 = 用户指令（如 /换策略 /停止 /不按套路），清除执行中的套路
+    const strategyClear = typeof query === 'string' && query.trim().startsWith('/');
+    if (strategyClear && memoryCard?.strategy) {
+      memoryCard.strategy = null;
+    }
 
     // [v6 L2] 上下文工程：近详远略压缩
     //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
@@ -212,6 +218,19 @@ Deno.serve(async (req) => {
         hitKnowledge = kbItems.length > 0;
       } catch (e: any) {
         console.error('知识库检索失败:', e.message);
+      }
+    }
+
+    // [v7] 套路启动：当前无执行中套路 + 用户未打断 + 检索到惯例/魔术/玩法类资料 → 提炼步骤序列
+    //   提炼成功则本轮起开始执行（方向盘），失败则静默走普通回答
+    if (llmKey && !strategyClear && !memoryCard?.strategy && kbItems.length > 0) {
+      try {
+        const st = await extractStrategy(llmKey, llmBase, llmModel, kbItems, query);
+        if (st) {
+          memoryCard = { ...(memoryCard || {}), strategy: st };
+        }
+      } catch (e: any) {
+        console.warn('extractStrategy failed:', e.message);
       }
     }
 
@@ -291,6 +310,9 @@ Deno.serve(async (req) => {
         kb_items: kbItems.length,
         rewrite_used: usedRewrite,
         memory_stage: memoryCard?.profile?.stage || null,
+        strategy_name: memoryCard?.strategy?.name || null,
+        strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
+        strategy_clear: strategyClear,
       },
     }), { headers, status: 200 });
 
@@ -360,11 +382,23 @@ async function rewriteQuery(llmKey: string, llmBase: string, llmModel: string, q
 // [v6] 记忆卡类型与读写
 //   chat_sessions.memory_card 存 JSON 字符串：
 //   { profile:{stage,personality,relationship_note,recent_events},
-//     recent_user_messages:[...], updated_at }
+//     recent_user_messages:[...], strategy:{...}, updated_at }
 // ============================================================
+// [v7] strategy：执行中的聊天惯例（跨轮次"方向盘"）
+//   从检索到的惯例/魔术/玩法类资料提炼步骤序列，逐轮注入执行
+type StrategyState = {
+  name: string;         // 惯例名称
+  goal: string;         // 套路目标
+  steps: string[];      // 步骤序列（2-6 步，每步一句话）
+  rounds_used: number;  // 已使用轮次（每次回复后 +1）
+  max_rounds: number;   // 轮次上限（自动终止，防止无限跑）
+  started_at: string;
+};
+
 type MemoryCard = {
   profile?: { stage?: string; personality?: string; relationship_note?: string; recent_events?: string };
   recent_user_messages?: string[];
+  strategy?: StrategyState | null;
   updated_at?: string;
 };
 
@@ -431,6 +465,14 @@ async function updateMemoryCard(ctx: {
     card.updated_at = new Date().toISOString();
   }
 
+  // [v7] 套路轮次回写：每轮 +1，达到上限自动终止（用户在 "/" 打断时 strategy 已被置空）
+  if (card.strategy) {
+    card.strategy.rounds_used = (card.strategy.rounds_used || 0) + 1;
+    if (card.strategy.rounds_used >= (card.strategy.max_rounds || 6)) {
+      card.strategy = null; // 轮次上限：套路自然结束，恢复正常聊天
+    }
+  }
+
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
 }
 
@@ -458,6 +500,55 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     };
   } catch (e: any) {
     console.warn('extractProfile failed:', e.message);
+    return null;
+  }
+}
+
+// ============================================================
+// [v7] 套路提炼：从检索到的惯例/魔术/玩法类资料中解析可执行步骤
+//   特征预检（含惯例/魔术/玩法/步骤等词）→ LLM 输出 JSON {name,goal,steps}
+//   steps < 2 或未命中特征 → 返回 null（不启动套路）
+// ============================================================
+const STRATEGY_HINT_RE = /惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读/;
+const STRATEGY_MAX_STEPS = 6;
+
+async function extractStrategy(
+  llmKey: string, llmBase: string, llmModel: string,
+  kbItems: any[], query: string
+): Promise<StrategyState | null> {
+  const texts = (Array.isArray(kbItems) ? kbItems : [])
+    .map((i) => `${i.title || ''}\n${i.content || ''}`)
+    .join('\n');
+  if (!texts || !STRATEGY_HINT_RE.test(texts)) return null;
+
+  const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
+    + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
+    + `要求：如果资料中存在"分步骤、可执行"的聊天惯例/魔术/玩法（例如灵魂沟通、推拉、冷读、惯例开场、邀约流程等），提炼成步骤序列。\n`
+    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","steps":["第1步...","第2步..."]}，steps 2-6 步，每步一句话、具体可操作、面向"替用户给对方发消息"的执行视角。\n`
+    + `如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 400,
+    });
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const p = JSON.parse(content.slice(start, end + 1));
+    const steps = (Array.isArray(p.steps) ? p.steps : [])
+      .map((s: any) => (typeof s === 'string' ? s.trim() : ''))
+      .filter((s: string) => s.length > 0)
+      .slice(0, STRATEGY_MAX_STEPS);
+    const name = typeof p.name === 'string' ? p.name.slice(0, 10) : '';
+    const goal = typeof p.goal === 'string' ? p.goal.slice(0, 30) : '';
+    if (!name || steps.length < 2) return null;
+    return {
+      name, goal, steps,
+      rounds_used: 0,
+      max_rounds: Math.max(steps.length * 2, 6),
+      started_at: new Date().toISOString(),
+    };
+  } catch (e: any) {
+    console.warn('extractStrategy failed:', e.message);
     return null;
   }
 }
@@ -517,6 +608,19 @@ function buildSystemContent(opts: {
     if (opts.kbFallback) {
       s += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
     }
+  }
+
+  // [v7] 套路执行指令：方向盘优先，检索为弹药，输出不提步骤/进度
+  const strategy = opts.memoryCard?.strategy;
+  if (strategy && Array.isArray(strategy.steps) && strategy.steps.length > 0) {
+    const stepText = strategy.steps.map((st, i) => `${i + 1}. ${st}`).join('\n');
+    s += `\n\n【当前执行套路】你正在执行「${strategy.name}」惯例，目标：${strategy.goal}\n`
+      + `执行步骤：\n${stepText}\n`
+      + `执行规则（严格遵守）：\n`
+      + `- 本套路决定对话方向，优先级高于检索到的参考资料；参考资料只作语言素材：方向一致就采用，方向冲突就忽略或只借鉴语气。\n`
+      + `- 根据对方最新反应自然推进：先顺应对方，再把话题拉回套路方向，绝不生硬。\n`
+      + `- 严禁向对方提及套路、步骤、进度、惯例、第几步等任何元信息，输出必须是可直接发送的自然消息。\n`
+      + `- 当对方反应表明套路目标已达成或已失效时，自然收尾、平滑过渡到正常聊天，不要强行继续。`;
   }
 
   // 输出格式约束（L2）
