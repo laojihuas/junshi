@@ -234,8 +234,8 @@ Deno.serve(async (req) => {
           try {
             const convItems = await searchKbAndFetch(
               imaClientId, imaKey, kbId,
-              ['聊天惯例', '魔术 玩法 流程', '惯例 步骤 推拉'],
-              llmHistory, effectivePrompt, { ...quotaOpts, pickCount: 4 }
+              ['惯例', '推拉', '冷读', '开场白', '步骤'],
+              llmHistory, effectivePrompt, { ...quotaOpts, pickCount: 5 }
             );
             if (convItems.length > 0) {
               const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query);
@@ -739,14 +739,14 @@ async function fetchKbFolders(clientId: string, apiKey: string, kbId: string): P
   const res: { hs: string | null; jx: string | null } = { hs: null, jx: null };
   try {
     async function walk(folderId: string): Promise<void> {
-      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 100 };
+      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 50 };
       if (folderId) body.folder_id = folderId;
       const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
       const list = data?.knowledge_list || [];
       for (const item of list) {
         if (item.media_type === 99) {
           const fid = item.folder_id || item.media_id || '';
-          const name = item.title || '';
+          const name = item.title || item.name || '';
           if (!res.hs && /话术|惯例/.test(name)) res.hs = fid;
           if (!res.jx && /教学|理论|课程/.test(name)) res.jx = fid;
           if (fid) await walk(fid);
@@ -804,7 +804,7 @@ async function browseKbByTitle(clientId: string, apiKey: string, kbId: string, q
 
   async function walk(folderId: string): Promise<void> {
     try {
-      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 100 };
+      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 50 };
       if (folderId) body.folder_id = folderId;
       const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
       const list = data?.knowledge_list || [];
