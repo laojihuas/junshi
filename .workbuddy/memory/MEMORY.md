@@ -37,14 +37,15 @@
   - L3：STAGE_HINTS 场景指令（追求/暧昧/恋爱/挽回/普通朋友）按记忆卡 stage 注入；组装顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 - **多会话隔离**：窗口 history 由前端 WindowSession（sessionStorage）传递；记忆卡按 session_id 跨窗口共享（后端读写 chat_sessions.memory_card，RLS 校验归属）
 
-## 套路执行机制（v7，ima-proxy v17）
+## 套路执行机制（v7，ima-proxy v17→v18）
 
 - **定位**：junshi 输出以**话术为主**（军师扮演用户与女生对话，分析不用）；「恋爱教学」文件夹不舍删 → 其中惯例/魔术"武装"到多轮聊天布局，逐轮贯彻技巧
 - **strategy** 存 `memory_card.strategy`（name/goal/steps[2-6]/rounds_used/max_rounds=steps×2≥6/started_at）
 - **启动**：检索结果含惯例特征词（惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读）→ `extractStrategy` LLM 提炼步骤；steps<2 或未命中特征不启动
 - **注入**【当前执行套路】：**套路=方向盘（优先级高于检索参考资料），检索=弹药（方向一致采用/冲突忽略或借鉴语气）**；先顺应女方再拉回；**严禁向对方提及套路/步骤/进度等元信息**；套路完成/失效自然收尾
 - **打断**：`"/"` 开头输入 = 用户指令 → `strategyClear` 清除套路；每轮 `rounds_used+1` 达上限自动终止
-- `_debug` 含 `strategy_name/strategy_rounds/strategy_clear` 便于验证
+- **检索配额平衡（v18）**：`fetchKbFolders` 按名识别话术/教学文件夹（识别不到降级不配额）→ `applyQuota` 状态感知配额（执行期话术≤3+教学≤2、未启动期教学≤3+话术≤2），**两类内容始终同在上下文**；套路启动走**独立惯例检索通道**（"聊天惯例/魔术玩法流程/惯例步骤推拉"），结果只喂 extractStrategy **不混入主回复参考**
+- `_debug` 含 `strategy_name/strategy_rounds/strategy_clear/folder_hs/folder_jx` 便于验证
 - **部署坑**：本机 curl schannel SSL 握手失败 → 云端部署 Edge Function 改用 **Python requests** multipart（metadata 字段名 `entrypoint_path`），脚本模板可放 Temp 不入库
 
 ## 暗色主题 + 好友长按管理（v20260731-late）

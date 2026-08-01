@@ -184,10 +184,21 @@ Deno.serve(async (req) => {
     let kbItems: any[] = [];
     let kbFallback = false;
     let usedRewrite = false;
+    let kbFolders: { hs: string | null; jx: string | null } = { hs: null, jx: null };
 
     // ---- 知识库检索（L1 增强） ----
     if (imaKey && imaClientId && kbId) {
       try {
+        // [v7] 知识库文件夹识别（话术=hs / 教学=jx），用于检索配额平衡
+        kbFolders = await fetchKbFolders(imaClientId, imaKey, kbId);
+        // 配额：套路执行期话术为主(3)教学兜底(2)；未启动期教学为主(3)话术兜底(2)，
+        //   保证两类内容始终同在上下文——话术加权不消灭策略素材
+        const quotaOpts = {
+          hsFolder: kbFolders.hs,
+          jxFolder: kbFolders.jx,
+          strategyActive: !!memoryCard?.strategy,
+        };
+
         // 1. 联合关键词：最近对方消息 + 当前 query
         const kw = extractKeywordsFromHistory(history, query);
         // 2. 条件 query rewrite：规则关键词不足 2 个时用 LLM 改写为完整问句
@@ -197,12 +208,12 @@ Deno.serve(async (req) => {
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
         // 3. 首轮检索：改写/原句 + 关键词（内部按 hits 排序去重，前 5 条拉原文）
-        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt);
+        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt, quotaOpts);
         // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt);
+            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt, quotaOpts);
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_REF_COUNT);
             if (merged.length > kbItems.length) kbItems = merged;
           }
@@ -216,21 +227,29 @@ Deno.serve(async (req) => {
           }
         }
         hitKnowledge = kbItems.length > 0;
-      } catch (e: any) {
-        console.error('知识库检索失败:', e.message);
-      }
-    }
 
-    // [v7] 套路启动：当前无执行中套路 + 用户未打断 + 检索到惯例/魔术/玩法类资料 → 提炼步骤序列
-    //   提炼成功则本轮起开始执行（方向盘），失败则静默走普通回答
-    if (llmKey && !strategyClear && !memoryCard?.strategy && kbItems.length > 0) {
-      try {
-        const st = await extractStrategy(llmKey, llmBase, llmModel, kbItems, query);
-        if (st) {
-          memoryCard = { ...(memoryCard || {}), strategy: st };
+        // [v7] 套路启动（独立惯例检索通道）：当前无套路 + 用户未打断 → 专门检索惯例/魔术/玩法类内容，
+        //   LLM 提炼步骤启动套路；结果仅用于启动，不混入主回复参考（话术加权不影响套路启动素材）
+        if (llmKey && !strategyClear && !memoryCard?.strategy) {
+          try {
+            const convItems = await searchKbAndFetch(
+              imaClientId, imaKey, kbId,
+              ['聊天惯例', '魔术 玩法 流程', '惯例 步骤 推拉'],
+              llmHistory, effectivePrompt, { ...quotaOpts, pickCount: 4 }
+            );
+            if (convItems.length > 0) {
+              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query);
+              if (st) {
+                memoryCard = { ...(memoryCard || {}), strategy: st };
+                quotaOpts.strategyActive = true; // 本轮起按执行期配额
+              }
+            }
+          } catch (e: any) {
+            console.warn('strategy bootstrap failed:', e.message);
+          }
         }
       } catch (e: any) {
-        console.warn('extractStrategy failed:', e.message);
+        console.error('知识库检索失败:', e.message);
       }
     }
 
@@ -313,6 +332,8 @@ Deno.serve(async (req) => {
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
         strategy_clear: strategyClear,
+        folder_hs: !!kbFolders?.hs,
+        folder_jx: !!kbFolders?.jx,
       },
     }), { headers, status: 200 });
 
@@ -665,11 +686,78 @@ async function llmChat(
 // [v6 L1] 检索知识库（多查询）并拉取前 KB_REF_COUNT 条原文
 //   queries: 搜索词列表（改写/原句 + 关键词）
 //   内部 searchKb 按"多词命中次数"排序去重
+//   [v7] opts：{hsFolder,jxFolder,strategyActive,pickCount} 状态感知配额
 // ============================================================
-async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string): Promise<any[]> {
+async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string, opts?: {
+  hsFolder?: string | null;
+  jxFolder?: string | null;
+  strategyActive?: boolean;
+  pickCount?: number;
+}): Promise<any[]> {
   const items = await searchKb(clientId, apiKey, kbId, queries, history, systemPrompt);
   if (items.length === 0) return [];
-  return fetchItemsContent(clientId, apiKey, items.slice(0, KB_REF_COUNT));
+  const picked = opts ? applyQuota(items, opts) : items.slice(0, KB_REF_COUNT);
+  return fetchItemsContent(clientId, apiKey, picked);
+}
+
+// ============================================================
+// [v7] 状态感知配额：话术/教学两类内容按 strategy 状态分桶选取，
+//   保证"话术加权"不消灭策略素材——两类始终同在上下文，LLM 自行取舍
+//   执行期：话术 ≤3 + 教学 ≤2；未启动期：教学 ≤3 + 话术 ≤2
+// ============================================================
+function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean; pickCount?: number }): any[] {
+  const count = opts.pickCount || KB_REF_COUNT;
+  const hs = opts.hsFolder;
+  const jx = opts.jxFolder;
+  if (!hs && !jx) return items.slice(0, count);
+
+  const hsList: any[] = [];
+  const jxList: any[] = [];
+  const otherList: any[] = [];
+  for (const it of items) {
+    const pid = it.parent_folder_id || '';
+    if (hs && pid === hs) hsList.push(it);
+    else if (jx && pid === jx) jxList.push(it);
+    else otherList.push(it);
+  }
+
+  const hsQuota = opts.strategyActive ? 3 : 2;
+  const jxQuota = opts.strategyActive ? 2 : 3;
+  const picked = [
+    ...hsList.slice(0, Math.min(hsQuota, count)),
+    ...jxList.slice(0, Math.min(jxQuota, count)),
+    ...otherList,
+  ];
+  return picked.slice(0, count);
+}
+
+// ============================================================
+// [v7] 知识库文件夹识别：递归遍历，按名称匹配
+//   返回 {hs:话术文件夹id, jx:教学文件夹id}，识别不到则为 null（降级不配额）
+// ============================================================
+async function fetchKbFolders(clientId: string, apiKey: string, kbId: string): Promise<{ hs: string | null; jx: string | null }> {
+  const res: { hs: string | null; jx: string | null } = { hs: null, jx: null };
+  try {
+    async function walk(folderId: string): Promise<void> {
+      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 100 };
+      if (folderId) body.folder_id = folderId;
+      const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
+      const list = data?.knowledge_list || [];
+      for (const item of list) {
+        if (item.media_type === 99) {
+          const fid = item.folder_id || item.media_id || '';
+          const name = item.title || '';
+          if (!res.hs && /话术|惯例/.test(name)) res.hs = fid;
+          if (!res.jx && /教学|理论|课程/.test(name)) res.jx = fid;
+          if (fid) await walk(fid);
+        }
+      }
+    }
+    await walk('');
+  } catch (e: any) {
+    console.warn('fetchKbFolders failed:', e.message);
+  }
+  return res;
 }
 
 // ============================================================
