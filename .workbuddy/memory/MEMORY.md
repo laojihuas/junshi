@@ -44,7 +44,8 @@
 - **启动**：检索结果含惯例特征词（惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读）→ `extractStrategy` LLM 提炼步骤；steps<2 或未命中特征不启动
 - **注入**【当前执行套路】：**套路=方向盘（优先级高于检索参考资料），检索=弹药（方向一致采用/冲突忽略或借鉴语气）**；先顺应女方再拉回；**严禁向对方提及套路/步骤/进度等元信息**；套路完成/失效自然收尾
 - **打断**：`"/"` 开头输入 = 用户指令 → `strategyClear` 清除套路；每轮 `rounds_used+1` 达上限自动终止
-- **检索配额平衡（v18）**：`fetchKbFolders` 按名识别话术/教学文件夹（识别不到降级不配额）→ `applyQuota` 状态感知配额（执行期话术≤3+教学≤2、未启动期教学≤3+话术≤2），**两类内容始终同在上下文**；套路启动走**独立惯例检索通道**（"聊天惯例/魔术玩法流程/惯例步骤推拉"），结果只喂 extractStrategy **不混入主回复参考**
+- **检索配额平衡（v18）**：`fetchKbFolders` 按名识别话术/教学文件夹（识别不到降级不配额）→ `applyQuota` 状态感知配额（执行期话术≤3+教学≤2、未启动期教学≤3+话术≤2），**两类内容始终同在上下文**；套路启动走**独立惯例检索通道**（短词：惯例/推拉/冷读/开场白/步骤，长句返回空），结果只喂 extractStrategy **不混入主回复参考**
+- **IMA 接口踩坑（v24 实测）**：`get_knowledge_list` limit **≤50**（code=51）；文件夹字段是 `title`/`media_id`（name/folder_id 为 null）；`search_knowledge` 只认**短关键词**（"魔术/玩法/暧昧升级"=0 条）；新版 API key（sb_publishable/sb_secret）非 JWT，postgREST 不接受单作 Bearer，REST 需 apikey+Bearer 双传
 - `_debug` 含 `strategy_name/strategy_rounds/strategy_clear/folder_hs/folder_jx` 便于验证
 - **部署坑**：本机 curl schannel SSL 握手失败 → 云端部署 Edge Function 改用 **Python requests** multipart（metadata 字段名 `entrypoint_path`），脚本模板可放 Temp 不入库
 
