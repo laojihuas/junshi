@@ -307,8 +307,8 @@ const Chat = {
     async _callIMA(query, opts = {}) {
         const config = window.APP_CONFIG?.ima;
         if (!config || !config.proxyUrl) {
-            // 降级：返回模拟回复（开发调试用）
-            return this._mockReply(query);
+            // [v20260802] 未接入 AI（配置缺失）：直接提示掉线，不再返回模拟回复
+            return '掉线了';
         }
 
         try {
@@ -345,8 +345,9 @@ const Chat = {
             const data = await response.json();
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
-            console.error('[军师] IMA API 调用失败，使用降级回复:', e);
-            return this._mockReply(query);
+            console.error('[军师] IMA API 调用失败，提示掉线:', e);
+            // [v20260802] API 调用失败/未接入 AI：直接回复"掉线了"，不再返回模拟回复
+            return '掉线了';
         }
     },
 

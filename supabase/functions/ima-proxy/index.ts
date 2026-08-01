@@ -215,6 +215,8 @@ Deno.serve(async (req) => {
     let kbFallback = false;
     let usedRewrite = false;
     let kbFolders: { hs: string | null; jx: string | null } = { hs: null, jx: null };
+    // [v8] 语义拆解词（if 块外声明：_debug 在块外引用，块内 let 会 ReferenceError → 500）
+    let semanticKws: string[] = [];
 
     // ---- 知识库检索（L1 增强） ----
     if (imaKey && imaClientId && kbId) {
@@ -231,7 +233,6 @@ Deno.serve(async (req) => {
 
         // [v8] 1. LLM 语义拆解（词表约束 + few-shot）→ 知识库主题检索词
         const kw = extractKeywordsFromHistory(history, query);
-        let semanticKws: string[] = [];
         if (llmKey) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages);
         }
