@@ -314,7 +314,9 @@ const Chat = {
         try {
             const body = {
                 query: query,
-                knowledge_base_id: config.knowledgeBaseId
+                knowledge_base_id: config.knowledgeBaseId,
+                // [v6 记忆卡] 会话 ID：后端据此读写该好友的对方画像记忆卡（跨窗口共享）
+                session_id: this.currentSessionId
             };
             // 附带窗口对话历史（若存在）
             if (opts.history && opts.history.length > 0) {

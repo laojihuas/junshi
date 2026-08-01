@@ -1,28 +1,41 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v2)
+// 军师 - Supabase Edge Function: IMA API 代理 (v6)
 //
-// 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 返回基于知识库内容的回复
+// 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
 //
-// v2 改进（修复"答非所问"）：
-//   1. 关键词提取：整句搜索命中率低，自动拆分为关键词多次搜索并合并去重
-//   2. 内容获取：搜索结果命中 markdown 文档时，调用 get_media_info 拉取原文，
-//      回复基于真实知识库内容，而非仅文档标题
-//   3. 明确降级提示：未命中知识库时回复中标注，便于区分"知识库回复"与"通用建议"
+// [v6 智能化改造 - 三期全部落地]
+//   L0 参数与裁剪：
+//     - max_tokens 800 → 1200（避免长回复被截断）
+//     - temperature 0.7 → 0.5（回复更稳定贴合知识库风格）
+//     - 单条 history 超 800 字截断（防止单条消息淹没上下文）
+//     - 知识库参考 3 条 → 5 条，原文截断 260 → 500 字
+//   L1 检索增强（解决"离题"）：
+//     - 联合关键词提取：从最近 5 条对方消息 + query 一起提取 bigram 关键词
+//     - 条件 query rewrite：规则关键词不足时用轻量 LLM 改写为完整检索问句
+//     - 两轮检索：首轮（改写/query+关键词）→ 不足 2 条用历史关键词补搜
+//     - 结果按多词命中次数排序去重（searchKb 内部统计 hits）
+//   L2 上下文工程 + 记忆卡（解决"深度"）：
+//     - 近详远略：最近 10 条全文 + 更早只保留对方消息（≤120字/条）作摘要注入 system
+//     - 对方画像记忆卡（chat_sessions.memory_card，跨窗口共享）：
+//       profile{stage,personality,relationship_note,recent_events} + recent_user_messages
+//       主回复前读取注入 system；主回复后异步合并更新（画像提取频率 ≤ 每3分钟一次）
+//     - 输出格式约束：【分析】+【回复建议 N】+【小提示】结构化三段
+//   L3 提示词体系：
+//     - 场景指令：按记忆卡 stage 注入对应关系阶段的指导（追求/暧昧/恋爱/挽回/普通朋友）
+//     - 全局提示词(后台可编辑) > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 //
-// IMA API:
-//   POST https://ima.qq.com/openapi/wiki/v1/search_knowledge
-//   POST https://ima.qq.com/openapi/wiki/v1/get_media_info
-//   Headers: ima-openapi-clientid, ima-openapi-apikey
+// 兼容性：所有增强均为服务端内部实现；旧前端（不传 session_id/history）自动降级，
+// 原有"知识库拼装"与"通用建议"降级链保持不变。
 //
-// [v3 新增] 多窗口会话 + 统一提示词支持：
-//   请求体新增可选参数 history（对话历史数组 [{role, content}]）
-//   与 system_prompt（后台统一管理的系统提示词，前端用户不可见）。
-//   二者随 search_knowledge 请求体透传给 IMA；
-//   若 IMA 拒绝附加参数，自动回退为不带附加参数的原始调用，
-//   保证原有功能不受影响。
+// 请求体（JSON）：
+//   query          必填 当前内容（用户粘贴的对方的话）
+//   knowledge_base_id  可选，默认取环境变量
+//   history        可选 本窗口对话历史 [{role,content}]
+//   system_prompt  可选 后台统一提示词（前端用户不可见）
+//   session_id     可选 数据库会话 ID（chat_sessions.id），用于读写记忆卡
 //
-// 环境变量：
-//   IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES
+// 环境变量：IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES,
+//           LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 // ============================================================
 
 const IMA_BASE = 'https://ima.qq.com';
@@ -42,6 +55,24 @@ const STOP_WORDS = new Set([
 // 中文标点切分
 const SPLIT_RE = /[，。！？；、,.!?;:\s\n\r"'""''（）()【】\[\]]+/;
 
+// [v6 L3] 关系阶段 → 场景指导映射（由记忆卡 profile.stage 触发）
+const STAGE_HINTS: Record<string, string> = {
+  '追求': '对方处于被追求阶段：回复要自然不油腻、适度示好、多关注对方，避免查户口式提问。',
+  '暧昧': '双方处于暧昧期：营造轻松氛围、适当推进关系、保留一点张力与神秘感。',
+  '恋爱': '双方已是恋人：回复温暖有生活感、关注细节，避免过度客气生分。',
+  '挽回': '关系出现裂痕：先稳住对方情绪、不纠缠不施压，以重建信任为先。',
+  '普通朋友': '对方是普通朋友：保持得体大方、不越界、话题轻松。',
+  '未知': '',
+};
+
+// [v6 L0] 知识库参考条数与原文截断长度
+const KB_REF_COUNT = 5;
+const KB_CONTENT_MAX = 500;
+const HISTORY_ITEM_MAX = 800;   // 单条历史上限
+const SUMMARY_ITEM_MAX = 120;   // 更早消息摘要单条上限
+const RECENT_FULL = 10;         // 近详远略：最近 N 条全文
+const MEMORY_UPDATE_INTERVAL = 3 * 60 * 1000; // 画像提取频率：3 分钟
+
 Deno.serve(async (req) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -56,13 +87,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    // [v3] history: 本窗口对话历史数组（[{role, content}]），可为空
-    //       system_prompt: 前端可选的统一提示词（用户不可见）
-    // [v3.1] 统一提示词服务端兜底：无论前端是否传 system_prompt，
-    //        服务端都会保证拿到"最新的统一提示词"——
-    //        前端传了 → 使用前端值（实时获取，与后台一致）
-    //        前端没传（旧版本前端）→ 服务端自动从 app_config 读取注入
-    const { query, knowledge_base_id, history, system_prompt } = await req.json();
+    const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
     const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
 
     if (!query || !query.trim()) {
@@ -84,7 +109,7 @@ Deno.serve(async (req) => {
     }
     const user = await authResp.json();
 
-    // [v3.1] 统一提示词兜底：前端未提供时，服务端读取 app_config 注入
+    // ---- 统一提示词兜底 ----
     let effectivePrompt = (typeof system_prompt === 'string') ? system_prompt : '';
     if (!effectivePrompt.trim()) {
       effectivePrompt = await fetchSystemPrompt(supabaseUrl, serviceRoleKey);
@@ -127,59 +152,99 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ---- IMA 凭证检查 ----
+    // ---- IMA / LLM 凭证 ----
     const imaKey = Deno.env.get('IMA_API_KEY') || '';
     const imaClientId = Deno.env.get('IMA_CLIENT_ID') || '';
+    const llmKey = Deno.env.get('LLM_API_KEY') || '';
+    const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com';
+    const llmModel = Deno.env.get('LLM_MODEL') || 'deepseek-chat';
+
+    // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
+    const memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+
+    // [v6 L2] 上下文工程：近详远略压缩
+    //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
+    //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
+    const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
+
+    // 最近对方说过的话（供 query rewrite 与记忆卡使用）
+    const recentUserMessages = (Array.isArray(history) ? history : [])
+      .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+      .map((h) => h.content)
+      .slice(-3);
 
     let reply = '';
     let hitKnowledge = false;
-
-    // [v4] 多级回复生成：
-    //   1) 知识库参考：search_knowledge → 0命中时浏览回退（标题匹配），拉取原文
-    //   2) LLM 生成：system_prompt(统一提示词) + history(会话上下文) + query(当前内容)
-    //       + 知识库参考资料，一起发给 LLM，得到专业答复
-    //   3) LLM 未配置/失败 → 知识库内容拼装
-    //   4) 全部失败 → 通用建议
-    // 多会话隔离：history 由前端按"窗口×好友"从 sessionStorage 传递，
-    // ima-proxy 本身无状态，天然实现多用户多会话互不干扰。
-
     let kbItems: any[] = [];
     let kbFallback = false;
+    let usedRewrite = false;
+
+    // ---- 知识库检索（L1 增强） ----
     if (imaKey && imaClientId && kbId) {
       try {
-        // 1. 检索知识库（search → 浏览回退），前 3 条拉取原文
-        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, query.trim(), history, effectivePrompt);
+        // 1. 联合关键词：最近对方消息 + 当前 query
+        const kw = extractKeywordsFromHistory(history, query);
+        // 2. 条件 query rewrite：规则关键词不足 2 个时用 LLM 改写为完整问句
+        let searchQuery = query.trim();
+        if (kw.length < 2 && llmKey) {
+          const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
+          if (rw) { searchQuery = rw; usedRewrite = true; }
+        }
+        // 3. 首轮检索：改写/原句 + 关键词（内部按 hits 排序去重，前 5 条拉原文）
+        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt);
+        // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
+        if (kbItems.length < 2) {
+          const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
+          if (kw2.length > 0) {
+            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt);
+            const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_REF_COUNT);
+            if (merged.length > kbItems.length) kbItems = merged;
+          }
+        }
+        // 5. 浏览回退：标题匹配
         if (kbItems.length === 0) {
-          const browseItems = await browseKbByTitle(imaClientId, imaKey, kbId, query.trim());
+          const browseItems = await browseKbByTitle(imaClientId, imaKey, kbId, searchQuery || query);
           if (browseItems.length > 0) {
-            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, 3));
+            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, KB_REF_COUNT));
             kbFallback = true;
           }
         }
         hitKnowledge = kbItems.length > 0;
-      } catch (e) {
+      } catch (e: any) {
         console.error('知识库检索失败:', e.message);
       }
     }
 
-    // 2. LLM 生成专业答复（提示词 + 简介 + 上下文 + 当前内容 + 知识库参考）
-    const llmKey = Deno.env.get('LLM_API_KEY') || '';
+    // ---- LLM 主回复 ----
+    const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
     if (llmKey) {
       try {
-        // [v5] 读取用户个人简介（profiles.bio，200字上限），注入生成上下文
-        const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
-        reply = await buildLlmReply(llmKey, effectivePrompt, userBio, history, query.trim(), kbItems, kbFallback);
-      } catch (e) {
+        // 组装 system：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
+        const systemContent = buildSystemContent({
+          systemPrompt: effectivePrompt,
+          userBio,
+          memoryCard,
+          olderSummary,
+          kbItems,
+          kbFallback,
+        });
+        const messages: any[] = [
+          { role: 'system', content: systemContent },
+          ...llmHistory,
+          { role: 'user', content: query.trim() },
+        ];
+        reply = await llmChat(llmKey, llmBase, llmModel, messages, { temperature: 0.5, maxTokens: 1200 });
+      } catch (e: any) {
         console.error('LLM error:', e.message);
       }
     }
 
-    // 3. LLM 未配置/失败 → 知识库拼装（原有行为）
+    // ---- 降级：知识库拼装（LLM 不可用/失败） ----
     if (!reply && kbItems.length > 0) {
       reply = assembleKbReply(kbItems, kbFallback);
     }
 
-    // 4. 降级回复（LLM 与知识库均不可用）
+    // ---- 降级：通用建议 ----
     if (!reply) {
       const fallbacks = [
         `关于"${query}"，建议你：\n1️⃣ 先认可对方的感受\n2️⃣ 表达你的真实想法\n3️⃣ 用开放性问题引导对话`,
@@ -190,6 +255,18 @@ Deno.serve(async (req) => {
         ? '（知识库服务未配置，以下为通用建议）'
         : '（未检索到知识库相关内容，以下为通用建议）';
       reply = reason + '\n\n' + fallbacks[Math.floor(Math.random() * fallbacks.length)];
+    }
+
+    // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
+    if (session_id) {
+      try {
+        await updateMemoryCard({
+          supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
+          history, llmKey, llmBase, llmModel, existingCard: memoryCard,
+        });
+      } catch (e: any) {
+        console.error('记忆卡更新失败:', e.message);
+      }
     }
 
     // ---- 记录使用次数 ----
@@ -206,12 +283,14 @@ Deno.serve(async (req) => {
       from_knowledge_base: hitKnowledge,
       usage_count: profile.usage_count + (vipValid ? 0 : 1),
       is_vip: vipValid,
-      // [v3 调试] 回显本次请求携带的上下文，用于确认
-      // system_prompt / history 是否真正到达 ima-proxy（前端不可见提示词内容，仅回显长度）
       _debug: {
         system_prompt_len: (effectivePrompt || '').length,
         history_len: Array.isArray(history) ? history.length : 0,
+        llm_history_len: llmHistory.length,
         kb_hits: hitKnowledge,
+        kb_items: kbItems.length,
+        rewrite_used: usedRewrite,
+        memory_stage: memoryCard?.profile?.stage || null,
       },
     }), { headers, status: 200 });
 
@@ -222,41 +301,275 @@ Deno.serve(async (req) => {
 });
 
 // ============================================================
-// [v3.1] 从 app_config 读取统一提示词（service_role，绕过 RLS）
-// 供"前端未传 system_prompt"时服务端兜底注入。
-// 读取失败返回空字符串（不影响主流程）。
+// [v6 L2] 近详远略：上下文压缩
+//   最近 RECENT_FULL 条全文（单条截断 HISTORY_ITEM_MAX）；
+//   更早的只保留对方消息（≤SUMMARY_ITEM_MAX/条，最多 8 条）拼成摘要
 // ============================================================
-async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): Promise<string> {
+function buildContextParts(history: any[]): { recent: any[]; summary: string } {
+  const valid = (Array.isArray(history) ? history : [])
+    .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
+  const recent = valid.slice(-RECENT_FULL).map((h) => ({
+    role: h.role,
+    content: truncateText(h.content, HISTORY_ITEM_MAX),
+  }));
+  const older = valid.slice(0, Math.max(0, valid.length - RECENT_FULL));
+  const olderUsers = older.filter((h) => h.role === 'user').map((h) => truncateText(h.content, SUMMARY_ITEM_MAX));
+  const summary = olderUsers.length > 0
+    ? '【更早对话要点（对方说过的话，供把握前因后果）】\n' + olderUsers.slice(-8).join('\n')
+    : '';
+  return { recent, summary };
+}
+
+// ============================================================
+// [v6 L1] 联合关键词提取：最近 5 条对方消息 + query
+//   historyOnly=true 时只从历史提取（用于第二轮补搜）
+// ============================================================
+function extractKeywordsFromHistory(history: any[], query: string, historyOnly = false): string[] {
+  const texts: string[] = [];
+  if (!historyOnly && query) texts.push(query);
+  if (Array.isArray(history)) {
+    const users = history
+      .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+      .map((h) => h.content)
+      .slice(-5);
+    texts.push(...users);
+  }
+  return extractKeywords(texts.join(' '));
+}
+
+// ============================================================
+// [v6 L1] 条件 query rewrite：把碎片化问题改写为完整检索问句
+//   仅在规则关键词不足时触发，成功后用于首轮检索
+// ============================================================
+async function rewriteQuery(llmKey: string, llmBase: string, llmModel: string, query: string, recentUserMsgs: string[]): Promise<string> {
   try {
-    const resp = await fetch(
-      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt`,
-      { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
-    );
-    if (!resp.ok) {
-      console.warn('fetchSystemPrompt failed:', resp.status);
-      return '';
-    }
-    const rows = await resp.json();
-    return (rows?.[0]?.system_prompt) || '';
-  } catch (e) {
-    console.warn('fetchSystemPrompt error:', e.message);
+    const prompt = `你是恋爱话术检索助手。用户的问题："${query}"` +
+      (recentUserMsgs.length > 0 ? `\n最近对话（对方说的话）：\n${recentUserMsgs.slice(-2).join('\n')}` : '') +
+      `\n请把问题改写成一个完整、适合检索恋爱资料库的问句（例如："女生对我说不想理我，我该怎么回复"）。只输出改写后的问句本身，30 字以内，不要任何解释。`;
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.3, maxTokens: 60,
+    });
+    return content ? content.slice(0, 60) : '';
+  } catch (e: any) {
+    console.warn('rewriteQuery failed:', e.message);
     return '';
   }
 }
 
 // ============================================================
-// [v4] 检索知识库并拉取前 3 条原文，返回 [{media_id,title,content}]
-// search_knowledge 优先；携带 history/system_prompt 透传（容错回退）
+// [v6] 记忆卡类型与读写
+//   chat_sessions.memory_card 存 JSON 字符串：
+//   { profile:{stage,personality,relationship_note,recent_events},
+//     recent_user_messages:[...], updated_at }
 // ============================================================
-async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, query: string, history?: any[], systemPrompt?: string): Promise<any[]> {
-  const keywords = extractKeywords(query);
-  const items = await searchKb(clientId, apiKey, kbId, query, keywords, history, systemPrompt);
-  if (items.length === 0) return [];
-  return fetchItemsContent(clientId, apiKey, items.slice(0, 3));
+type MemoryCard = {
+  profile?: { stage?: string; personality?: string; relationship_note?: string; recent_events?: string };
+  recent_user_messages?: string[];
+  updated_at?: string;
+};
+
+async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
+  try {
+    if (!sessionId) return null;
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(sessionId)}&select=memory_card`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'apikey': anonKey } }
+    );
+    if (!resp.ok) return null;
+    const rows = await resp.json();
+    const raw = rows?.[0]?.memory_card;
+    if (!raw) return null;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (e: any) {
+    console.warn('readMemoryCard failed:', e.message);
+    return null;
+  }
+}
+
+async function writeMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId: string, card: MemoryCard): Promise<void> {
+  if (!sessionId) return;
+  await fetch(
+    `${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${token}`, 'apikey': anonKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ memory_card: JSON.stringify(card) }),
+    }
+  );
+}
+
+// [v6 L2] 记忆卡更新：
+//   1) 规则追加"对方说的话"（毫秒级，每次请求）
+//   2) 画像合并（LLM 提取，频率 ≤ MEMORY_UPDATE_INTERVAL）
+async function updateMemoryCard(ctx: {
+  supabaseUrl: string; token: string; anonKey: string; sessionId: string;
+  history: any[]; llmKey: string; llmBase: string; llmModel: string;
+  existingCard: MemoryCard | null;
+}): Promise<void> {
+  const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
+
+  // 1) 规则追加对方最近说过的话（去重：与最后一条相同则跳过）
+  const lastUser = [...(Array.isArray(ctx.history) ? ctx.history : [])]
+    .reverse().find((h) => h && h.role === 'user' && typeof h.content === 'string');
+  const msgs = Array.isArray(card.recent_user_messages) ? card.recent_user_messages.slice() : [];
+  if (lastUser && (msgs.length === 0 || msgs[msgs.length - 1] !== lastUser.content)) {
+    msgs.push(truncateText(lastUser.content, 200));
+    if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
+    card.recent_user_messages = msgs;
+  }
+
+  // 2) 画像合并（频率控制）
+  let needProfile = true;
+  if (card.updated_at) {
+    const last = new Date(card.updated_at).getTime();
+    needProfile = !isNaN(last) && (Date.now() - last) > MEMORY_UPDATE_INTERVAL;
+  }
+  if (needProfile && ctx.llmKey) {
+    const profile = await extractProfile(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
+    if (profile) card.profile = profile;
+    card.updated_at = new Date().toISOString();
+  }
+
+  await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
+}
+
+// [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
+async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<any> {
+  const cur = JSON.stringify(card.profile || {});
+  const recentDialogue = (Array.isArray(history) ? history : [])
+    .slice(-6)
+    .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
+    .join('\n');
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）。只输出 JSON 对象，不要任何其他文字。`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.3, maxTokens: 300,
+    });
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const p = JSON.parse(content.slice(start, end + 1));
+    return {
+      stage: typeof p.stage === 'string' && p.stage ? p.stage : '未知',
+      personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
+      relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
+      recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
+    };
+  } catch (e: any) {
+    console.warn('extractProfile failed:', e.message);
+    return null;
+  }
 }
 
 // ============================================================
-// [v4] 对条目批量拉取 markdown 原文
+// [v6 L2/L3] system 提示词组装
+// 顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
+// ============================================================
+function buildSystemContent(opts: {
+  systemPrompt: string;
+  userBio: string;
+  memoryCard: MemoryCard | null;
+  olderSummary: string;
+  kbItems: any[];
+  kbFallback: boolean;
+}): string {
+  let s = opts.systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。';
+
+  // 场景指令（L3：按关系阶段注入指导）
+  const stage = opts.memoryCard?.profile?.stage || '';
+  if (stage && STAGE_HINTS[stage]) {
+    s += `\n\n【当前关系阶段】${STAGE_HINTS[stage]}`;
+  }
+
+  // 用户简介
+  if (opts.userBio && opts.userBio.trim()) {
+    s += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${opts.userBio.trim()}`;
+  }
+
+  // 记忆卡：对方画像
+  const profile = opts.memoryCard?.profile;
+  if (profile && (profile.personality || profile.relationship_note || profile.recent_events)) {
+    const parts: string[] = [];
+    if (profile.personality) parts.push(`性格：${profile.personality}`);
+    if (profile.relationship_note) parts.push(`关系背景：${profile.relationship_note}`);
+    if (profile.recent_events) parts.push(`最近事件：${profile.recent_events}`);
+    s += `\n\n【对方画像记忆】（跨轮次记住，回答时不要重复询问这些已知信息）\n${parts.join('\n')}`;
+  }
+
+  // 记忆卡：对方近期说过的话
+  const msgs = opts.memoryCard?.recent_user_messages || [];
+  if (msgs.length > 0) {
+    s += `\n\n【对方近期说过的话】（供判断语感与关系状态）\n${msgs.slice(-8).join('\n')}`;
+  }
+
+  // 更早对话摘要
+  if (opts.olderSummary) {
+    s += `\n\n${opts.olderSummary}`;
+  }
+
+  // 知识库参考
+  if (opts.kbItems.length > 0) {
+    const kbText = opts.kbItems
+      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${item.content || ''}`)
+      .join('\n\n');
+    s += `\n\n以下是从知识库检索到的参考资料，回答时优先参考这些资料的内容和风格：\n${kbText}`;
+    if (opts.kbFallback) {
+      s += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
+    }
+  }
+
+  // 输出格式约束（L2）
+  s += `\n\n【回复格式要求】（严格遵守）\n① 分析：1-2 句，结合对方画像与当前情况说明局面，用【分析】开头\n② 话术：1-3 条可直接复制发给对方的话，每条用"回复建议 N：xxx"，口语化、贴合当前关系阶段，像真人发消息\n③ 提示：1 条简短行动建议（可选），用【小提示】开头`;
+
+  return s;
+}
+
+// ============================================================
+// [v6] LLM 统一调用（OpenAI 兼容）
+// ============================================================
+async function llmChat(
+  llmKey: string, llmBase: string, llmModel: string,
+  messages: any[], opts: { temperature?: number; maxTokens?: number } = {}
+): Promise<string> {
+  const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${llmKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: llmModel,
+      messages,
+      temperature: opts.temperature ?? 0.5,
+      max_tokens: opts.maxTokens ?? 1200,
+    }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error('LLM 返回内容为空');
+  }
+  return content.trim();
+}
+
+// ============================================================
+// [v6 L1] 检索知识库（多查询）并拉取前 KB_REF_COUNT 条原文
+//   queries: 搜索词列表（改写/原句 + 关键词）
+//   内部 searchKb 按"多词命中次数"排序去重
+// ============================================================
+async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string): Promise<any[]> {
+  const items = await searchKb(clientId, apiKey, kbId, queries, history, systemPrompt);
+  if (items.length === 0) return [];
+  return fetchItemsContent(clientId, apiKey, items.slice(0, KB_REF_COUNT));
+}
+
+// ============================================================
+// 对条目批量拉取 markdown 原文
 // ============================================================
 async function fetchItemsContent(clientId: string, apiKey: string, items: any[]): Promise<any[]> {
   return Promise.all(
@@ -268,7 +581,7 @@ async function fetchItemsContent(clientId: string, apiKey: string, items: any[])
 }
 
 // ============================================================
-// [v4] 知识库内容拼装回复（无 LLM 时的降级路径，原有行为）
+// 知识库内容拼装回复（无 LLM 时的降级路径）
 // ============================================================
 function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
   const lines: string[] = [usedFallbackBrowse
@@ -289,97 +602,7 @@ function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
 }
 
 // ============================================================
-// [v4] LLM 生成专业答复 —— 核心实现
-// 将「统一提示词 + 用户简介(bio) + 会话上下文(history) +
-// 当前内容(query) + 知识库参考资料」一起发送给 LLM
-// （OpenAI 兼容接口），得到真正基于提示词与上下文的专业回复。
-//
-// 组装顺序（system → messages → user）：
-//   统一提示词 > 用户简介 > 知识库参考资料（system）
-//   会话上下文 history（messages）
-//   当前内容 query（最后一条 user）
-//
-// 多会话隔离：history 来自各窗口 sessionStorage，每次请求独立组装，
-// ima-proxy 无状态 → 多用户多会话互不干扰。
-//
-// 环境变量：
-//   LLM_API_KEY  必填（DeepSeek / 混元 / OpenAI 等 API Key）
-//   LLM_BASE_URL 默认 https://api.hunyuan.cloud.tencent.com/v1
-//   LLM_MODEL    默认 hunyuan-lite
-// ============================================================
-async function buildLlmReply(
-  llmKey: string,
-  systemPrompt: string,
-  userBio: string,
-  history: any[],
-  query: string,
-  kbItems: any[],
-  kbFallback: boolean
-): Promise<string> {
-  const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.hunyuan.cloud.tencent.com/v1';
-  const llmModel = Deno.env.get('LLM_MODEL') || 'hunyuan-lite';
-
-  // 组装 system 提示词：统一提示词 > 用户简介 > 知识库参考资料
-  let systemContent = systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。';
-
-  // [v5] 用户个人简介（个性化内容，位于提示词之后）
-  if (userBio && userBio.trim()) {
-    systemContent += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${userBio.trim()}`;
-  }
-
-  if (kbItems.length > 0) {
-    const kbText = kbItems
-      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${item.content || ''}`)
-      .join('\n\n');
-    systemContent += `\n\n以下是从知识库检索到的参考资料，回答时优先参考这些资料的内容和风格：\n${kbText}`;
-    if (kbFallback) {
-      systemContent += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
-    }
-  }
-
-  // 组装 messages：system + 会话上下文 history + 当前问题
-  const messages: any[] = [{ role: 'system', content: systemContent }];
-  if (Array.isArray(history) && history.length > 0) {
-    // 只保留 role 合法的历史，且截取最近 20 条控制上下文长度
-    const valid = history
-      .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string')
-      .slice(-20)
-      .map((h) => ({ role: h.role, content: h.content }));
-    messages.push(...valid);
-  }
-  messages.push({ role: 'user', content: query });
-
-  const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${llmKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: llmModel,
-      messages,
-      temperature: 0.7,
-      max_tokens: 800,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string' || !content.trim()) {
-    throw new Error('LLM 返回内容为空');
-  }
-  return content.trim();
-}
-
-// ============================================================
-// [v3.2] 回退浏览：递归遍历知识库（含子文件夹），收集所有条目，
-// 用 bigram 关键词匹配标题，返回最多 5 条。
-// 用于 search_knowledge 中文检索 0 命中的兜底。
+// 回退浏览：递归遍历知识库（含子文件夹），bigram 标题匹配
 // ============================================================
 async function browseKbByTitle(clientId: string, apiKey: string, kbId: string, query: string): Promise<any[]> {
   const keywords = extractKeywords(query);
@@ -395,37 +618,30 @@ async function browseKbByTitle(clientId: string, apiKey: string, kbId: string, q
       const list = data?.knowledge_list || [];
       for (const item of list) {
         if (item.media_type === 99) {
-          // 文件夹：递归进入（用 folder_id 或 media_id 作为子文件夹 ID）
           const fid = item.folder_id || item.media_id || '';
           if (fid) await walk(fid);
         } else {
           all.push(item);
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(`browse folder "${folderId}" failed:`, e.message);
     }
   }
 
-  try { await walk(''); } catch (e) { console.error('browseKbByTitle error:', e.message); return []; }
+  try { await walk(''); } catch (e: any) { console.error('browseKbByTitle error:', e.message); return []; }
 
-  // 标题匹配（关键词命中或整句包含）
   const matches = all.filter((item: any) => {
     if ([2, 6, 8, 10, 12, 16, 17, 18, 19].includes(item.media_type)) return false;
     const title = item.title || '';
     return keywords.some((k) => title.includes(k)) || (query.length > 1 && title.includes(query));
   });
 
-  return matches.slice(0, 5);
+  return matches.slice(0, KB_REF_COUNT);
 }
 
 // ============================================================
 // 关键词提取：bigram（2字窗口）切词 → 双实义字优先 → top 5
-// 实测 IMA search_knowledge 对 2 字词命中率最高，
-// 整句/长词（3-4字）往往返回空结果。
-// 两阶段过滤：
-//   阶段1 严格：两字均为实义字（如"不回""高冷""约会"）→ 优先
-//   阶段2 宽松：至少一个实义字（如"不想""理我"）→ 补足名额
 // ============================================================
 const STOP_CHARS = new Set('的了吗呢啊呀吧怎么什么为要了是在和与就都也很也想可以应该着过把被让对给跟别还正在向从'.split(''));
 
@@ -447,53 +663,49 @@ function extractKeywords(query: string): string[] {
     else loose.push(b);
   }
 
-  // 严格词优先，宽松词补足；去重保序，最多 5 个
   return [...new Set([...strict, ...loose])].slice(0, 5);
 }
 
 // ============================================================
-// 搜索知识库：整句 + 关键词（bigram），合并去重
-// 每个关键词取前 2 条，总上限 6 条，控制耗时与噪声
-// [v3] 附加 history / system_prompt 透传；若 IMA 拒绝附加参数则回退
+// [v6 L1] 搜索知识库：多搜索词轮询，合并去重并按"命中词数"排序
+//   每个词取前 2 条，总上限 8 条；hits 越多排越前
 // ============================================================
-async function searchKb(clientId: string, apiKey: string, kbId: string, query: string, keywords: string[], history?: any[], systemPrompt?: string): Promise<any[]> {
-  const results: any[] = [];
-  const seen = new Set<string>();
+async function searchKb(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string): Promise<any[]> {
+  const map = new Map<string, { item: any; hits: number; order: number }>();
+  let order = 0;
 
-  const searchQueries = [query, ...keywords];
-  for (const q of searchQueries) {
+  for (const q of queries) {
     if (!q || q.length < 2) continue;
-    if (results.length >= 6) break;
+    if (map.size >= 8) break;
 
     try {
       const data = await callSearch(clientId, apiKey, kbId, q, history, systemPrompt);
       const list = (data?.info_list || []).slice(0, 2);
       for (const item of list) {
-        // 跳过文件夹（media_type=99）与纯图片/音视频
         if (item.media_type === 99) continue;
         if ([2, 6, 8, 10, 12, 16, 17, 18, 19].includes(item.media_type)) continue;
-        if (!seen.has(item.media_id)) {
-          seen.add(item.media_id);
-          results.push(item);
+        const key = item.media_id;
+        if (map.has(key)) {
+          map.get(key)!.hits += 1;
+        } else {
+          map.set(key, { item, hits: 1, order: order++ });
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error(`search "${q}" failed:`, e.message);
     }
   }
 
-  return results;
+  const sorted = [...map.values()].sort((a, b) => b.hits - a.hits || a.order - b.order);
+  return sorted.map((v) => v.item);
 }
 
 // ============================================================
-// [v3] search_knowledge 统一调用（带 history/system_prompt 透传 + 容错回退）
-// 先尝试携带附加参数；若 IMA 返回错误（可能不支持这些参数），
-// 去掉附加参数重试一次，确保原有检索功能不受影响。
+// search_knowledge 统一调用（带 history/system_prompt 透传 + 容错回退）
 // ============================================================
 async function callSearch(clientId: string, apiKey: string, kbId: string, q: string, history?: any[], systemPrompt?: string): Promise<any> {
   const baseBody: any = { query: q, knowledge_base_id: kbId, cursor: '' };
 
-  // 仅当存在有效附加数据时才携带（历史数组需为 [{role, content}] 结构）
   const hasHistory = Array.isArray(history) && history.length > 0 &&
     history.every((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
   const hasPrompt = typeof systemPrompt === 'string' && systemPrompt.trim() !== '';
@@ -503,13 +715,12 @@ async function callSearch(clientId: string, apiKey: string, kbId: string, q: str
   }
 
   const extraBody = { ...baseBody };
-  if (hasHistory) extraBody.history = history.slice(-20); // 最多携带最近 20 条
+  if (hasHistory) extraBody.history = history.slice(-RECENT_FULL); // 最多携带最近 10 条
   if (hasPrompt) extraBody.system_prompt = systemPrompt;
 
   try {
     return await callIma(clientId, apiKey, 'search_knowledge', extraBody);
-  } catch (e) {
-    // IMA 不接受附加参数 → 回退为原始调用（不抛错，保持兼容）
+  } catch (e: any) {
     console.warn(`IMA search with extra params failed (${e.message}), retry without extra params`);
     return callIma(clientId, apiKey, 'search_knowledge', baseBody);
   }
@@ -530,7 +741,7 @@ async function fetchDocContent(clientId: string, apiKey: string, item: any): Pro
     if (!resp.ok) return '';
     const text = await resp.text();
     return cleanMarkdown(text);
-  } catch (e) {
+  } catch (e: any) {
     console.error('fetch content failed:', e.message);
     return '';
   }
@@ -538,29 +749,26 @@ async function fetchDocContent(clientId: string, apiKey: string, item: any): Pro
 
 // ============================================================
 // Markdown 清洗：去 frontmatter、站点导航、标记符号、截断
+// [v6 L0] 截断 260 → KB_CONTENT_MAX(500)
 // ============================================================
 const NAV_LINES = ['首页', '恋爱话术资源社区', '下载APP', '登录 / 注册', '个人中心', '我的书架', '我的话术', '退出登录', '当前位置', '情感文章'];
 
 function cleanMarkdown(text: string): string {
   let t = text;
 
-  // 去掉 YAML frontmatter
   if (t.startsWith('---')) {
     const end = t.indexOf('\n---', 3);
     if (end !== -1) t = t.slice(end + 4);
   }
 
-  // 去掉网页抓取残留的站点导航行与元数据行
   t = t.split('\n').filter((line) => {
     const l = line.trim();
     if (!l) return true;
     if (NAV_LINES.some((n) => l.includes(n))) return false;
-    // 去掉"更新时间/阅读数/责任编辑"等元数据行
     if (/^(更新时间|更新日期|阅读数|责任编辑|来源|发布于)/.test(l)) return false;
     return true;
   }).join('\n');
 
-  // 去掉行内 markdown 符号
   t = t
     .replace(/```[\s\S]*?```/g, '')
     .replace(/^#{1,6}\s+/gm, '')
@@ -572,9 +780,8 @@ function cleanMarkdown(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  // 截断到 260 字（保留完整句子边界）
-  if (t.length > 260) {
-    const cut = t.slice(0, 260);
+  if (t.length > KB_CONTENT_MAX) {
+    const cut = t.slice(0, KB_CONTENT_MAX);
     const lastPunct = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('\n'));
     if (lastPunct > 80) {
       return cut.slice(0, lastPunct + 1) + '……';
@@ -582,6 +789,47 @@ function cleanMarkdown(text: string): string {
     return cut + '……';
   }
   return t;
+}
+
+// ============================================================
+// 工具函数
+// ============================================================
+function truncateText(text: string, max: number): string {
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return text.slice(0, max) + '……';
+}
+
+function mergeDedup(items: any[]): any[] {
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const it of items) {
+    if (!it || !it.media_id || seen.has(it.media_id)) continue;
+    seen.add(it.media_id);
+    out.push(it);
+  }
+  return out;
+}
+
+// ============================================================
+// [v3.1] 从 app_config 读取统一提示词（service_role，绕过 RLS）
+// ============================================================
+async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): Promise<string> {
+  try {
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt`,
+      { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+    );
+    if (!resp.ok) {
+      console.warn('fetchSystemPrompt failed:', resp.status);
+      return '';
+    }
+    const rows = await resp.json();
+    return (rows?.[0]?.system_prompt) || '';
+  } catch (e: any) {
+    console.warn('fetchSystemPrompt error:', e.message);
+    return '';
+  }
 }
 
 // ============================================================
