@@ -189,6 +189,23 @@ const App = {
             Chat.back();
         });
 
+        // [系统返回手势] 手机左边缘右滑 / 顶部返回键 = 浏览器后退 → popstate
+        // 后退：state 非 chat → 回好友列表；前进：state 是 chat → 重新打开对应会话
+        window.addEventListener('popstate', (e) => {
+            const state = e.state;
+            if (state && state.page === 'chat' && state.friendId) {
+                // 前进手势（极少出现）：恢复之前打开的聊天会话，不再 push 避免栈膨胀
+                Chat.open(state.friendId, false, true).catch(err => {
+                    console.error('[军师] popstate 恢复会话失败:', err);
+                    Friends.load();
+                    App.navigate('friends');
+                });
+            } else {
+                // 后退手势：从聊天页回到好友列表
+                Chat.back();
+            }
+        });
+
         // 聊天发送按钮
         document.getElementById('chat-send-btn').addEventListener('click', () => {
             Chat.send();

@@ -7,7 +7,7 @@ const Chat = {
     currentFriendName: '',
     messages: [],
 
-    async open(sessionId, restoreContext = false) {
+    async open(sessionId, restoreContext = false, fromHistory = false) {
         this.currentSessionId = sessionId;
         Utils.dlog('chat.open', 'session=' + sessionId + ' restore=' + restoreContext);
 
@@ -58,6 +58,12 @@ const Chat = {
         this.renderMessages();
 
         // 切换到聊天页面
+        // [系统返回手势] 进入聊天写入一条浏览器历史记录：
+        // 手机左边缘右滑 = 浏览器后退 = popstate → 应用内回到好友列表
+        // fromHistory=true（popstate 前进/恢复触发）时不再 push，避免历史栈膨胀
+        if (!fromHistory) {
+            history.pushState({ page: 'chat', friendId: sessionId }, '');
+        }
         App.navigate('chat');
         return true;
     },
@@ -237,11 +243,17 @@ const Chat = {
     },
 
     // 返回好友列表
+    // [系统返回手势] 统一走浏览器后退：按钮点击和手机左边缘右滑都触发 popstate，
+    // 由 App 的 popstate 监听切回好友列表；历史栈无可退时直接切换
     back() {
         // 回到好友列表：清除"最后查看"记录，下次启动默认进好友页
         WindowSession.saveLastView('friends');
-        Friends.load();
-        App.navigate('friends');
+        if (history.state && history.state.page === 'chat') {
+            history.back();
+        } else {
+            Friends.load();
+            App.navigate('friends');
+        }
     },
 
     // 检查是否可调用 API
