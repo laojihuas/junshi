@@ -14,8 +14,9 @@
 
 - **前端**：静态 SPA（帽子云托管），配置在 `config.js`（git 跟踪，含 Supabase anon key / IMA knowledgeBaseId）
 - **后端**：Supabase（项目 ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions: `ima-proxy`（IMA 知识库代理，v3 支持透传 history/system_prompt）、`activate-code`（激活码验证）、`prompt-get`（获取统一提示词）、`prompt-update`（管理员更新提示词）
-  - 数据表：`profiles` / `chat_sessions` / `chat_messages` / `activation_codes` / `app_config`（单行 id=1，存统一 system_prompt，需手动执行 `supabase/sql/001_app_config.sql` 建表）
+  - Edge Functions: `ima-proxy`（IMA 知识库代理，v3 支持透传 history/system_prompt）、`activate-code`（激活码验证）、`prompt-get`（获取统一提示词）、`prompt-update`（管理员更新提示词）、`invite-code`（获取/生成邀请码）、`invite-redeem`（注册兑现邀请，service_role + RPC）
+  - 数据表：`profiles` / `chat_sessions` / `chat_messages` / `activation_codes` / `app_config`（单行 id=1，存统一 system_prompt，需手动执行 `supabase/sql/001_app_config.sql` 建表）/ `invite_relations`（邀请关系，invitee_id 唯一）
+  - 数据库函数：`redeem_invite`（SECURITY DEFINER，原子兑现邀请：写关系 + 邀请人 usage_count+50，防自邀/重复/不存在，单码上限 20 人）
 - **IMA 知识库**：知识库「恋爱知识」，ID `nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI=`，凭证在本机 `~/.config/ima/`（client_id / api_key）
 
 ## 多窗口会话 + 统一提示词（v20260731）
