@@ -224,15 +224,33 @@ python -m http.server 8080
 
 | 表名 | 用途 |
 |------|------|
-| `profiles` | 用户扩展信息（使用次数、VIP 状态、设备指纹、is_admin） |
+| `profiles` | 用户扩展信息（使用次数、VIP 状态、设备指纹、is_admin、invite_code） |
 | `chat_sessions` | 聊天会话（好友列表） |
 | `chat_messages` | 聊天消息记录（持久化，跨刷新/跨设备保留） |
 | `activation_codes` | 激活码管理 |
 | `app_config` | 统一提示词配置（单行表，id=1，存 system_prompt） |
+| `invite_relations` | 邀请关系（inviter_id / invitee_id 唯一，一个账号只能被一个邀请人绑定） |
 
 ---
 
-## 五、多窗口独立会话 & 统一提示词（v20260731）
+## 五、邀请功能（v20260801）
+
+免费 50 次用完后弹出的购买界面中，新增"邀请好友免费得次数"卡片：
+
+- 每个用户有唯一 8 位邀请码（`invite-code` 函数自动生成，去易混淆字符）
+- 用户点"一键复制"可复制"邀请链接 + 邀请码"文案发给朋友
+- 朋友通过链接（带 `?invite=XXX`）打开，注册页自动预填邀请码；也可手动填写
+- 朋友注册成功 → 调 `invite-redeem` → 数据库函数 `redeem_invite` 原子完成
+  "写邀请关系 + 邀请人 usage_count +50 次"（防重复绑定、防自邀、单码上限 20 人防刷）
+
+部署：
+- 先执行 `supabase/sql/004_invite.sql`（建字段/表/函数）
+- 再部署两个函数：`invite-code`（获取/生成邀请码）、`invite-redeem`（兑现邀请）
+- `config.js` 增加 `invite` 配置段（getUrl / redeemUrl / siteUrl / rewardTries）
+
+---
+
+## 六、多窗口独立会话 & 统一提示词（v20260731）
 
 ### 实现原理
 
@@ -268,7 +286,7 @@ python -m http.server 8080
 
 ---
 
-## 六、注意事项
+## 七、注意事项
 
 1. **API Key 安全**：IMA 的 API Key 通过 Supabase Edge Function 的环境变量设置，绝不暴露在前端
 2. **发卡平台风险**：建议定期提现，长期应接入正规支付渠道
@@ -277,7 +295,7 @@ python -m http.server 8080
 
 ---
 
-## 七、技术栈
+## 八、技术栈
 
 - **前端**：纯 HTML + CSS + JavaScript（单页应用）
 - **后端**：Supabase（数据库 + 认证 + Edge Functions）

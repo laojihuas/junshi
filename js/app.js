@@ -21,6 +21,9 @@ const App = {
         // 绑定事件
         this._bindEvents();
 
+        // [邀请功能] URL 携带 ?invite=XXX 时：切到注册页并预填邀请码
+        this._applyInviteParam();
+
         // 检查登录状态
         const loggedIn = await Auth.init();
 
@@ -83,6 +86,26 @@ const App = {
         }
     },
 
+    // [邀请功能] 读取 URL 参数 ?invite=XXX，切到注册 tab 并预填邀请码
+    _applyInviteParam() {
+        try {
+            const params = new URLSearchParams(location.search);
+            const invite = (params.get('invite') || '').trim().toUpperCase();
+            if (!invite) return;
+            // 已登录用户无需注册，不预填
+            if (Auth.currentUser) return;
+            const input = document.getElementById('register-invite-code');
+            if (!input) return;
+            input.value = invite;
+            // 切换到注册 tab（好友点链接进来直接看到注册表单）
+            const tab = document.querySelector('.auth-tab[data-form="register"]');
+            if (tab) tab.click();
+            Utils.toast('已为你填好邀请码，注册即得 50 次免费额度');
+        } catch (e) {
+            console.warn('[军师] 应用邀请参数失败:', e);
+        }
+    },
+
     _bindEvents() {
         // 登录/注册切换 tab
         document.querySelectorAll('.auth-tab').forEach(tab => {
@@ -138,8 +161,10 @@ const App = {
                 Utils.toast('密码至少 6 位');
                 return;
             }
+            // [邀请功能] 读取邀请码（选填）
+            const inviteCode = document.getElementById('register-invite-code').value.trim().toUpperCase();
             Utils.showLoading();
-            const result = await Auth.register(email, password);
+            const result = await Auth.register(email, password, inviteCode);
             Utils.hideLoading();
             Utils.toast(result.message);
             if (result.success) {
@@ -147,6 +172,7 @@ const App = {
                 document.getElementById('register-email').value = '';
                 document.getElementById('register-password').value = '';
                 document.getElementById('register-confirm').value = '';
+                document.getElementById('register-invite-code').value = '';
             }
         });
 
@@ -245,6 +271,11 @@ const App = {
         // 激活码输入框回车
         document.getElementById('activation-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') Paywall.activate();
+        });
+
+        // [邀请功能] 一键复制（链接 + 邀请码）
+        document.getElementById('invite-copy-btn').addEventListener('click', () => {
+            Invite.copy();
         });
 
         // 退出登录

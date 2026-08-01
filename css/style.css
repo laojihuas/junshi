@@ -1091,6 +1091,92 @@ textarea.input {
     text-decoration: underline;
 }
 
+/* [邀请功能] 付费墙邀请卡片 */
+.paywall-invite {
+    text-align: center;
+    background: linear-gradient(145deg, rgba(7, 193, 96, 0.10), rgba(7, 193, 96, 0.03));
+    border: 1px solid rgba(7, 193, 96, 0.28);
+    border-radius: var(--radius-lg);
+    padding: 16px 14px;
+}
+
+.invite-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--wechat-green);
+    background: rgba(7, 193, 96, 0.14);
+    border: 1px solid rgba(7, 193, 96, 0.35);
+    padding: 2px 12px;
+    border-radius: 12px;
+    margin-bottom: 8px;
+}
+
+.invite-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.invite-title span {
+    color: var(--wechat-green);
+}
+
+.invite-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: 12px;
+}
+
+.invite-link-box {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+.invite-link-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 12px;
+    padding: 10px 10px;
+    text-align: left;
+    letter-spacing: 0;
+    color: var(--text-secondary);
+    background: var(--bg-surface);
+}
+
+.invite-copy-btn {
+    flex-shrink: 0;
+    padding: 10px 16px;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.invite-code-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.invite-code-label {
+    color: var(--text-muted);
+}
+
+.invite-code-val {
+    font-family: 'SF Mono', Consolas, 'Courier New', monospace;
+    font-weight: 700;
+    letter-spacing: 3px;
+    color: var(--wechat-green);
+    background: rgba(7, 193, 96, 0.10);
+    border: 1px dashed rgba(7, 193, 96, 0.4);
+    padding: 3px 10px;
+    border-radius: 6px;
+}
+
 /* ============================================================
    Toast / 加载指示器
    ============================================================ */

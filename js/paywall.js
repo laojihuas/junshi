@@ -7,6 +7,8 @@ const Paywall = {
         const overlay = document.getElementById('paywall-overlay');
         overlay.classList.add('active');
         this._updateUI();
+        // [邀请功能] 打开时异步加载我的邀请链接 + 邀请码
+        Invite.load();
     },
 
     hide() {
@@ -20,6 +22,11 @@ const Paywall = {
             `¥${config.price}<small>/月</small>`;
         document.getElementById('paywall-tries-desc').textContent =
             `50 次免费试用已用完，升级 VIP 无限使用`;
+        // [邀请功能] 展示单次邀请赠送次数
+        const rewardEl = document.getElementById('invite-reward-tries');
+        if (rewardEl) {
+            rewardEl.textContent = window.APP_CONFIG?.invite?.rewardTries || 50;
+        }
     },
 
     // 激活码验证

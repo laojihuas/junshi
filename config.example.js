@@ -33,6 +33,18 @@ window.APP_CONFIG = {
         verifyUrl: 'https://your-project-id.functions.supabase.co/activate-code'
     },
 
+    // [邀请功能] 邀请好友得次数
+    invite: {
+        // 获取/生成我的邀请码（登录用户）
+        getUrl: 'https://your-project-id.functions.supabase.co/invite-code',
+        // 兑现邀请（注册成功后调用，给邀请人 +50 次）
+        redeemUrl: 'https://your-project-id.functions.supabase.co/invite-redeem',
+        // 站点地址：邀请链接前缀（如 https://junshi.maozi.cloud；留空自动使用当前域名）
+        siteUrl: '',
+        // 单次邀请赠送次数
+        rewardTries: 50
+    },
+
     // 发卡平台商品页链接
     store: {
         // 用户点击"购买"时跳转的 URL

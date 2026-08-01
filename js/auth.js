@@ -52,8 +52,8 @@ const Auth = {
         return true;
     },
 
-    // 注册
-    async register(email, password) {
+    // 注册（inviteCode：邀请码，选填；填写后邀请人获得 +50 次额度）
+    async register(email, password, inviteCode) {
         const sb = getSupabaseClient();
         if (!sb) return { success: false, message: '系统未配置' };
 
@@ -74,6 +74,20 @@ const Auth = {
                 // 注册成功，记录设备指纹
                 const deviceId = await this._getDeviceId();
                 await DB.updateProfile(data.user.id, { device_id: deviceId });
+
+                // [邀请功能] 注册成功即兑现邀请：给邀请人 +50 次使用额度
+                if (inviteCode) {
+                    const inviteResult = await Invite.redeem(inviteCode, data.user.id, email.trim());
+                    if (inviteResult.success) {
+                        return { success: true, message: '注册成功！已邀请好友获得 50 次额度，请查看邮箱确认链接后登录。' };
+                    }
+                    // 邀请码无效/已被用过：不阻止注册，仅提示
+                    return {
+                        success: true,
+                        message: '注册成功！(' + inviteResult.message + ') 请查看邮箱确认链接后登录。'
+                    };
+                }
+
                 return { success: true, message: '注册成功！请查看邮箱确认链接后登录。' };
             }
 
