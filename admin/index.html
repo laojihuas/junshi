@@ -326,6 +326,40 @@
                     <span id="prompt-status" style="font-size:12px;color:var(--muted);"></span>
                 </div>
             </div>
+
+            <!-- LLM 生成参数（temperature / 惩罚系数，后端 ima-proxy 每次请求读取） -->
+            <div class="card" style="margin-top:16px;">
+                <div class="card-title">
+                    <span>LLM 生成参数</span>
+                    <span style="font-size:12px;color:var(--muted);">改完保存立即生效</span>
+                </div>
+                <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+                    temperature 控制随机性（低=稳，适合扮演用户）；frequency_penalty 压制重复表述（治 AI 味）；
+                    presence_penalty 鼓励新话题（建议保持 0，保护套路执行不跑题）。
+                </p>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                    <label style="font-size:12px;color:var(--muted);display:block;">
+                        temperature（0-2）
+                        <input id="llm-temperature" class="input" type="number" step="0.05" min="0" max="2" value="0.4" style="margin-top:4px;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">
+                        frequency_penalty（0-2）
+                        <input id="llm-frequency-penalty" class="input" type="number" step="0.05" min="0" max="2" value="0.5" style="margin-top:4px;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">
+                        presence_penalty（0-2）
+                        <input id="llm-presence-penalty" class="input" type="number" step="0.05" min="0" max="2" value="0" style="margin-top:4px;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">
+                        max_tokens（100-8000）
+                        <input id="llm-max-tokens" class="input" type="number" step="50" min="100" max="8000" value="1200" style="margin-top:4px;">
+                    </label>
+                </div>
+                <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+                    <button id="llm-save-btn" class="btn btn-primary">保存参数</button>
+                    <span id="llm-status" style="font-size:12px;color:var(--muted);"></span>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -559,6 +593,12 @@
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 const data = await resp.json();
                 textarea.value = data.system_prompt || '';
+                // 填充 LLM 参数（prompt-get 返回 llm_params）
+                const lp = data.llm_params || {};
+                document.getElementById('llm-temperature').value = lp.temperature ?? 0.4;
+                document.getElementById('llm-frequency-penalty').value = lp.frequency_penalty ?? 0.5;
+                document.getElementById('llm-presence-penalty').value = lp.presence_penalty ?? 0;
+                document.getElementById('llm-max-tokens').value = lp.max_tokens ?? 1200;
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -600,6 +640,47 @@
             } catch (e) {
                 console.error('保存提示词失败:', e);
                 status.textContent = '保存失败：' + (e.message || '请检查 prompt-update 函数是否已部署');
+                toast('保存失败：' + (e.message || '未知错误'));
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        // 保存 LLM 生成参数（仅管理员，prompt-update 后台校验权限）
+        async function saveLlmParams() {
+            const { updateUrl } = getPromptUrls();
+            const status = document.getElementById('llm-status');
+            const saveBtn = document.getElementById('llm-save-btn');
+            const getNum = (id) => parseFloat(document.getElementById(id).value);
+            const llm_params = {
+                temperature: getNum('llm-temperature'),
+                frequency_penalty: getNum('llm-frequency-penalty'),
+                presence_penalty: getNum('llm-presence-penalty'),
+                max_tokens: parseInt(document.getElementById('llm-max-tokens').value, 10)
+            };
+            if (isNaN(llm_params.temperature) || isNaN(llm_params.frequency_penalty) || isNaN(llm_params.presence_penalty) || isNaN(llm_params.max_tokens)) {
+                toast('参数格式不正确'); return;
+            }
+            saveBtn.disabled = true;
+            status.textContent = '保存中...';
+            try {
+                const resp = await fetch(updateUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + (await getSessionToken())
+                    },
+                    body: JSON.stringify({ llm_params })
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.success) {
+                    throw new Error(data.error || 'HTTP ' + resp.status);
+                }
+                status.textContent = '✅ 参数已保存，立即生效';
+                toast('LLM 参数保存成功');
+            } catch (e) {
+                console.error('保存 LLM 参数失败:', e);
+                status.textContent = '保存失败：' + (e.message || '请检查 prompt-update 函数');
                 toast('保存失败：' + (e.message || '未知错误'));
             } finally {
                 saveBtn.disabled = false;
@@ -697,6 +778,8 @@
                 document.getElementById('prompt-textarea').value = '';
                 loadPrompt();
             });
+            // [LLM 生成参数] 保存
+            document.getElementById('llm-save-btn').addEventListener('click', saveLlmParams);
         });
     </script>
 </body>

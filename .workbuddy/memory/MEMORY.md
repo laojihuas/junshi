@@ -28,7 +28,8 @@
 ## LLM 生成 + 用户简介 + 记忆卡（v6 智能化，ima-proxy v16）
 
 - **架构**：前端(query+窗口×好友history+session_id) → ima-proxy → [IMA知识库检索=参考] + [DeepSeek 生成专业答复]；提示词/简介/记忆卡服务端注入
-- **LLM 配置**（secrets）：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议；主回复 max_tokens=1200 / temperature=0.5
+- **LLM 配置**（secrets）：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议；主回复参数**后台可调**（`app_config.llm_params` JSON：temperature/frequency_penalty/presence_penalty/max_tokens，默认 0.4/0.5/0/1200，prompt-update 保存、admin 后台"LLM 生成参数"卡）
+- **定向摘要精读（v28）**：cleanMarkdown 返回全文不再截断；fetchItemsContent 对 >500 字长文档用 `summarizeRef`（LLM 针对当前问题提取要点 ≤320 字）替代硬截断；失败降级截断；套路通道不摘要
 - **我的简介**：`profiles.bio`（varchar 200）；前端好友页 ✎ 弹窗编辑（friends.js showBioModal/saveBio）
 - **v6 增强**（三期全落地）：
   - L0：单条 history >800 字截断；知识库参考 5 条 × 原文 500 字（KB_REF_COUNT/KB_CONTENT_MAX）

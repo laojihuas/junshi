@@ -39,23 +39,27 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: '认证失败' }), { headers, status: 401 });
     }
 
-    // ---- 读取统一提示词（app_config 单行表，id=1）----
+    // ---- 读取统一提示词 + LLM 参数（app_config 单行表，id=1）----
     // 使用 service_role 读取（不受 RLS 限制，确保一定能读到配置）
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     const configResp = await fetch(
-      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,updated_at`,
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params,updated_at`,
       { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
     );
 
     let systemPrompt = '';
+    let llmParams = {};
     if (configResp.ok) {
       const rows = await configResp.json();
       if (rows && rows.length > 0) {
         systemPrompt = rows[0].system_prompt || '';
+        if (rows[0].llm_params) {
+          try { llmParams = JSON.parse(rows[0].llm_params); } catch (e) { llmParams = {}; }
+        }
       }
     }
 
-    return new Response(JSON.stringify({ system_prompt: systemPrompt }), { headers, status: 200 });
+    return new Response(JSON.stringify({ system_prompt: systemPrompt, llm_params: llmParams }), { headers, status: 200 });
 
   } catch (error: any) {
     console.error('prompt-get error:', error.message);

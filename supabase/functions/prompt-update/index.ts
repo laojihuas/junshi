@@ -8,9 +8,31 @@
 // 权限：仅管理员可调用 —— 服务端使用 service_role 校验
 //       profiles.is_admin === true，不信任前端传入的任何权限标记。
 //
-// 请求：POST  body: { system_prompt: string }
-// 返回：{ success: true, system_prompt: string }
+// 请求：POST  body: { system_prompt?: string, llm_params?: object }
+//   system_prompt 与 llm_params 至少提供一个（llm_params 为 LLM 生成参数：
+//   temperature / frequency_penalty / presence_penalty / max_tokens）
+// 返回：{ success: true, system_prompt?: string, llm_params?: object }
 // ============================================================
+
+const LLM_PARAM_RANGE: Record<string, [number, number]> = {
+  temperature: [0, 2],
+  frequency_penalty: [0, 2],
+  presence_penalty: [0, 2],
+  max_tokens: [100, 8000],
+};
+
+function validateLlmParams(v: any): string | null {
+  if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'llm_params 必须为 JSON 对象';
+  for (const key of Object.keys(v)) {
+    if (!(key in LLM_PARAM_RANGE)) return `不支持的参数: ${key}`;
+    const val = v[key];
+    const [min, max] = LLM_PARAM_RANGE[key];
+    if (typeof val !== 'number' || !isFinite(val) || val < min || val > max) {
+      return `${key} 必须为 ${min}~${max} 之间的数字`;
+    }
+  }
+  return null;
+}
 
 Deno.serve(async (req) => {
   const headers = {
@@ -26,12 +48,19 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { system_prompt } = await req.json();
-    if (typeof system_prompt !== 'string') {
-      return new Response(JSON.stringify({ error: 'system_prompt 必须为字符串' }), { headers, status: 400 });
+    const body = await req.json();
+    const { system_prompt, llm_params } = body;
+    if (typeof system_prompt !== 'string' && llm_params === undefined) {
+      return new Response(JSON.stringify({ error: '至少提供 system_prompt 或 llm_params' }), { headers, status: 400 });
     }
-    if (system_prompt.length > 20000) {
+    if (typeof system_prompt === 'string' && system_prompt.length > 20000) {
       return new Response(JSON.stringify({ error: 'system_prompt 过长（上限 20000 字符）' }), { headers, status: 400 });
+    }
+    let llmParamsJson: string | null = null;
+    if (llm_params !== undefined) {
+      const err = validateLlmParams(llm_params);
+      if (err) return new Response(JSON.stringify({ error: err }), { headers, status: 400 });
+      llmParamsJson = JSON.stringify(llm_params);
     }
 
     // ---- 用户认证 ----
@@ -61,9 +90,17 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: '无权限：仅管理员可修改提示词' }), { headers, status: 403 });
     }
 
-    // ---- 更新统一提示词（用 upsert POST + Prefer merge-duplicates）----
+    // ---- 更新统一提示词 / LLM 参数（用 upsert POST + Prefer merge-duplicates）----
     // 用 upsert 而非 PATCH：因为 app_config 表是单行表，upsert 在主键冲突时
     // 自动走 update 路径；且 upsert 不受 PostgREST PATCH schema 缓存影响。
+    const patchBody: any = {
+      id: 1,
+      updated_by: user.id,
+      updated_at: new Date().toISOString()
+    };
+    if (typeof system_prompt === 'string') patchBody.system_prompt = system_prompt;
+    if (llmParamsJson !== null) patchBody.llm_params = llmParamsJson;
+
     const upsertResp = await fetch(`${supabaseUrl}/rest/v1/app_config`, {
       method: 'POST',
       headers: {
@@ -72,12 +109,7 @@ Deno.serve(async (req) => {
         'Content-Type': 'application/json',
         'Prefer': 'resolution=merge-duplicates,return=representation'
       },
-      body: JSON.stringify({
-        id: 1,
-        system_prompt: system_prompt,
-        updated_by: user.id,
-        updated_at: new Date().toISOString()
-      })
+      body: JSON.stringify(patchBody)
     });
 
     if (!upsertResp.ok) {
@@ -89,11 +121,10 @@ Deno.serve(async (req) => {
       }), { headers, status: 500 });
     }
 
-    return new Response(JSON.stringify({
-      success: true,
-      system_prompt: system_prompt,
-      message: '提示词已更新，所有用户下次发送消息时立即生效'
-    }), { headers, status: 200 });
+    const result: any = { success: true, message: '配置已更新，所有用户下次发送消息时立即生效' };
+    if (typeof system_prompt === 'string') result.system_prompt = system_prompt;
+    if (llmParamsJson !== null) result.llm_params = JSON.parse(llmParamsJson);
+    return new Response(JSON.stringify(result), { headers, status: 200 });
 
   } catch (error: any) {
     console.error('prompt-update error:', error.message);

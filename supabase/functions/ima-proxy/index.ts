@@ -109,11 +109,11 @@ Deno.serve(async (req) => {
     }
     const user = await authResp.json();
 
-    // ---- 统一提示词兜底 ----
+    // [v7] 读取 app_config：统一提示词兜底 + LLM 生成参数（后台可调）
+    const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
     let effectivePrompt = (typeof system_prompt === 'string') ? system_prompt : '';
-    if (!effectivePrompt.trim()) {
-      effectivePrompt = await fetchSystemPrompt(supabaseUrl, serviceRoleKey);
-    }
+    if (!effectivePrompt.trim()) effectivePrompt = appConfig.system_prompt;
+    const llmParams = appConfig.llm_params;
 
     // ---- 查询 profile ----
     const profileResp = await fetch(
@@ -207,13 +207,17 @@ Deno.serve(async (req) => {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
+        // [v7] 定向摘要精读：LLM 可用时对长文档做"针对当前问题"的摘要，替代硬截断
+        const kbSummaryOpts = llmKey
+          ? { llm: { key: llmKey, base: llmBase, model: llmModel, question: query } }
+          : undefined;
         // 3. 首轮检索：改写/原句 + 关键词（内部按 hits 排序去重，前 5 条拉原文）
-        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt, quotaOpts);
+        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts });
         // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt, quotaOpts);
+            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts });
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_REF_COUNT);
             if (merged.length > kbItems.length) kbItems = merged;
           }
@@ -222,7 +226,7 @@ Deno.serve(async (req) => {
         if (kbItems.length === 0) {
           const browseItems = await browseKbByTitle(imaClientId, imaKey, kbId, searchQuery || query);
           if (browseItems.length > 0) {
-            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, KB_REF_COUNT));
+            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, KB_REF_COUNT), kbSummaryOpts);
             kbFallback = true;
           }
         }
@@ -271,7 +275,12 @@ Deno.serve(async (req) => {
           ...llmHistory,
           { role: 'user', content: query.trim() },
         ];
-        reply = await llmChat(llmKey, llmBase, llmModel, messages, { temperature: 0.5, maxTokens: 1200 });
+        reply = await llmChat(llmKey, llmBase, llmModel, messages, {
+          temperature: llmParams.temperature,
+          maxTokens: llmParams.max_tokens,
+          frequencyPenalty: llmParams.frequency_penalty,
+          presencePenalty: llmParams.presence_penalty,
+        });
       } catch (e: any) {
         console.error('LLM error:', e.message);
       }
@@ -655,7 +664,7 @@ function buildSystemContent(opts: {
 // ============================================================
 async function llmChat(
   llmKey: string, llmBase: string, llmModel: string,
-  messages: any[], opts: { temperature?: number; maxTokens?: number } = {}
+  messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number } = {}
 ): Promise<string> {
   const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
@@ -666,8 +675,10 @@ async function llmChat(
     body: JSON.stringify({
       model: llmModel,
       messages,
-      temperature: opts.temperature ?? 0.5,
+      temperature: opts.temperature ?? 0.4,
       max_tokens: opts.maxTokens ?? 1200,
+      frequency_penalty: opts.frequencyPenalty ?? 0.5,
+      presence_penalty: opts.presencePenalty ?? 0,
     }),
   });
   if (!resp.ok) {
@@ -693,11 +704,12 @@ async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, 
   jxFolder?: string | null;
   strategyActive?: boolean;
   pickCount?: number;
+  llm?: { key: string; base: string; model: string; question: string };
 }): Promise<any[]> {
   const items = await searchKb(clientId, apiKey, kbId, queries, history, systemPrompt);
   if (items.length === 0) return [];
   const picked = opts ? applyQuota(items, opts) : items.slice(0, KB_REF_COUNT);
-  return fetchItemsContent(clientId, apiKey, picked);
+  return fetchItemsContent(clientId, apiKey, picked, opts?.llm ? { llm: opts.llm } : undefined);
 }
 
 // ============================================================
@@ -762,14 +774,45 @@ async function fetchKbFolders(clientId: string, apiKey: string, kbId: string): P
 
 // ============================================================
 // 对条目批量拉取 markdown 原文
+//   [v7] opts.llm 存在时：长文档（>KB_CONTENT_MAX）用 LLM 做
+//   "定向摘要"（针对当前问题提取要点），替代硬截断 500 字
 // ============================================================
-async function fetchItemsContent(clientId: string, apiKey: string, items: any[]): Promise<any[]> {
+async function fetchItemsContent(clientId: string, apiKey: string, items: any[], opts?: {
+  llm?: { key: string; base: string; model: string; question: string };
+}): Promise<any[]> {
   return Promise.all(
-    items.map(async (item) => ({
-      ...item,
-      content: await fetchDocContent(clientId, apiKey, item),
-    }))
+    items.map(async (item) => {
+      const full = await fetchDocContent(clientId, apiKey, item);
+      let content = full ? truncateText(full, KB_CONTENT_MAX) : '';
+      if (opts?.llm?.key && full && full.length > KB_CONTENT_MAX) {
+        const sum = await summarizeRef(opts.llm.key, opts.llm.base, opts.llm.model, opts.llm.question, item.title || '', full);
+        if (sum) content = sum;
+      }
+      return { ...item, content };
+    })
   );
+}
+
+// ============================================================
+// [v7] 定向摘要精读：针对当前问题，从长文档中提取相关要点
+//   替代"硬截断前 500 字"——长文档关键内容常在后段（如套路步骤）
+//   返回摘要（≤320 字）；失败/无关时返回 null（上层降级为截断）
+// ============================================================
+async function summarizeRef(llmKey: string, llmBase: string, llmModel: string, question: string, title: string, fullText: string): Promise<string | null> {
+  const prompt = `你是恋爱话术提炼助手。用户正要回复对方，对方的话：「${truncateText(question, 60)}」。\n`
+    + `以下是从知识库检索到的资料【${title}】：\n${truncateText(fullText, 3500)}\n`
+    + `要求：提取与当前问题直接相关的话术要点、可操作步骤或关键语句（若资料是惯例/套路类，把步骤序列提取出来），150-300 字。`
+    + `直接输出要点，不要任何解释、标题或格式头；若资料与当前问题明显无关，只输出两个字：无关。`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 400,
+    });
+    if (!content || content.includes('无关')) return null;
+    return truncateText(content.trim(), 320);
+  } catch (e: any) {
+    console.warn('summarizeRef failed:', e.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -940,8 +983,9 @@ async function fetchDocContent(clientId: string, apiKey: string, item: any): Pro
 }
 
 // ============================================================
-// Markdown 清洗：去 frontmatter、站点导航、标记符号、截断
-// [v6 L0] 截断 260 → KB_CONTENT_MAX(500)
+// Markdown 清洗：去 frontmatter、站点导航、标记符号
+// [v7] 不再在此截断——返回清洗后全文，
+//   由 fetchItemsContent 统一做"定向摘要 / 截断"
 // ============================================================
 const NAV_LINES = ['首页', '恋爱话术资源社区', '下载APP', '登录 / 注册', '个人中心', '我的书架', '我的话术', '退出登录', '当前位置', '情感文章'];
 
@@ -972,14 +1016,6 @@ function cleanMarkdown(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  if (t.length > KB_CONTENT_MAX) {
-    const cut = t.slice(0, KB_CONTENT_MAX);
-    const lastPunct = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('\n'));
-    if (lastPunct > 80) {
-      return cut.slice(0, lastPunct + 1) + '……';
-    }
-    return cut + '……';
-  }
   return t;
 }
 
@@ -1004,23 +1040,42 @@ function mergeDedup(items: any[]): any[] {
 }
 
 // ============================================================
-// [v3.1] 从 app_config 读取统一提示词（service_role，绕过 RLS）
+// [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
+//   llm_params 存 JSON 字符串：{"temperature":0.4,"frequency_penalty":0.5,"presence_penalty":0,"max_tokens":1200}
 // ============================================================
-async function fetchSystemPrompt(supabaseUrl: string, serviceRoleKey: string): Promise<string> {
+type LlmParams = {
+  temperature: number;
+  frequency_penalty: number;
+  presence_penalty: number;
+  max_tokens: number;
+};
+const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.4, frequency_penalty: 0.5, presence_penalty: 0, max_tokens: 1200 };
+
+async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams }> {
   try {
     const resp = await fetch(
-      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt`,
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params`,
       { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
     );
-    if (!resp.ok) {
-      console.warn('fetchSystemPrompt failed:', resp.status);
-      return '';
+    const rows = resp.ok ? await resp.json() : [];
+    const row = rows?.[0] || {};
+    let raw: any = {};
+    if (row.llm_params) {
+      try { raw = JSON.parse(row.llm_params); } catch (e) { raw = {}; }
     }
-    const rows = await resp.json();
-    return (rows?.[0]?.system_prompt) || '';
+    const num = (v: any, d: number) => (typeof v === 'number' && isFinite(v)) ? v : d;
+    return {
+      system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
+      llm_params: {
+        temperature: Math.max(0, Math.min(2, num(raw.temperature, DEFAULT_LLM_PARAMS.temperature))),
+        frequency_penalty: Math.max(0, Math.min(2, num(raw.frequency_penalty, DEFAULT_LLM_PARAMS.frequency_penalty))),
+        presence_penalty: Math.max(0, Math.min(2, num(raw.presence_penalty, DEFAULT_LLM_PARAMS.presence_penalty))),
+        max_tokens: Math.max(100, Math.min(8000, num(raw.max_tokens, DEFAULT_LLM_PARAMS.max_tokens))),
+      },
+    };
   } catch (e: any) {
-    console.warn('fetchSystemPrompt error:', e.message);
-    return '';
+    console.warn('fetchAppConfig failed:', e.message);
+    return { system_prompt: '', llm_params: { ...DEFAULT_LLM_PARAMS } };
   }
 }
 
