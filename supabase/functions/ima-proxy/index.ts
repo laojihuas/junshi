@@ -1,7 +1,16 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v6)
+// 军师 - Supabase Edge Function: IMA API 代理 (v8)
 //
 // 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
+//
+// [v8 语义拆解检索]（词表约束 + few-shot，替代"整句直搜"）
+//   - TOPIC_VOCAB 领域词表 91 词：主题词 4 类 41 词 + 技巧术语 50 词
+//     （由本地 4379 篇知识库全文 bigram 高频统计 + LLM 特征段落提炼合成）
+//   - extractSemanticKeywords：LLM 把对方的话拆解为 3-5 个 2-5 字检索词
+//     （词表词优先 + 少量贴近原话的字面词），输出 JSON 数组
+//   - 首轮检索词顺序：语义词 > bigram 字面词 > 原句垫底
+//   - rewriteQuery 降级为"语义拆解失败且规则词不足"时才触发
+//   - _debug 新增 semantic_kws 便于验证
 //
 // [v6 智能化改造 - 三期全部落地]
 //   L0 参数与裁剪：
@@ -64,6 +73,27 @@ const STAGE_HINTS: Record<string, string> = {
   '普通朋友': '对方是普通朋友：保持得体大方、不越界、话题轻松。',
   '未知': '',
 };
+
+// [v8] 领域词表：知识库主题检索词（本地 4379 篇全文 bigram 高频统计 + LLM 特征段落提炼）
+//   主题词 4 类（情绪/关系阶段/场景需求/对方性格）+ 技巧术语，共 91 词
+const TOPIC_VOCAB: string[] = [
+  // 情绪状态
+  '低落', '委屈', '生气', '难过', '伤心', '敷衍', '高冷', '冷淡', '忽冷忽热', '开心',
+  // 关系阶段
+  '追求', '暧昧', '恋爱', '挽回', '异地', '吵架', '冷战', '分手', '复合', '暗恋', '相亲',
+  // 场景需求
+  '安慰', '哄', '道歉', '解释', '试探', '邀约', '表白', '约会', '见面', '聊天', '回复', '追问',
+  // 对方性格
+  '慢热', '内向', '外向', '强势', '粘人', '傲娇', '独立', '海王',
+  // 技巧术语
+  '框架', '惯例', '服从性测试', '推拉', '欲擒故纵', '情绪价值', '冷读', '废物测试',
+  '三明治夸奖', '进挪', '角色扮演', '开场白', '打压', '搭讪', '展示面', '二次吸引',
+  '模糊邀约', '预选', '需求感', '跪舔', '冷冻', '兴趣指标', '推倒', '暧昧',
+  '查户口', '试探', '引导', '高价值', '调戏', '侧面展示', '假性分手', '长期吸引',
+  '短期吸引', '建立吸引', '升级关系', '关系推进', '主导权', '服从命令', '筛选话术',
+  '暴露需求感', '第三方话题', '逗比话题', '男神框架', '设置陷阱', '表情包开场',
+  '情感浓度', '心理锚定', '一推一拉', '冷读术', '吸引阶段',
+];
 
 // [v6 L0] 知识库参考条数与原文截断长度
 const KB_REF_COUNT = 5;
@@ -199,20 +229,26 @@ Deno.serve(async (req) => {
           strategyActive: !!memoryCard?.strategy,
         };
 
-        // 1. 联合关键词：最近对方消息 + 当前 query
+        // [v8] 1. LLM 语义拆解（词表约束 + few-shot）→ 知识库主题检索词
         const kw = extractKeywordsFromHistory(history, query);
-        // 2. 条件 query rewrite：规则关键词不足 2 个时用 LLM 改写为完整问句
+        let semanticKws: string[] = [];
+        if (llmKey) {
+          semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages);
+        }
+        // [v8] 2. 条件 query rewrite 降级：仅当语义拆解失败 且 规则词不足时触发
         let searchQuery = query.trim();
-        if (kw.length < 2 && llmKey) {
+        if (semanticKws.length === 0 && kw.length < 2 && llmKey) {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
+        // [v8] 3. 首轮检索词顺序：语义词 > bigram 字面词 > 原句垫底
+        //   （内部按 hits 排序去重，前 5 条拉原文）
+        const searchQueries = [...semanticKws, ...kw, searchQuery];
         // [v7] 定向摘要精读：LLM 可用时对长文档做"针对当前问题"的摘要，替代硬截断
         const kbSummaryOpts = llmKey
           ? { llm: { key: llmKey, base: llmBase, model: llmModel, question: query } }
           : undefined;
-        // 3. 首轮检索：改写/原句 + 关键词（内部按 hits 排序去重，前 5 条拉原文）
-        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, [searchQuery, ...kw], llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts });
+        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, searchQueries, llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts });
         // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
@@ -337,6 +373,7 @@ Deno.serve(async (req) => {
         kb_hits: hitKnowledge,
         kb_items: kbItems.length,
         rewrite_used: usedRewrite,
+        semantic_kws: semanticKws,
         memory_stage: memoryCard?.profile?.stage || null,
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
@@ -405,6 +442,52 @@ async function rewriteQuery(llmKey: string, llmBase: string, llmModel: string, q
   } catch (e: any) {
     console.warn('rewriteQuery failed:', e.message);
     return '';
+  }
+}
+
+// ============================================================
+// [v8] LLM 语义拆解：把"对方说的话"拆成知识库主题检索词
+//   词表约束（TOPIC_VOCAB 优先）+ few-shot 样板（字面词+词表词混合）
+//   输出 3-5 个 2-5 字中文词；失败/无结果返回 []，上层降级为 bigram/原句
+// ============================================================
+const SEMANTIC_KW_MAX = 5;
+const SEMANTIC_KW_MIN = 3;
+const KW_LEN_MAX = 5;   // IMA search_knowledge 对长词掉命中，拆解词控制在 5 字内
+
+async function extractSemanticKeywords(
+  llmKey: string, llmBase: string, llmModel: string,
+  query: string, recentUserMsgs: string[]
+): Promise<string[]> {
+  try {
+    const prompt = '你是恋爱话术检索助手，负责把"对方说的话"拆解成适合检索恋爱资料库的短关键词。\n'
+      + `对方的话：「${truncateText(query, 80)}」\n`
+      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
+      + `知识库领域词表（检索词应优先从中选择，可少量自创补充）：\n${TOPIC_VOCAB.join('、')}\n`
+      + '示例：\n'
+      + '输入："她说今天被领导骂了很难受"\n输出：["被骂","委屈","哄","工作压力","情绪低落"]\n'
+      + '输入："她两天没回我消息了"\n输出：["不回消息","高冷","试探","冷落","追问"]\n'
+      + `要求：只输出 JSON 数组（如 ["推拉","试探"]），${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个词 2-${KW_LEN_MAX} 字；`
+      + '优先使用词表中的词，可加 1-2 个贴近原话的字面词；不要任何解释文字。';
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 150,
+    });
+    const start = content.indexOf('[');
+    const end = content.lastIndexOf(']');
+    if (start === -1 || end === -1) return [];
+    const arr = JSON.parse(content.slice(start, end + 1));
+    const kws: string[] = [];
+    for (const w of arr) {
+      if (typeof w !== 'string') continue;
+      const t = w.trim();
+      if (t.length < 2 || t.length > KW_LEN_MAX) continue;
+      if (!/[\u4e00-\u9fa5]/.test(t)) continue; // 只收中文词（IMA 中文检索）
+      if (STOP_WORDS.has(t)) continue;
+      kws.push(t);
+    }
+    return [...new Set(kws)].slice(0, SEMANTIC_KW_MAX);
+  } catch (e: any) {
+    console.warn('extractSemanticKeywords failed:', e.message);
+    return [];
   }
 }
 
