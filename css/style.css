@@ -736,23 +736,25 @@ textarea.input {
 }
 
 .chat-paste-btn {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
-    border: none;
-    background: var(--bg-elevated);
+    border: 1px solid rgba(124, 252, 154, 0.3);
+    background: linear-gradient(145deg, rgba(7, 193, 96, 0.22), rgba(7, 193, 96, 0.08));
     border-radius: 50%;
     cursor: pointer;
-    font-size: 18px;
     color: var(--text-secondary);
     flex-shrink: 0;
-    transition: background 0.2s;
+    transition: transform 0.15s, box-shadow 0.2s, background 0.2s;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
 .chat-paste-btn:active {
-    background: var(--border-color);
+    transform: scale(0.92);
+    background: linear-gradient(145deg, rgba(7, 193, 96, 0.34), rgba(7, 193, 96, 0.16));
+    box-shadow: 0 0 10px rgba(7, 193, 96, 0.35);
 }
 
 .chat-send-btn {

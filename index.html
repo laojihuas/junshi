@@ -124,7 +124,20 @@
         </div>
 
         <div class="chat-input-area">
-            <button id="chat-paste-btn" class="chat-paste-btn" title="粘贴并发送">📋</button>
+            <button id="chat-paste-btn" class="chat-paste-btn" title="粘贴并发送">
+                <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="url(#paste-grad)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <defs>
+                        <linearGradient id="paste-grad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                            <stop offset="0%" stop-color="#7CFC9A"/>
+                            <stop offset="100%" stop-color="#07C160"/>
+                        </linearGradient>
+                    </defs>
+                    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
+                    <rect x="8" y="2" width="8" height="4" rx="1.5"/>
+                    <path d="M9 12h6"/>
+                    <path d="M9 16h4"/>
+                </svg>
+            </button>
             <textarea id="chat-input" class="chat-input" rows="1" placeholder="粘贴对方的话，我来帮你回..." enterkeyhint="send"></textarea>
             <button id="chat-send-btn" class="chat-send-btn">发送</button>
         </div>
