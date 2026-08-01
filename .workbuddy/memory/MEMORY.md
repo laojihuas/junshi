@@ -3,79 +3,46 @@
 ## 项目约定（必须遵守）
 
 - **GitHub 仓库为公开仓库**（`github.com/laojihuas/junshi`，默认分支 master）
-- **`.workbuddy/memory/` 会随 git 推送**，任何日志中**严禁写入敏感凭证**：
-  - IMA API Key / Client ID
-  - Supabase access token / service role key
-  - 任何密码、密钥
-- 敏感值如需记录，只写存储位置（如 `~/.config/ima/api_key`）或占位符（`<sbp_pat>`）
+- **`.workbuddy/memory/` 会随 git 推送**，任何日志中**严禁写入敏感凭证**（IMA Key / Supabase token / service_role / PAT / 密码），只写存储位置或占位符 `<sbp_pat>`
 - 前端部署：帽子云（maozi.cloud）关联 GitHub 自动部署，push 后需等待构建生效
 
 ## 部署架构
 
-- **前端**：静态 SPA（帽子云托管），配置在 `config.js`（git 跟踪，含 Supabase anon key / IMA knowledgeBaseId）
-- **后端**：Supabase（项目 ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions: `ima-proxy`（IMA 知识库代理，v6 智能化版：联合检索/记忆卡/场景指令/结构化输出）、`activate-code`（激活码验证）、`prompt-get`（获取统一提示词）、`prompt-update`（管理员更新提示词）、`invite-code`（获取/生成邀请码）、`invite-redeem`（注册兑现邀请，service_role + RPC）
-  - 数据表：`profiles` / `chat_sessions`（含 note、**memory_card** text 存记忆卡 JSON）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，存统一 system_prompt，需手动执行 `supabase/sql/001_app_config.sql` 建表）/ `invite_relations`（邀请关系，invitee_id 唯一）
-  - 数据库函数：`redeem_invite`（SECURITY DEFINER，原子兑现邀请：写关系 + 邀请人 usage_count+50，防自邀/重复/不存在，单码上限 20 人）
-- **IMA 知识库**：知识库「恋爱知识」，ID `nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI=`，凭证在本机 `~/.config/ima/`（client_id / api_key）
+- **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / IMA knowledgeBaseId）
+- **后端**：Supabase（ref: `opzvvgixlfbfpdlsorbi`）
+  - Edge Functions：`ima-proxy`（核心，v9）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
+  - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`
+  - SQL 脚本：`supabase/sql/001~005`（app_config / bio / note / invite / **005 memory_card**）
+  - 数据库函数：`redeem_invite`（SECURITY DEFINER，写邀请关系+邀请人 usage+50，防自邀/重复/上限 20 人）
+- **IMA 知识库**：「恋爱知识」ID `nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI=`，凭证本机 `~/.config/ima/`
 
-## 多窗口会话 + 统一提示词（v20260731）
+## 记忆体系（三层，隔离边界）
 
-- **窗口会话隔离**：`js/session.js`（WindowSession）基于 sessionStorage（key `junshi_window_session`，结构 `{windowSessionId, conversations:{好友ID:history[]}, activeFriend}`）。用 `performance navigation.type` 区分：`reload`/`back_forward` 保留会话，`navigate`（含复制标签页）重建新 UUID 清空历史。历史按好友隔离，单好友 50 条上限。聊天消息持久化仍存数据库（chat_messages），窗口会话只决定发给 IMA 的 AI 上下文
-- **统一提示词**：前端每次发送前调 prompt-get 获取最新 system_prompt（失败降级空串不阻塞），与 history 一起经 ima-proxy 透传 IMA；提示词不存储不渲染，前端不可见；后台"提示词管理"tab 编辑，prompt-update 服务端用 service_role 校验 profiles.is_admin
-- **ima-proxy v3 容错**：`callSearch()` 先带附加参数调 search_knowledge，IMA 拒绝时去参重试（原有功能不受影响）
+- **窗口历史**：`js/session.js` WindowSession（sessionStorage key `junshi_window_session`）。`navigation.type` reload/back_forward 保留，navigate（复制标签页/新开）重建 UUID 清空历史。按好友隔离，单好友 50 条。**仅"杀进程恢复"路径（app.js getLastView → Chat.open(restoreContext=true)）从数据库重建最近 50 条；从好友列表手动进入不重建 → 窗口历史可能为空**
+- **数据库消息**：chat_messages 全量持久化，仅用于界面显示与恢复，不是 AI 上下文
+- **记忆卡**（唯一跨窗口载体，**按 chat_sessions.id 隔离，不同好友永不交叉**，RLS 按 user_id 兜底）：`chat_sessions.memory_card` JSON = profile{stage,personality,relationship_note,recent_events} + `recent_user_messages`（对方的话 ≤20）+ **`recent_self_messages`（军师自己发过的话 ≤20，v9 新增）** + strategy + updated_at。主回复后 await updateMemoryCard（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟限频）
 
-## LLM 生成 + 用户简介 + 记忆卡（v6 智能化，ima-proxy v16）
+## LLM 生成链路（ima-proxy）
 
-- **架构**：前端(query+窗口×好友history+session_id) → ima-proxy → [IMA知识库检索=参考] + [DeepSeek 生成专业答复]；提示词/简介/记忆卡服务端注入
-- **LLM 配置**（secrets）：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议；主回复参数**后台可调**（`app_config.llm_params` JSON：temperature/frequency_penalty/presence_penalty/max_tokens，默认 0.4/0.5/0/1200，prompt-update 保存、admin 后台"LLM 生成参数"卡）
-- **定向摘要精读（v28）**：cleanMarkdown 返回全文不再截断；fetchItemsContent 对 >500 字长文档用 `summarizeRef`（LLM 针对当前问题提取要点 ≤320 字）替代硬截断；失败降级截断；套路通道不摘要
-- **我的简介**：`profiles.bio`（varchar 200）；前端好友页 ✎ 弹窗编辑（friends.js showBioModal/saveBio）
-- **v6 增强**（三期全落地）：
-  - L0：单条 history >800 字截断；知识库参考 5 条 × 原文 500 字（KB_REF_COUNT/KB_CONTENT_MAX）
-  - L1：联合关键词（最近 5 条对方消息+query bigram）；条件 query rewrite（关键词 <2 个时 LLM 改写）；两轮检索；searchKb 多查询按 hits 排序去重（每词前 2 条、上限 8）
-  - L2：近详远略 buildContextParts（最近 10 条全文+更早仅留对方消息 ≤120 字注入 system）；**记忆卡**存 `chat_sessions.memory_card`（JSON：`profile{stage,personality,relationship_note,recent_events}` + `recent_user_messages` ≤20 条 + updated_at），updateMemoryCard 主回复后 await 更新（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟一次）；输出格式约束【分析】+【回复建议 N】+【小提示】（**v26 已改为一句话话术直出**，复制粘贴即发）
-  - L3：STAGE_HINTS 场景指令（追求/暧昧/恋爱/挽回/普通朋友）按记忆卡 stage 注入；组装顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
-- **多会话隔离**：窗口 history 由前端 WindowSession（sessionStorage）传递；记忆卡按 session_id 跨窗口共享（后端读写 chat_sessions.memory_card，RLS 校验归属）
+- 前端(query+history+session_id+system_prompt) → ima-proxy → [IMA 检索=弹药] + [DeepSeek=生成]；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
+- LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200）
+- **v9 记忆与自洽修复（2026-08-02，version 32）**：解决"重复说过的话"与"逻辑自相矛盾"
+  - 记忆卡补记 `recent_self_messages`（自己发过的话）→ 窗口历史丢失后 AI 仍知道自己说过什么
+  - buildSystemContent 首段硬编码角色定位"**你即用户本人**"（覆盖后台提示词的顾问视角）；参考资料降级为弹药（冲突时以对话连续性为准）；输出 1-2 句（先正面回应再转折）；自洽硬约束（禁自相矛盾/推翻自己/答非所问/重复）
+  - 主回复后 bigram 相似度兜底：`isNearDuplicate` 与 recent_self_messages 命中 ≥0.85 或一字不差 → 带提示重生成一次
+  - `_debug` 新增 `self_msgs_len`
+- v8 语义拆解检索：TOPIC_VOCAB 91 词表 + extractSemanticKeywords（LLM 拆 3-5 个 2-5 字检索词，词表约束+few-shot）；首轮顺序 `[...semanticKws, ...kw, searchQuery]`；rewriteQuery 降级为语义拆解失败且规则词不足时
+- L0-L3：单条 history ≤800 字；知识库参考 5 条×500 字（长文档 summarizeRef 定向摘要 ≤320 字）；近详远略（最近 10 条全文+更早仅对方消息 ≤120 字注入 system）；STAGE_HINTS 场景指令按 stage 注入；组装顺序：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
+- 套路（v7/v18）：检索含惯例特征词 → extractStrategy LLM 提炼 2-6 步存 memory_card.strategy；**套路=方向盘，检索=弹药**；`/` 开头输入清除；轮次上限自动终止；fetchKbFolders 识别话术/教学文件夹 → applyQuota 状态感知配额（执行期话术≤3+教学≤2）；套路启动走独立惯例检索通道
 
-## 套路执行机制（v7，ima-proxy v17→v18）
+## 关键踩坑（务必先读）
 
-- **定位**：junshi 输出以**话术为主**（军师扮演用户与女生对话，分析不用）；「恋爱教学」文件夹不舍删 → 其中惯例/魔术"武装"到多轮聊天布局，逐轮贯彻技巧
-- **strategy** 存 `memory_card.strategy`（name/goal/steps[2-6]/rounds_used/max_rounds=steps×2≥6/started_at）
-- **启动**：检索结果含惯例特征词（惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读）→ `extractStrategy` LLM 提炼步骤；steps<2 或未命中特征不启动
-- **注入**【当前执行套路】：**套路=方向盘（优先级高于检索参考资料），检索=弹药（方向一致采用/冲突忽略或借鉴语气）**；先顺应女方再拉回；**严禁向对方提及套路/步骤/进度等元信息**；套路完成/失效自然收尾
-- **打断**：`"/"` 开头输入 = 用户指令 → `strategyClear` 清除套路；每轮 `rounds_used+1` 达上限自动终止
-- **检索配额平衡（v18）**：`fetchKbFolders` 按名识别话术/教学文件夹（识别不到降级不配额）→ `applyQuota` 状态感知配额（执行期话术≤3+教学≤2、未启动期教学≤3+话术≤2），**两类内容始终同在上下文**；套路启动走**独立惯例检索通道**（短词：惯例/推拉/冷读/开场白/步骤，长句返回空），结果只喂 extractStrategy **不混入主回复参考**
-- **IMA 接口踩坑（v24 实测）**：`get_knowledge_list` limit **≤50**（code=51）；文件夹字段是 `title`/`media_id`（name/folder_id 为 null）；`search_knowledge` 只认**短关键词**（"魔术/玩法/暧昧升级"=0 条）；新版 API key（sb_publishable/sb_secret）非 JWT，postgREST 不接受单作 Bearer，REST 需 apikey+Bearer 双传
-- `_debug` 含 `strategy_name/strategy_rounds/strategy_clear/folder_hs/folder_jx` 便于验证
-- **部署坑**：本机 curl schannel SSL 握手失败 → 云端部署 Edge Function 改用 **Python requests** multipart（metadata 字段名 `entrypoint_path`），脚本模板可放 Temp 不入库
+- **IMA API**：search_knowledge 只认短关键词（bigram 命中率最高），长词/整句返回空；get_knowledge_list limit ≤50；文件夹字段是 title/media_id；新版 `sb_publishable_*` key 非 JWT，REST 需 apikey+Bearer 双传（Edge Functions gateway 可过）
+- **无 CLI 部署 Edge Function**（本机 CLI Bun 编译 CPU 不支持）：`POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart 的 **file=单个源码文件**（非压缩包），metadata `{"entrypoint_path":"index.ts","name":slug}`；requests 需 `proxies={'http':None,'https':None}`（本机代理不稳）；Secrets 用 `POST /v1/projects/{ref}/secrets`；任意 SQL 用 `POST /v1/projects/{ref}/database/query`（201/空数组）
+- **作用域教训（v31 事故）**：函数内 `let` 声明必须提到 Deno.serve 顶层，_debug 块外引用块内 let → ReferenceError → 全 500；esbuild 只查语法抓不到，部署前用 tsc/transpileModule 校验
+- **端到端验证**（无需真实凭证）：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true 不发邮件；别用 SignUp 会邮件限流；别手工 INSERT auth.users）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey header）→ 调函数看 _debug → 清理
+- **前端降级**：`_callIMA` 异常返回"掉线了"（不返回 mock）
 
-## 暗色主题 + 好友长按管理（v20260731-late）
+## 前端其他（简）
 
-- **全局暗色**（`css/style.css` 全部重写）：`--bg-page:#000` / `--bg-elevated:#1C1C1E` / 顶部导航多层 CSS 渐变（深紫蓝星空+星点）作图底；主标题"军师"+ 副标题"你专属的恋爱顾问"；聊天气泡用绿色渐变
-- **好友备注**：`chat_sessions.note`（varchar 30，SQL `supabase/sql/003_chat_sessions_note.sql`）；列表 `.friend-name` 内追加 `.friend-note` 绿色描边小标签
-- **长按 Action Sheet**：touchstart/mousedown 计时 600ms 触发 → 底部弹出"改名/备注"+"删除"+"取消"（index.html #action-sheet）；navigator.vibrate(15) 触觉反馈；触发后阻止 click 进入聊天
-- **编辑好友弹窗**（#modal-edit-friend）：昵称(20字) + 备注(30字)；保存调 `DB.updateSession`；Enter 友好（昵称框 Enter 跳备注，备注框 Enter 提交）
-
-## 关键技术点
-
-- **ima-proxy v2 搜索策略**：IMA `search_knowledge` 是关键词搜索（非 AI 对话），整句/3-4 字长词返回空；**bigram（2 字窗口）命中率最高**（"不回"25条/"高冷"26条）。Edge Function 用两阶段 bigram 提取（双实义字优先）→ 多关键词轮询搜索合并 → `get_media_info` 拉取 markdown 原文 → 清洗导航/元数据后拼装回复
-- **无 CLI 部署 Edge Function**（本机 supabase CLI 2.110 为 Bun 编译，CPU 不支持报 Illegal instruction）：
-  - Secrets: `POST https://api.supabase.com/v1/projects/{ref}/secrets`
-  - 部署（云端打包）: `POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart/form-data（metadata JSON + file 源码），`/functions/{slug}/deploy` 是错误路径；**metadata 字段名必须是 `entrypoint_path`（不是 entrypoint）**
-  - **执行任意 SQL**: `POST /v1/projects/{ref}/database/query`，body `{"query":"..."}`，成功返回 201/空数组（无需进 Dashboard）
-
-## PWA 添加到桌面（v20260731-late2）
-
-- **4 道防打扰**（`js/install-prompt.js` 的 PWAInstall 对象）：
-  1. 已从桌面打开（`display-mode:standalone` / `navigator.standalone`）
-  2. 已安装成功（`appinstalled` → localStorage `pwa_installed=1` 永久）
-  3. 拒绝冷却（递增）：第 1 次 7 天 / 第 2 次 30 天 / 第 3 次起永久
-  4. 环境检查：必须已登录 + 在 friends 首页 + 浏览器支持
-- **触发点**：App.init() 登录成功路径 + 登录按钮 async 成功路径 → `PWAInstall.maybeShow()`（内部 `setTimeout 2000ms` + `_inflight` 防重复）
-- **Android Chrome**：`beforeinstallprompt` 拦截 → `deferredPrompt.prompt()` → `userChoice.outcome==='accepted'` 走 appinstalled 路径
-- **iOS Safari**：不支持，必须图文引导（分享按钮 → 添加到主屏幕），3 步教程
-- **Service Worker**（`sw.js`）：网络优先 + 失败回退缓存，**只缓存同源**（Supabase/IMA/DeepSeek 跨域不缓存，避免陈旧 API 响应）；`navigator.serviceWorker.register('sw.js')` 在 `'load'` 事件内执行
-- **图标生成**：Python managed venv + Pillow（`C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe`），字体 `C:\Windows\Fonts\simhei.ttf`；脚本放 `C:\Users\Administrator\AppData\Local\Temp\` 不入库
-- **帽子云静态托管**支持 PWA 完整特性（需 HTTPS + manifest.json + SW）
-- 文件：`manifest.json` / `sw.js` / `js/install-prompt.js` / `icons/{icon-192,icon-512,apple-touch-icon}.png`
+- 暗色主题：css/style.css（`--bg-page:#000`，聊天气泡绿色渐变）；好友备注 `chat_sessions.note`；长按 600ms Action Sheet（改名/备注/删除）；PWA：install-prompt.js 4 道防打扰（standalone/已安装/拒绝冷却/登录+首页），iOS 图文引导，sw.js 网络优先只缓存同源；图标用 managed venv Pillow 生成（脚本放 Temp）

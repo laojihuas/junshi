@@ -3,6 +3,16 @@
 //
 // 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
 //
+// [v9 记忆与自洽修复]（解决"重复说过的话"与"逻辑自相矛盾"）
+//   - 记忆卡新增 recent_self_messages：记录军师(自己)发过的话（按 session_id 隔离），
+//     窗口 history 丢失后 AI 仍知道自己说过什么 → 防重复开场白
+//   - 角色定位硬编码"你即用户本人"（不依赖后台提示词），顾问视角 → 参与者视角
+//   - system 新增自洽硬约束：严禁自相矛盾/推翻自己/答非所问；先正面回应再转折
+//   - 输出放宽为 1-2 句（第一句正面回应，第二句才允许转折）
+//   - 参考资料降级为"弹药"：与已有对话冲突时以对话连续性为准
+//   - 主回复生成后做 bigram 相似度兜底：与"自己发过的话"高相似 → 带提示重生成一次
+//   - _debug 新增 self_msgs_len 便于验证
+//
 // [v8 语义拆解检索]（词表约束 + few-shot，替代"整句直搜"）
 //   - TOPIC_VOCAB 领域词表 91 词：主题词 4 类 41 词 + 技巧术语 50 词
 //     （由本地 4379 篇知识库全文 bigram 高频统计 + LLM 特征段落提炼合成）
@@ -318,6 +328,21 @@ Deno.serve(async (req) => {
           frequencyPenalty: llmParams.frequency_penalty,
           presencePenalty: llmParams.presence_penalty,
         });
+        // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
+        const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages : [];
+        if (reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs)) {
+          const retry = await llmChat(llmKey, llmBase, llmModel, [
+            { role: 'system', content: systemContent + '\n\n注意：你刚才生成的那句话与【你之前发过的话】重复了。严禁重复，必须换一句全新的、意思不重复的说法。直接输出新的话术本体。' },
+            ...llmHistory,
+            { role: 'user', content: query.trim() },
+          ], {
+            temperature: llmParams.temperature,
+            maxTokens: llmParams.max_tokens,
+            frequencyPenalty: llmParams.frequency_penalty,
+            presencePenalty: llmParams.presence_penalty,
+          });
+          if (retry) reply = retry;
+        }
       } catch (e: any) {
         console.error('LLM error:', e.message);
       }
@@ -376,6 +401,7 @@ Deno.serve(async (req) => {
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         memory_stage: memoryCard?.profile?.stage || null,
+        self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
         strategy_clear: strategyClear,
@@ -408,6 +434,34 @@ function buildContextParts(history: any[]): { recent: any[]; summary: string } {
     ? '【更早对话要点（对方说过的话，供把握前因后果）】\n' + olderUsers.slice(-8).join('\n')
     : '';
   return { recent, summary };
+}
+
+// ============================================================
+// [v9] 与"自己发过的话"的字面相似度检测（防重复兜底）
+//   bigram 命中比例 ≥0.85 或一字不差 → 判定重复，触发重生成
+// ============================================================
+function isNearDuplicate(text: string, prev: string[]): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  const gram = (str: string, n: number): string[] => {
+    const s = str.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
+    const out: string[] = [];
+    for (let i = 0; i + n <= s.length; i++) out.push(s.slice(i, i + n));
+    return out;
+  };
+  const tg = gram(t, 2);
+  if (tg.length === 0) return false;
+  const tset = new Set(tg);
+  for (const p of prev) {
+    if (!p || !p.trim()) continue;
+    if (p.trim() === t) return true;
+    const pg = gram(p, 2);
+    if (pg.length === 0) continue;
+    let hit = 0;
+    for (const g of pg) if (tset.has(g)) hit++;
+    if (hit / Math.max(pg.length, 1) >= 0.85 || hit / tset.size >= 0.85) return true;
+  }
+  return false;
 }
 
 // ============================================================
@@ -512,6 +566,8 @@ type StrategyState = {
 type MemoryCard = {
   profile?: { stage?: string; personality?: string; relationship_note?: string; recent_events?: string };
   recent_user_messages?: string[];
+  // [v9] 军师(自己)发过的话：窗口 history 丢失后仍能知道自己说过什么，防重复（按 session_id 隔离）
+  recent_self_messages?: string[];
   strategy?: StrategyState | null;
   updated_at?: string;
 };
@@ -565,6 +621,16 @@ async function updateMemoryCard(ctx: {
     msgs.push(truncateText(lastUser.content, 200));
     if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
     card.recent_user_messages = msgs;
+  }
+
+  // [v9] 1.5) 规则追加军师(自己)发过的话（防重复：AI 需知道自己上一条说了什么）
+  const lastSelf = [...(Array.isArray(ctx.history) ? ctx.history : [])]
+    .reverse().find((h) => h && h.role === 'assistant' && typeof h.content === 'string');
+  const selfMsgs = Array.isArray(card.recent_self_messages) ? card.recent_self_messages.slice() : [];
+  if (lastSelf && (selfMsgs.length === 0 || selfMsgs[selfMsgs.length - 1] !== lastSelf.content)) {
+    selfMsgs.push(truncateText(lastSelf.content, 200));
+    if (selfMsgs.length > 20) selfMsgs.splice(0, selfMsgs.length - 20);
+    card.recent_self_messages = selfMsgs;
   }
 
   // 2) 画像合并（频率控制）
@@ -679,7 +745,12 @@ function buildSystemContent(opts: {
   kbItems: any[];
   kbFallback: boolean;
 }): string {
-  let s = opts.systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。';
+  // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）：
+  //   解决"顾问不需要人设一致"导致的答非所问与自相矛盾
+  let s = '【角色定位】(最高优先级)\n'
+    + '你正在扮演「用户本人」用微信跟对方聊天，你就是那个说话的人，不是顾问、不是助手。\n'
+    + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
+    + (opts.systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。');
 
   // 场景指令（L3：按关系阶段注入指导）
   const stage = opts.memoryCard?.profile?.stage || '';
@@ -708,6 +779,12 @@ function buildSystemContent(opts: {
     s += `\n\n【对方近期说过的话】（供判断语感与关系状态）\n${msgs.slice(-8).join('\n')}`;
   }
 
+  // [v9] 记忆卡：军师(自己)发过的话（防重复 + 保自洽；窗口 history 丢失后仍有效）
+  const selfMsgs = opts.memoryCard?.recent_self_messages || [];
+  if (selfMsgs.length > 0) {
+    s += `\n\n【你之前发过的话】（跨轮次记住，严禁原样或意思重复，后续回复必须与之一致衔接）\n${selfMsgs.slice(-8).join('\n')}`;
+  }
+
   // 更早对话摘要
   if (opts.olderSummary) {
     s += `\n\n${opts.olderSummary}`;
@@ -718,7 +795,8 @@ function buildSystemContent(opts: {
     const kbText = opts.kbItems
       .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${item.content || ''}`)
       .join('\n\n');
-    s += `\n\n以下是从知识库检索到的参考资料，回答时优先参考这些资料的内容和风格：\n${kbText}`;
+    // [v9] 参考资料降级为"弹药"：只提供语气/角度/措辞，冲突时以对话连续性为准
+    s += `\n\n以下是从知识库检索到的参考资料。它们只是弹药：仅提供语气、角度、措辞素材；\n当参考内容与你之前说过的话或当前对话逻辑冲突时，以对话上下文为准，忽略参考。\n${kbText}`;
     if (opts.kbFallback) {
       s += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
     }
@@ -737,8 +815,12 @@ function buildSystemContent(opts: {
       + `- 当对方反应表明套路目标已达成或已失效时，自然收尾、平滑过渡到正常聊天，不要强行继续。`;
   }
 
-  // 输出格式约束（v25）：话术本体直出，用户复制粘贴即可发送
-  s += `\n\n【输出要求】（严格遵守）\n只输出 1 句话的话术本体，可直接复制发给对方；不要输出【分析】【回复建议】【小提示】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合当前关系阶段，像真人发微信。`;
+  // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
+  s += `\n\n【自洽与输出要求】（严格遵守）\n`
+    + `- 你是同一个人，必须逻辑自洽：严禁自相矛盾、严禁推翻自己说过的话、严禁答非所问。\n`
+    + `- 对方问什么，第一句必须正面回答；想幽默或转折，必须先正面回应再转折。\n`
+    + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
+    + `- 输出 1-2 句话术本体，可直接复制发给对方；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合当前关系阶段，像真人发微信。`;
 
   return s;
 }
