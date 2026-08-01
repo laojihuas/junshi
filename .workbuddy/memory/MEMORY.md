@@ -33,7 +33,7 @@
 - **v6 增强**（三期全落地）：
   - L0：单条 history >800 字截断；知识库参考 5 条 × 原文 500 字（KB_REF_COUNT/KB_CONTENT_MAX）
   - L1：联合关键词（最近 5 条对方消息+query bigram）；条件 query rewrite（关键词 <2 个时 LLM 改写）；两轮检索；searchKb 多查询按 hits 排序去重（每词前 2 条、上限 8）
-  - L2：近详远略 buildContextParts（最近 10 条全文+更早仅留对方消息 ≤120 字注入 system）；**记忆卡**存 `chat_sessions.memory_card`（JSON：`profile{stage,personality,relationship_note,recent_events}` + `recent_user_messages` ≤20 条 + updated_at），updateMemoryCard 主回复后 await 更新（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟一次）；输出格式约束【分析】+【回复建议 N】+【小提示】
+  - L2：近详远略 buildContextParts（最近 10 条全文+更早仅留对方消息 ≤120 字注入 system）；**记忆卡**存 `chat_sessions.memory_card`（JSON：`profile{stage,personality,relationship_note,recent_events}` + `recent_user_messages` ≤20 条 + updated_at），updateMemoryCard 主回复后 await 更新（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟一次）；输出格式约束【分析】+【回复建议 N】+【小提示】（**v26 已改为一句话话术直出**，复制粘贴即发）
   - L3：STAGE_HINTS 场景指令（追求/暧昧/恋爱/挽回/普通朋友）按记忆卡 stage 注入；组装顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 - **多会话隔离**：窗口 history 由前端 WindowSession（sessionStorage）传递；记忆卡按 session_id 跨窗口共享（后端读写 chat_sessions.memory_card，RLS 校验归属）
 
