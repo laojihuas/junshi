@@ -187,6 +187,9 @@ const Chat = {
             container.removeChild(loadingEl);
 
             if (reply) {
+                // [收到回复振动提醒] 模式振动，区别于 friends.js 长按的 15ms 短震
+                if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
+
                 // 添加回复消息
                 const assistantMsg = await DB.addMessage(this.currentSessionId, 'assistant', reply);
                 if (assistantMsg) {
