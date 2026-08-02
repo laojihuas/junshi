@@ -327,7 +327,7 @@
                 </div>
             </div>
 
-            <!-- LLM 生成参数（temperature / 惩罚系数，后端 ima-proxy 每次请求读取） -->
+            <!-- LLM 生成参数（temperature / 惩罚系数 / 思考模式，后端 ima-proxy 每次请求读取） -->
             <div class="card" style="margin-top:16px;">
                 <div class="card-title">
                     <span>LLM 生成参数</span>
@@ -336,6 +336,8 @@
                 <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
                     temperature 控制随机性（低=稳，适合扮演用户）；frequency_penalty 压制重复表述（治 AI 味）；
                     presence_penalty 鼓励新话题（建议保持 0，保护套路执行不跑题）。
+                    <br><b>思考模式</b>：普通=显式关闭思考（快、省）；轻度/中度/深度=开启 V4 思考链（更准更慢更贵）。
+                    思考档下 temperature/惩罚系数官方强制不生效，输出上限自动放宽到 2000+。
                 </p>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
                     <label style="font-size:12px;color:var(--muted);display:block;">
@@ -353,6 +355,15 @@
                     <label style="font-size:12px;color:var(--muted);display:block;">
                         max_tokens（100-8000）
                         <input id="llm-max-tokens" class="input" type="number" step="50" min="100" max="8000" value="1200" style="margin-top:4px;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;grid-column:1/-1;">
+                        思考模式默认档（用户前端可自行切换，此处为全局默认）
+                        <select id="llm-thinking-mode" class="input" style="margin-top:4px;">
+                            <option value="off">普通（关闭思考，默认）</option>
+                            <option value="low">轻度</option>
+                            <option value="high">中度</option>
+                            <option value="max">深度</option>
+                        </select>
                     </label>
                 </div>
                 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
@@ -599,6 +610,8 @@
                 document.getElementById('llm-frequency-penalty').value = lp.frequency_penalty ?? 0.5;
                 document.getElementById('llm-presence-penalty').value = lp.presence_penalty ?? 0;
                 document.getElementById('llm-max-tokens').value = lp.max_tokens ?? 1200;
+                document.getElementById('llm-thinking-mode').value =
+                    ['off', 'low', 'high', 'max'].includes(lp.thinking_mode) ? lp.thinking_mode : 'off';
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -656,7 +669,8 @@
                 temperature: getNum('llm-temperature'),
                 frequency_penalty: getNum('llm-frequency-penalty'),
                 presence_penalty: getNum('llm-presence-penalty'),
-                max_tokens: parseInt(document.getElementById('llm-max-tokens').value, 10)
+                max_tokens: parseInt(document.getElementById('llm-max-tokens').value, 10),
+                thinking_mode: document.getElementById('llm-thinking-mode').value
             };
             if (isNaN(llm_params.temperature) || isNaN(llm_params.frequency_penalty) || isNaN(llm_params.presence_penalty) || isNaN(llm_params.max_tokens)) {
                 toast('参数格式不正确'); return;

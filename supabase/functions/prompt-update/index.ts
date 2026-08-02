@@ -10,15 +10,17 @@
 //
 // 请求：POST  body: { system_prompt?: string, llm_params?: object }
 //   system_prompt 与 llm_params 至少提供一个（llm_params 为 LLM 生成参数：
-//   temperature / frequency_penalty / presence_penalty / max_tokens）
+//   temperature / frequency_penalty / presence_penalty / max_tokens / thinking_mode）
 // 返回：{ success: true, system_prompt?: string, llm_params?: object }
 // ============================================================
 
-const LLM_PARAM_RANGE: Record<string, [number, number]> = {
+// [v10] 数值区间 或 字符串枚举（thinking_mode：off/low/high/max）
+const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
   temperature: [0, 2],
   frequency_penalty: [0, 2],
   presence_penalty: [0, 2],
   max_tokens: [100, 8000],
+  thinking_mode: ['off', 'low', 'high', 'max'],
 };
 
 function validateLlmParams(v: any): string | null {
@@ -26,9 +28,17 @@ function validateLlmParams(v: any): string | null {
   for (const key of Object.keys(v)) {
     if (!(key in LLM_PARAM_RANGE)) return `不支持的参数: ${key}`;
     const val = v[key];
-    const [min, max] = LLM_PARAM_RANGE[key];
-    if (typeof val !== 'number' || !isFinite(val) || val < min || val > max) {
-      return `${key} 必须为 ${min}~${max} 之间的数字`;
+    const range = LLM_PARAM_RANGE[key];
+    if (Array.isArray(range)) {
+      // 枚举校验（字符串档位）
+      if (typeof val !== 'string' || !range.includes(val)) {
+        return `${key} 必须为 ${range.join(' / ')} 之一`;
+      }
+    } else {
+      const [min, max] = range;
+      if (typeof val !== 'number' || !isFinite(val) || val < min || val > max) {
+        return `${key} 必须为 ${min}~${max} 之间的数字`;
+      }
     }
   }
   return null;

@@ -1,7 +1,19 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v8)
+// 军师 - Supabase Edge Function: IMA API 代理 (v10)
 //
 // 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
+//
+// [v10 思考模式]（DeepSeek V4，2026-08）
+//   - 模型升级 deepseek-chat → deepseek-v4-flash（旧名 2026-07-24 已弃用）
+//   - 新增 thinking_mode 四档：off(普通) / low(轻度) / high(中度) / max(深度)
+//   - V4 模型思考模式默认开启！llmChat 必须显式控制：
+//     off → thinking:{type:'disabled'}（快、便宜，保留 temperature/惩罚参数）
+//     low/high/max → thinking:{type:'enabled'} + reasoning_effort（思考档不传
+//     temperature/惩罚系数，官方强制不生效；max_tokens 自动提到 2000+ 防思维链挤占）
+//   - 优先级：请求体 thinking_mode > app_config.llm_params.thinking_mode > off
+//   - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取/套路提炼）保持显式
+//     disabled：检索辅助任务开思考只会变慢变贵
+//   - _debug 新增 thinking_mode 便于验证
 //
 // [v9 记忆与自洽修复]（解决"重复说过的话"与"逻辑自相矛盾"）
 //   - 记忆卡新增 recent_self_messages：记录军师(自己)发过的话（按 session_id 隔离），
@@ -52,12 +64,18 @@
 //   history        可选 本窗口对话历史 [{role,content}]
 //   system_prompt  可选 后台统一提示词（前端用户不可见）
 //   session_id     可选 数据库会话 ID（chat_sessions.id），用于读写记忆卡
+//   thinking_mode  可选 思考模式档位 off|low|high|max（优先级 > 后台默认）
 //
 // 环境变量：IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES,
 //           LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 // ============================================================
 
 const IMA_BASE = 'https://ima.qq.com';
+
+// [v10 思考模式] 档位类型与合法集合（优先级：请求体 > 后台默认 > off）
+type ThinkingMode = 'off' | 'low' | 'high' | 'max';
+const THINKING_MODES = new Set<string>(['off', 'low', 'high', 'max']);
+const THINKING_MAX_TOKENS = 2000; // 思考档输出预算下限：防思维链挤占最终回复
 
 // 常见停用词（恋爱聊天场景），用于关键词提取
 const STOP_WORDS = new Set([
@@ -127,7 +145,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
+    const { query, knowledge_base_id, history, system_prompt, session_id, thinking_mode: reqThinkingMode } = await req.json();
     const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
 
     if (!query || !query.trim()) {
@@ -197,7 +215,14 @@ Deno.serve(async (req) => {
     const imaClientId = Deno.env.get('IMA_CLIENT_ID') || '';
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
     const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com';
-    const llmModel = Deno.env.get('LLM_MODEL') || 'deepseek-chat';
+    // [v10] 模型升级：deepseek-chat 已于 2026-07-24 弃用，V4 思考/非思考都走 deepseek-v4-flash
+    const llmModel = Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash';
+
+    // [v10] 思考模式生效档位：请求体 > 后台默认 > off（非法值一律回退，不信任输入）
+    let effectiveThinkingMode: ThinkingMode = llmParams.thinking_mode;
+    if (typeof reqThinkingMode === 'string' && THINKING_MODES.has(reqThinkingMode)) {
+      effectiveThinkingMode = reqThinkingMode as ThinkingMode;
+    }
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
@@ -327,6 +352,7 @@ Deno.serve(async (req) => {
           maxTokens: llmParams.max_tokens,
           frequencyPenalty: llmParams.frequency_penalty,
           presencePenalty: llmParams.presence_penalty,
+          thinking: effectiveThinkingMode,
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages : [];
@@ -340,6 +366,7 @@ Deno.serve(async (req) => {
             maxTokens: llmParams.max_tokens,
             frequencyPenalty: llmParams.frequency_penalty,
             presencePenalty: llmParams.presence_penalty,
+            thinking: effectiveThinkingMode,
           });
           if (retry) reply = retry;
         }
@@ -400,6 +427,7 @@ Deno.serve(async (req) => {
         kb_items: kbItems.length,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
+        thinking_mode: effectiveThinkingMode,
         memory_stage: memoryCard?.profile?.stage || null,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         strategy_name: memoryCard?.strategy?.name || null,
@@ -748,7 +776,7 @@ function buildSystemContent(opts: {
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）：
   //   解决"顾问不需要人设一致"导致的答非所问与自相矛盾
   let s = '【角色定位】(最高优先级)\n'
-    + '你正在扮演「用户本人」用微信跟对方聊天，你就是那个说话的人，不是顾问、不是助手。\n'
+    + '你正在扮演「用户本人」用交友app跟对方聊天，你就是那个说话的人，不是顾问、不是助手。\n'
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
     + (opts.systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。');
 
@@ -827,25 +855,42 @@ function buildSystemContent(opts: {
 
 // ============================================================
 // [v6] LLM 统一调用（OpenAI 兼容）
+// [v10] 思考模式三态控制：
+//   - thinking='off'（默认）：显式 thinking:{type:'disabled'} + 传 temperature/惩罚参数
+//     （V4 模型思考模式默认开启，必须显式禁用，否则内部辅助调用也会悄悄思考）
+//   - thinking=low/high/max：thinking:{type:'enabled'} + reasoning_effort；
+//     思考档下 temperature/惩罚系数官方强制不生效，不传；max_tokens 提到 ≥2000
+//   - 兼容旧模型（deepseek-chat 等非 V4）：不传 thinking 字段，维持原行为
 // ============================================================
 async function llmChat(
   llmKey: string, llmBase: string, llmModel: string,
-  messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number } = {}
+  messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number; thinking?: ThinkingMode } = {}
 ): Promise<string> {
+  const thinking = opts.thinking ?? 'off';
+  const isV4 = /v4/.test(llmModel);
+  const body: any = {
+    model: llmModel,
+    messages,
+  };
+  if (isV4 && thinking !== 'off') {
+    body.thinking = { type: 'enabled' };
+    body.reasoning_effort = thinking;
+    // 思考模式：temperature / top_p / presence_penalty / frequency_penalty 不生效（官方强制）
+    body.max_tokens = Math.max(opts.maxTokens ?? 1200, THINKING_MAX_TOKENS);
+  } else {
+    if (isV4) body.thinking = { type: 'disabled' }; // V4 默认开思考，非思考档显式关闭
+    body.temperature = opts.temperature ?? 0.4;
+    body.max_tokens = opts.maxTokens ?? 1200;
+    body.frequency_penalty = opts.frequencyPenalty ?? 0.5;
+    body.presence_penalty = opts.presencePenalty ?? 0;
+  }
   const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${llmKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: llmModel,
-      messages,
-      temperature: opts.temperature ?? 0.4,
-      max_tokens: opts.maxTokens ?? 1200,
-      frequency_penalty: opts.frequencyPenalty ?? 0.5,
-      presence_penalty: opts.presencePenalty ?? 0,
-    }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const errText = await resp.text();
@@ -1207,15 +1252,16 @@ function mergeDedup(items: any[]): any[] {
 
 // ============================================================
 // [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
-//   llm_params 存 JSON 字符串：{"temperature":0.4,"frequency_penalty":0.5,"presence_penalty":0,"max_tokens":1200}
+//   llm_params 存 JSON 字符串：{"temperature":0.4,"frequency_penalty":0.5,"presence_penalty":0,"max_tokens":1200,"thinking_mode":"off"}
 // ============================================================
 type LlmParams = {
   temperature: number;
   frequency_penalty: number;
   presence_penalty: number;
   max_tokens: number;
+  thinking_mode: ThinkingMode;
 };
-const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.4, frequency_penalty: 0.5, presence_penalty: 0, max_tokens: 1200 };
+const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.4, frequency_penalty: 0.5, presence_penalty: 0, max_tokens: 1200, thinking_mode: 'off' };
 
 async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams }> {
   try {
@@ -1230,6 +1276,10 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
       try { raw = JSON.parse(row.llm_params); } catch (e) { raw = {}; }
     }
     const num = (v: any, d: number) => (typeof v === 'number' && isFinite(v)) ? v : d;
+    // [v10] thinking_mode：后台默认档（枚举校验，非法回退 off）
+    const tm = (typeof raw.thinking_mode === 'string' && THINKING_MODES.has(raw.thinking_mode))
+      ? raw.thinking_mode as ThinkingMode
+      : DEFAULT_LLM_PARAMS.thinking_mode;
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
       llm_params: {
@@ -1237,6 +1287,7 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
         frequency_penalty: Math.max(0, Math.min(2, num(raw.frequency_penalty, DEFAULT_LLM_PARAMS.frequency_penalty))),
         presence_penalty: Math.max(0, Math.min(2, num(raw.presence_penalty, DEFAULT_LLM_PARAMS.presence_penalty))),
         max_tokens: Math.max(100, Math.min(8000, num(raw.max_tokens, DEFAULT_LLM_PARAMS.max_tokens))),
+        thinking_mode: tm,
       },
     };
   } catch (e: any) {

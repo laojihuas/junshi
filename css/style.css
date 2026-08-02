@@ -575,12 +575,39 @@ textarea.input {
     font-size: 17px;
     font-weight: 600;
     text-align: center;
-    margin-right: 34px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     color: #fff;
 }
+
+/* [v10 思考模式] 档位切换按钮：普通弱化为灰色，思考档高亮 */
+.chat-thinking-btn {
+    width: 44px;
+    height: 44px;
+    margin-right: -10px;
+    border: none;
+    background: transparent;
+    color: #8A8A8E;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, color 0.2s;
+    flex-shrink: 0;
+}
+
+.chat-thinking-btn:active {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.chat-thinking-btn[data-mode="off"] { color: #8A8A8E; }
+.chat-thinking-btn[data-mode="low"] { color: #7CFC9A; }
+.chat-thinking-btn[data-mode="high"] { color: #4FC3F7; }
+.chat-thinking-btn[data-mode="max"] { color: #FFB74D; }
 
 /* 聊天消息区域 */
 .chat-messages {

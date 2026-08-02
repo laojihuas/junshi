@@ -57,6 +57,9 @@ const Chat = {
 
         this.renderMessages();
 
+        // [v10 思考模式] 初始化档位切换按钮（显示当前偏好）
+        this._initThinkingBtn();
+
         // 切换到聊天页面
         // [系统返回手势] 进入聊天写入一条浏览器历史记录：
         // 手机左边缘右滑 = 浏览器后退 = popstate → 应用内回到好友列表
@@ -316,7 +319,9 @@ const Chat = {
                 query: query,
                 knowledge_base_id: config.knowledgeBaseId,
                 // [v6 记忆卡] 会话 ID：后端据此读写该好友的对方画像记忆卡（跨窗口共享）
-                session_id: this.currentSessionId
+                session_id: this.currentSessionId,
+                // [v10 思考模式] 用户档位 off/low/high/max（后端优先级：请求体 > 后台默认 > off）
+                thinking_mode: this._getThinkingMode()
             };
             // 附带窗口对话历史（若存在）
             if (opts.history && opts.history.length > 0) {
@@ -386,16 +391,37 @@ const Chat = {
         return session?.access_token || '';
     },
 
-    // 模拟回复（开发调试 / API 不可用时降级）
-    _mockReply(query) {
-        const replies = [
-            `关于"${query}"，我建议你可以这样回：\n\n"哈哈，你说得对，我也有同感。不过换个角度想想，也许对方并不是那个意思呢？"\n\n然后顺势问问对方最近有什么新鲜事，把话题带向更轻松的方向。`,
-            `针对"${query}"的情况，建议回复：\n\n"嗯嗯，我明白你的想法。其实我最近也在思考类似的问题，有机会我们可以深入聊聊~"\n\n这样的回应既表达了理解，又为后续对话埋下了伏笔。`,
-            `你的聊天对象说了"${query}"，你可以考虑这样回应：\n\n"哈哈哈，你这么说让我想起一件事…（分享一个相关的有趣经历）"\n\n用故事回应故事，能让对话更有温度。`,
-            `建议回复：\n\n"你说的这个角度很有意思，我之前都没想过。那你觉得……（追问一个开放性问题）"\n\n展示好奇心和对对方观点的认可能有效拉近距离。`,
-            `关于"${query}"，我的建议：\n\n先表示理解："我懂你的感受"\n然后表达自己的看法："不过我觉得……（你的真实想法）"\n最后抛出问题："你觉得呢？"\n\n三步法：共情→表达→邀请对话，是最自然的聊天节奏。`
-        ];
-        return replies[Math.floor(Math.random() * replies.length)];
+    // [v10 思考模式] 用户偏好档位：off(普通)/low(轻度)/high(中度)/max(深度)
+    // 存 localStorage；非法值一律回退 off（与后端默认一致）
+    _getThinkingMode() {
+        const v = localStorage.getItem('junshi_thinking_mode') || 'off';
+        return ['off', 'low', 'high', 'max'].includes(v) ? v : 'off';
+    },
+
+    _setThinkingMode(mode) {
+        try { localStorage.setItem('junshi_thinking_mode', mode); } catch (e) { /* 隐私模式忽略 */ }
+    },
+
+    // [v10 思考模式] 档位切换按钮：点击循环切换，颜色/文案随档位变化
+    _initThinkingBtn() {
+        const btn = document.getElementById('chat-thinking-btn');
+        if (!btn) return;
+        const order = ['off', 'low', 'high', 'max'];
+        const labels = { off: '普通', low: '轻度', high: '中度', max: '深度' };
+        const update = () => {
+            const mode = this._getThinkingMode();
+            btn.textContent = labels[mode] || '普通';
+            btn.dataset.mode = mode;
+            btn.title = `思考模式：${labels[mode] || '普通'}（点击切换）`;
+        };
+        update();
+        btn.addEventListener('click', () => {
+            const cur = this._getThinkingMode();
+            const next = order[(order.indexOf(cur) + 1) % order.length];
+            this._setThinkingMode(next);
+            update();
+            Utils.toast(`思考模式：${labels[next]}`);
+        });
     },
 
     _escapeHtml(text) {
