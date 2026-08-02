@@ -28,9 +28,9 @@
 - LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、**`LLM_MODEL=deepseek-v4-flash`（v10 起，deepseek-chat 已 2026-07-24 弃用）**；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200 + thinking_mode）
 - **v10 思考模式（2026-08-02，version 35）**：四档 off/low/high/max（off=普通默认，思考档 UI 文案 轻度/中度/深度）
   - **V4 思考模式默认开启**！llmChat 必须显式三态：off → `thinking:{type:'disabled'}`（保留 temperature/惩罚参数）；思考档 → `thinking:{type:'enabled'}`+`reasoning_effort`（官方无 medium，"中度"=默认 high；思考档不传温度/惩罚系数，max_tokens 自动 ≥2000）
-  - 优先级：请求体 thinking_mode > app_config.llm_params.thinking_mode > off；`isV4=/v4/.test(model)` 兼容旧模型
+  - 优先级：**仅 app_config.llm_params.thinking_mode 后台默认档**（v10b 起忽略请求体传参——防用户构造请求刷最高档 max 成本失控）；`isV4=/v4/.test(model)` 兼容旧模型
   - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取/套路提炼）保持默认 off（显式 disabled），开思考只增成本
-  - 前端聊天页头部按钮循环切换，localStorage `junshi_thinking_mode`；后台 admin 可配全局默认档；prompt-update 校验枚举
+  - 前端**无切换 UI**（v10b 撤掉），后台 admin"思考模式默认档"下拉（默认 off）是唯一控制点
 - **v9 记忆与自洽修复（2026-08-02，version 32）**：解决"重复说过的话"与"逻辑自相矛盾"
   - 记忆卡补记 `recent_self_messages`（自己发过的话）→ 窗口历史丢失后 AI 仍知道自己说过什么
   - buildSystemContent 首段硬编码角色定位"**你即用户本人**"（覆盖后台提示词的顾问视角）；参考资料降级为弹药（冲突时以对话连续性为准）；输出 1-2 句（先正面回应再转折）；自洽硬约束（禁自相矛盾/推翻自己/答非所问/重复）
