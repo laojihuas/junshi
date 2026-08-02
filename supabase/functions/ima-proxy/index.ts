@@ -10,7 +10,8 @@
 //     off → thinking:{type:'disabled'}（快、便宜，保留 temperature/惩罚参数）
 //     low/high/max → thinking:{type:'enabled'} + reasoning_effort（思考档不传
 //     temperature/惩罚系数，官方强制不生效；max_tokens 自动提到 2000+ 防思维链挤占）
-//   - 优先级：请求体 thinking_mode > app_config.llm_params.thinking_mode > off
+//   - 优先级：仅 app_config.llm_params.thinking_mode（后台默认档）；请求体 thinking_mode
+//     一律忽略 —— 防止用户构造请求刷最高档 max 造成成本失控
 //   - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取/套路提炼）保持显式
 //     disabled：检索辅助任务开思考只会变慢变贵
 //   - _debug 新增 thinking_mode 便于验证
@@ -64,7 +65,7 @@
 //   history        可选 本窗口对话历史 [{role,content}]
 //   system_prompt  可选 后台统一提示词（前端用户不可见）
 //   session_id     可选 数据库会话 ID（chat_sessions.id），用于读写记忆卡
-//   thinking_mode  可选 思考模式档位 off|low|high|max（优先级 > 后台默认）
+//   thinking_mode  已忽略（档位仅由后台 app_config 默认控制，防用户刷最高档）
 //
 // 环境变量：IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES,
 //           LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
@@ -145,7 +146,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { query, knowledge_base_id, history, system_prompt, session_id, thinking_mode: reqThinkingMode } = await req.json();
+    const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
     const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
 
     if (!query || !query.trim()) {
@@ -218,11 +219,8 @@ Deno.serve(async (req) => {
     // [v10] 模型升级：deepseek-chat 已于 2026-07-24 弃用，V4 思考/非思考都走 deepseek-v4-flash
     const llmModel = Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash';
 
-    // [v10] 思考模式生效档位：请求体 > 后台默认 > off（非法值一律回退，不信任输入）
-    let effectiveThinkingMode: ThinkingMode = llmParams.thinking_mode;
-    if (typeof reqThinkingMode === 'string' && THINKING_MODES.has(reqThinkingMode)) {
-      effectiveThinkingMode = reqThinkingMode as ThinkingMode;
-    }
+    // [v10] 思考模式生效档位：仅后台默认档（忽略请求体传参，防用户构造请求刷最高档）
+    const effectiveThinkingMode: ThinkingMode = llmParams.thinking_mode;
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);

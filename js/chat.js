@@ -57,9 +57,6 @@ const Chat = {
 
         this.renderMessages();
 
-        // [v10 思考模式] 初始化档位切换按钮（显示当前偏好）
-        this._initThinkingBtn();
-
         // 切换到聊天页面
         // [系统返回手势] 进入聊天写入一条浏览器历史记录：
         // 手机左边缘右滑 = 浏览器后退 = popstate → 应用内回到好友列表
@@ -319,9 +316,7 @@ const Chat = {
                 query: query,
                 knowledge_base_id: config.knowledgeBaseId,
                 // [v6 记忆卡] 会话 ID：后端据此读写该好友的对方画像记忆卡（跨窗口共享）
-                session_id: this.currentSessionId,
-                // [v10 思考模式] 用户档位 off/low/high/max（后端优先级：请求体 > 后台默认 > off）
-                thinking_mode: this._getThinkingMode()
+                session_id: this.currentSessionId
             };
             // 附带窗口对话历史（若存在）
             if (opts.history && opts.history.length > 0) {
@@ -389,39 +384,6 @@ const Chat = {
         if (!sb) return '';
         const { data: { session } } = await sb.auth.getSession();
         return session?.access_token || '';
-    },
-
-    // [v10 思考模式] 用户偏好档位：off(普通)/low(轻度)/high(中度)/max(深度)
-    // 存 localStorage；非法值一律回退 off（与后端默认一致）
-    _getThinkingMode() {
-        const v = localStorage.getItem('junshi_thinking_mode') || 'off';
-        return ['off', 'low', 'high', 'max'].includes(v) ? v : 'off';
-    },
-
-    _setThinkingMode(mode) {
-        try { localStorage.setItem('junshi_thinking_mode', mode); } catch (e) { /* 隐私模式忽略 */ }
-    },
-
-    // [v10 思考模式] 档位切换按钮：点击循环切换，颜色/文案随档位变化
-    _initThinkingBtn() {
-        const btn = document.getElementById('chat-thinking-btn');
-        if (!btn) return;
-        const order = ['off', 'low', 'high', 'max'];
-        const labels = { off: '普通', low: '轻度', high: '中度', max: '深度' };
-        const update = () => {
-            const mode = this._getThinkingMode();
-            btn.textContent = labels[mode] || '普通';
-            btn.dataset.mode = mode;
-            btn.title = `思考模式：${labels[mode] || '普通'}（点击切换）`;
-        };
-        update();
-        btn.addEventListener('click', () => {
-            const cur = this._getThinkingMode();
-            const next = order[(order.indexOf(cur) + 1) % order.length];
-            this._setThinkingMode(next);
-            update();
-            Utils.toast(`思考模式：${labels[next]}`);
-        });
     },
 
     _escapeHtml(text) {
