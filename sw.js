@@ -3,7 +3,7 @@
 // 简单缓存壳：让"已添加桌面"的 PWA 打开更快、断网也能进首页
 // ============================================================
 
-const CACHE_NAME = 'junshi-v2';
+const CACHE_NAME = 'junshi-v3';
 const PRECACHE = [
   './',
   './index.html',
@@ -18,9 +18,11 @@ const PRECACHE = [
   './js/paywall.js',
   './js/app.js',
   './js/install-prompt.js',
+  './icons/icon-32.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/apple-touch-icon.png'
+  './icons/apple-touch-icon.png',
+  './icons/favicon.ico'
 ];
 
 // 安装：预缓存静态资源
