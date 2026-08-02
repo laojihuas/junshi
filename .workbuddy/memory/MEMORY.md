@@ -25,7 +25,12 @@
 ## LLM 生成链路（ima-proxy）
 
 - 前端(query+history+session_id+system_prompt) → ima-proxy → [IMA 检索=弹药] + [DeepSeek=生成]；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
-- LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、`LLM_MODEL=deepseek-chat`；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200）
+- LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、**`LLM_MODEL=deepseek-v4-flash`（v10 起，deepseek-chat 已 2026-07-24 弃用）**；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200 + thinking_mode）
+- **v10 思考模式（2026-08-02，version 35）**：四档 off/low/high/max（off=普通默认，思考档 UI 文案 轻度/中度/深度）
+  - **V4 思考模式默认开启**！llmChat 必须显式三态：off → `thinking:{type:'disabled'}`（保留 temperature/惩罚参数）；思考档 → `thinking:{type:'enabled'}`+`reasoning_effort`（官方无 medium，"中度"=默认 high；思考档不传温度/惩罚系数，max_tokens 自动 ≥2000）
+  - 优先级：请求体 thinking_mode > app_config.llm_params.thinking_mode > off；`isV4=/v4/.test(model)` 兼容旧模型
+  - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取/套路提炼）保持默认 off（显式 disabled），开思考只增成本
+  - 前端聊天页头部按钮循环切换，localStorage `junshi_thinking_mode`；后台 admin 可配全局默认档；prompt-update 校验枚举
 - **v9 记忆与自洽修复（2026-08-02，version 32）**：解决"重复说过的话"与"逻辑自相矛盾"
   - 记忆卡补记 `recent_self_messages`（自己发过的话）→ 窗口历史丢失后 AI 仍知道自己说过什么
   - buildSystemContent 首段硬编码角色定位"**你即用户本人**"（覆盖后台提示词的顾问视角）；参考资料降级为弹药（冲突时以对话连续性为准）；输出 1-2 句（先正面回应再转折）；自洽硬约束（禁自相矛盾/推翻自己/答非所问/重复）
@@ -40,7 +45,7 @@
 - **IMA API**：search_knowledge 只认短关键词（bigram 命中率最高），长词/整句返回空；get_knowledge_list limit ≤50；文件夹字段是 title/media_id；新版 `sb_publishable_*` key 非 JWT，REST 需 apikey+Bearer 双传（Edge Functions gateway 可过）
 - **无 CLI 部署 Edge Function**（本机 CLI Bun 编译 CPU 不支持）：`POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart 的 **file=单个源码文件**（非压缩包），metadata `{"entrypoint_path":"index.ts","name":slug}`；requests 需 `proxies={'http':None,'https':None}`（本机代理不稳）；Secrets 用 `POST /v1/projects/{ref}/secrets`；任意 SQL 用 `POST /v1/projects/{ref}/database/query`（201/空数组）
 - **作用域教训（v31 事故）**：函数内 `let` 声明必须提到 Deno.serve 顶层，_debug 块外引用块内 let → ReferenceError → 全 500；esbuild 只查语法抓不到，部署前用 tsc/transpileModule 校验
-- **端到端验证**（无需真实凭证）：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true 不发邮件；别用 SignUp 会邮件限流；别手工 INSERT auth.users）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey header）→ 调函数看 _debug → 清理
+- **端到端验证**（无需真实凭证）：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true 不发邮件；别用 SignUp 会邮件限流；别手工 INSERT auth.users；**成功返回 200 不是 201**）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey header）→ 调函数看 _debug → 清理
 - **前端降级**：`_callIMA` 异常返回"掉线了"（不返回 mock）
 
 ## 前端其他（简）
