@@ -44,6 +44,7 @@
 
 - **IMA API**：search_knowledge 只认短关键词（bigram 命中率最高），长词/整句返回空；get_knowledge_list limit ≤50；文件夹字段是 title/media_id；新版 `sb_publishable_*` key 非 JWT，REST 需 apikey+Bearer 双传（Edge Functions gateway 可过）
 - **无 CLI 部署 Edge Function**（本机 CLI Bun 编译 CPU 不支持）：`POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart 的 **file=单个源码文件**（非压缩包），metadata `{"entrypoint_path":"index.ts","name":slug}`；requests 需 `proxies={'http':None,'https':None}`（本机代理不稳）；Secrets 用 `POST /v1/projects/{ref}/secrets`；任意 SQL 用 `POST /v1/projects/{ref}/database/query`（201/空数组）
+- **prompt-update 校验坑（v11 修复）**：LLM_PARAM_RANGE 是 `Record<string, [number,number] | string[]>`，**不能**用 `Array.isArray(range)` 区分枚举/区间（数值区间本身也是数组）→ 用 `typeof range[0]==='string'` 判断
 - **作用域教训（v31 事故）**：函数内 `let` 声明必须提到 Deno.serve 顶层，_debug 块外引用块内 let → ReferenceError → 全 500；esbuild 只查语法抓不到，部署前用 tsc/transpileModule 校验
 - **端到端验证**（无需真实凭证）：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true 不发邮件；别用 SignUp 会邮件限流；别手工 INSERT auth.users；**成功返回 200 不是 201**）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey header）→ 调函数看 _debug → 清理
 - **前端降级**：`_callIMA` 异常返回"掉线了"（不返回 mock）
