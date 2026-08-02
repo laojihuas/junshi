@@ -200,7 +200,7 @@ const App = {
         });
         document.getElementById('bio-input').addEventListener('input', (e) => {
             const len = e.target.value.length;
-            document.getElementById('bio-count').textContent = len + ' / 200';
+            document.getElementById('bio-count').textContent = len + ' / 300';
         });
         document.getElementById('modal-bio').addEventListener('click', (e) => {
             if (e.target === e.currentTarget) {
