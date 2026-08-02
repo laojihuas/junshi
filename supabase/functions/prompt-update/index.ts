@@ -29,13 +29,14 @@ function validateLlmParams(v: any): string | null {
     if (!(key in LLM_PARAM_RANGE)) return `不支持的参数: ${key}`;
     const val = v[key];
     const range = LLM_PARAM_RANGE[key];
-    if (Array.isArray(range)) {
-      // 枚举校验（字符串档位）
-      if (typeof val !== 'string' || !range.includes(val)) {
+    // 注意：数值区间 [min,max] 也是数组！用首元素类型区分：string → 枚举，number → 区间
+    if (typeof range[0] === 'string') {
+      // 枚举校验（字符串档位，如 thinking_mode）
+      if (typeof val !== 'string' || !(range as string[]).includes(val)) {
         return `${key} 必须为 ${range.join(' / ')} 之一`;
       }
     } else {
-      const [min, max] = range;
+      const [min, max] = range as [number, number];
       if (typeof val !== 'number' || !isFinite(val) || val < min || val > max) {
         return `${key} 必须为 ${min}~${max} 之间的数字`;
       }
