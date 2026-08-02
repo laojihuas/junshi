@@ -10,7 +10,7 @@
 
 - **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / IMA knowledgeBaseId）
 - **后端**：Supabase（ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions：`ima-proxy`（核心，v9）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
+  - Edge Functions：`ima-proxy`（核心，**v11 迷男OS**，version 38）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
   - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`
   - SQL 脚本：`supabase/sql/001~005`（app_config / bio / note / invite / **005 memory_card**）
   - 数据库函数：`redeem_invite`（SECURITY DEFINER，写邀请关系+邀请人 usage+50，防自邀/重复/上限 20 人）
@@ -20,12 +20,19 @@
 
 - **窗口历史**：`js/session.js` WindowSession（sessionStorage key `junshi_window_session`）。`navigation.type` reload/back_forward 保留，navigate（复制标签页/新开）重建 UUID 清空历史。按好友隔离，单好友 50 条。**仅"杀进程恢复"路径（app.js getLastView → Chat.open(restoreContext=true)）从数据库重建最近 50 条；从好友列表手动进入不重建 → 窗口历史可能为空**
 - **数据库消息**：chat_messages 全量持久化，仅用于界面显示与恢复，不是 AI 上下文
-- **记忆卡**（唯一跨窗口载体，**按 chat_sessions.id 隔离，不同好友永不交叉**，RLS 按 user_id 兜底）：`chat_sessions.memory_card` JSON = profile{stage,personality,relationship_note,recent_events} + `recent_user_messages`（对方的话 ≤20）+ **`recent_self_messages`（军师自己发过的话 ≤20，v9 新增）** + strategy + updated_at。主回复后 await updateMemoryCard（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟限频）
+- **记忆卡**（唯一跨窗口载体，**按 chat_sessions.id 隔离，不同好友永不交叉**，RLS 按 user_id 兜底）：`chat_sessions.memory_card` JSON = profile{stage,personality,relationship_note,recent_events} + `recent_user_messages`（对方的话 ≤20）+ **`recent_self_messages`（军师自己发过的话 ≤20，v9 新增）** + **v11 引擎层 pulse{delay_count}/balance{direction,user_initiate_ratio,user_msg_len_avg}/emotion_tone{baseline,volatility}** + strategy + updated_at。主回复后 await updateMemoryCard（规则追加毫秒级 + 画像 LLM 提取 ≤3 分钟限频）
 
 ## LLM 生成链路（ima-proxy）
 
 - 前端(query+history+session_id+system_prompt) → ima-proxy → [IMA 检索=弹药] + [DeepSeek=生成]；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
 - LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、**`LLM_MODEL=deepseek-v4-flash`（v10 起，deepseek-chat 已 2026-07-24 弃用）**；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200 + thinking_mode）
+- **v11 迷男OS（2026-08-02，version 38）**：迷男方法精髓 × 线上纯文字场景融合，三层架构
+  - 战略层：记忆卡 profile.stage 定基调（STAGE_HINTS 全部改线上版：追求=展示面+节奏/暧昧=文字张力/恋爱=小调侃保鲜/挽回=禁调侃先稳情绪）
+  - 战术层：strategy 套路定方向（extractStrategy 线上化：步骤纯文字可发送+标发送时机+过滤肢体/眼神/现场类+禁人身攻击；启动检索词 `resolveStrategySearchKws` 按 stage/goal 动态取）
+  - 引擎层：`resolveStageVocab` 把 91 词按 M3 四阶段(meet/attract/comfort/seduction)打标分组，extractSemanticKeywords 按"当前目标"加权（目标词优先最多2个）；`pulse.delay_count` 连续建议延后 ≥2 强制恢复（防冷暴力）；`balance.direction` self_pursuing→"短句+延后20-40分钟回写 pulseAdvice" / user_pursuing→顺势热聊；`emotion_tone.baseline` negative→禁延后禁调侃先共情
+  - **Neg 轻度化保留**（用户明确要求）：buildSystemContent【线上语境与轻度否定】块——只调侃行为/措辞/情境（禁外貌/性格/价值否定）、每3-5轮最多1次、情绪低落/挽回期禁用；推拉结构=先回应(拉)→轻调侃/留白(推)→留钩子
+  - 返回值改 `{systemContent, pulseAdvice}`（pulseAdvice 顶层声明，v31 教训）；_debug 新增 stage_vocab/balance_direction/emotion_baseline/pulse_delay_count
+  - 验证：stage=暧昧→stage_vocab 自动切 seduction 词表✅；balance/emotion_tone 落库✅
 - **v10 思考模式（2026-08-02，version 35）**：四档 off/low/high/max（off=普通默认，思考档 UI 文案 轻度/中度/深度）
   - **V4 思考模式默认开启**！llmChat 必须显式三态：off → `thinking:{type:'disabled'}`（保留 temperature/惩罚参数）；思考档 → `thinking:{type:'enabled'}`+`reasoning_effort`（官方无 medium，"中度"=默认 high；思考档不传温度/惩罚系数，max_tokens 自动 ≥2000）
   - 优先级：**仅 app_config.llm_params.thinking_mode 后台默认档**（v10b 起忽略请求体传参——防用户构造请求刷最高档 max 成本失控）；`isV4=/v4/.test(model)` 兼容旧模型

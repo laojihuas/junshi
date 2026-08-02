@@ -1,7 +1,20 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v10)
+// 军师 - Supabase Edge Function: IMA API 代理 (v11)
 //
 // 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
+//
+// [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
+//   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
+//     > 引擎层(pulse/balance/emotion_tone 实时输入)
+//   - STAGE_VOCAB：91 词表按 M3 四阶段(meet/attract/comfort/seduction)打标分组，
+//     语义拆解按"当前目标"加权：目标词 > 语义词 > bigram > 原句
+//   - memory_card 新增 pulse(节奏)/balance(话题主权)/emotion_tone(情绪基线)：
+//     毫秒级规则统计，防止需求感外露与连续延迟(冷暴力)
+//   - buildSystemContent 新增【节奏】(礼貌阈值+延后计数) 与
+//     【线上语境与轻度否定】(Neg 轻度化：只调侃行为措辞、禁人身攻击、
+//     推拉结构=先回应再调侃再留钩子) 两个硬约束块
+//   - extractStrategy 线上化：步骤须纯文字可发送、标注发送时机、
+//     过滤肢体/眼神/现场类、禁人身攻击
 //
 // [v10 思考模式]（DeepSeek V4，2026-08）
 //   - 模型升级 deepseek-chat → deepseek-v4-flash（旧名 2026-07-24 已弃用）
@@ -94,12 +107,13 @@ const STOP_WORDS = new Set([
 const SPLIT_RE = /[，。！？；、,.!?;:\s\n\r"'""''（）()【】\[\]]+/;
 
 // [v6 L3] 关系阶段 → 场景指导映射（由记忆卡 profile.stage 触发）
+// [v11] 全部改为线上场景版（纯文字聊天：展示面+节奏+文字张力）
 const STAGE_HINTS: Record<string, string> = {
-  '追求': '对方处于被追求阶段：回复要自然不油腻、适度示好、多关注对方，避免查户口式提问。',
-  '暧昧': '双方处于暧昧期：营造轻松氛围、适当推进关系、保留一点张力与神秘感。',
-  '恋爱': '双方已是恋人：回复温暖有生活感、关注细节，避免过度客气生分。',
-  '挽回': '关系出现裂痕：先稳住对方情绪、不纠缠不施压，以重建信任为先。',
-  '普通朋友': '对方是普通朋友：保持得体大方、不越界、话题轻松。',
+  '追求': '线上追求期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可适度轻度调侃制造张力，但别急着表白、别查户口式提问。',
+  '暧昧': '线上暧昧期：用文字张力推进——先回应再调侃/留白，保留一点神秘感；可抛出模糊邀约试探，不急着捅破窗户纸，守住"暧昧窗口"。',
+  '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，避免过度客气生分；可用小调侃保鲜，但别拿原则问题开玩笑。',
+  '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压。',
+  '普通朋友': '线上普通朋友：保持得体大方、不越界、话题轻松自然。',
   '未知': '',
 };
 
@@ -123,6 +137,48 @@ const TOPIC_VOCAB: string[] = [
   '暴露需求感', '第三方话题', '逗比话题', '男神框架', '设置陷阱', '表情包开场',
   '情感浓度', '心理锚定', '一推一拉', '冷读术', '吸引阶段',
 ];
+
+// [v11 迷男OS] M3 战术阶段 → 词表子集映射（91 词按阶段打标）
+//   语义拆解与套路启动检索按"当前目标"加权：
+//   有套路 → strategy.goal 推断；无套路 → profile.stage 推断；都没有 → 全词表
+const STAGE_VOCAB: Record<string, string[]> = {
+  'meet': ['开场白', '表情包开场', '搭讪', '惯例', '逗比话题', '聊天', '邀约'],
+  'attract': ['推拉', '框架', '冷读', '冷读术', '废物测试', '打压', '欲擒故纵', '预选', '展示面',
+    '高价值', '调戏', '侧面展示', '设置陷阱', '男神框架', '服从性测试', '模糊邀约', '一推一拉',
+    '筛选话术', '服从命令', '主导权', '需求感', '暴露需求感', '查户口', '角色扮演', '二次吸引',
+    '建立吸引', '短期吸引', '长期吸引', '吸引阶段'],
+  'comfort': ['情绪价值', '三明治夸奖', '第三方话题', '情感浓度', '心理锚定', '引导',
+    '安慰', '哄', '解释', '试探', '约会', '见面', '暧昧'],
+  'seduction': ['进挪', '兴趣指标', '关系推进', '升级关系', '推倒', '暧昧'],
+};
+
+// [v11] 根据记忆卡解析当前 M3 战术阶段词表（目标驱动）
+function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
+  const goal = memoryCard?.strategy?.goal || '';
+  const stage = memoryCard?.profile?.stage || '';
+  let phase: keyof typeof STAGE_VOCAB = 'attract';
+  if (/邀约|约会|见面|约出|约/.test(goal)) phase = 'meet';
+  else if (/挽回|安抚|共情|信任|稳定|舒适|聊天|倾听/.test(goal)) phase = 'comfort';
+  else if (/试探|暧昧|升级|推进|表白|升温|试探性/.test(goal)) phase = 'seduction';
+  else if (/吸引|推拉|框架|调情|逗|挑逗|地位/.test(goal)) phase = 'attract';
+  else if (stage === '挽回' || stage === '恋爱') phase = 'comfort';
+  else if (stage === '暧昧') phase = 'seduction';
+  else if (stage === '追求') phase = 'attract';
+  return STAGE_VOCAB[phase] || [];
+}
+
+// [v11] 套路启动检索词：按当前目标动态取（替代固定四连词）
+function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
+  const goal = memoryCard?.strategy?.goal || '';
+  const stage = memoryCard?.profile?.stage || '';
+  if (/邀约|约会|见面/.test(goal)) return ['邀约', '约会', '见面', '模糊邀约', '开场白'];
+  if (/暧昧|升级|推进|表白|升温/.test(goal)) return ['暧昧', '升级关系', '关系推进', '进挪', '兴趣指标'];
+  if (/挽回|安抚|共情|信任/.test(goal)) return ['挽回', '安慰', '哄', '情绪价值', '共情'];
+  if (stage === '暧昧') return ['推拉', '暧昧', '冷读', '模糊邀约', '升级关系'];
+  if (stage === '挽回') return ['挽回', '安慰', '情绪价值', '冷冻', '重建信任'];
+  if (stage === '恋爱') return ['推拉', '三明治夸奖', '情绪价值', '情感浓度'];
+  return ['惯例', '推拉', '冷读', '开场白', '步骤'];
+}
 
 // [v6 L0] 知识库参考条数与原文截断长度
 const KB_REF_COUNT = 5;
@@ -250,6 +306,8 @@ Deno.serve(async (req) => {
     let kbFolders: { hs: string | null; jx: string | null } = { hs: null, jx: null };
     // [v8] 语义拆解词（if 块外声明：_debug 在块外引用，块内 let 会 ReferenceError → 500）
     let semanticKws: string[] = [];
+    // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
+    let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
 
     // ---- 知识库检索（L1 增强） ----
     if (imaKey && imaClientId && kbId) {
@@ -264,10 +322,10 @@ Deno.serve(async (req) => {
           strategyActive: !!memoryCard?.strategy,
         };
 
-        // [v8] 1. LLM 语义拆解（词表约束 + few-shot）→ 知识库主题检索词
+        // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 知识库主题检索词
         const kw = extractKeywordsFromHistory(history, query);
         if (llmKey) {
-          semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages);
+          semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         // [v8] 2. 条件 query rewrite 降级：仅当语义拆解失败 且 规则词不足时触发
         let searchQuery = query.trim();
@@ -304,11 +362,12 @@ Deno.serve(async (req) => {
 
         // [v7] 套路启动（独立惯例检索通道）：当前无套路 + 用户未打断 → 专门检索惯例/魔术/玩法类内容，
         //   LLM 提炼步骤启动套路；结果仅用于启动，不混入主回复参考（话术加权不影响套路启动素材）
+        //   [v11] 检索词按当前目标动态取（resolveStrategySearchKws）
         if (llmKey && !strategyClear && !memoryCard?.strategy) {
           try {
             const convItems = await searchKbAndFetch(
               imaClientId, imaKey, kbId,
-              ['惯例', '推拉', '冷读', '开场白', '步骤'],
+              resolveStrategySearchKws(memoryCard),
               llmHistory, effectivePrompt, { ...quotaOpts, pickCount: 5 }
             );
             if (convItems.length > 0) {
@@ -331,8 +390,8 @@ Deno.serve(async (req) => {
     const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
     if (llmKey) {
       try {
-        // 组装 system：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
-        const systemContent = buildSystemContent({
+        // 组装 system：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 套路 > 节奏 > 轻度否定 > 格式约束
+        const built = buildSystemContent({
           systemPrompt: effectivePrompt,
           userBio,
           memoryCard,
@@ -340,6 +399,8 @@ Deno.serve(async (req) => {
           kbItems,
           kbFallback,
         });
+        const systemContent = built.systemContent;
+        pulseAdvice = built.pulseAdvice;
         const messages: any[] = [
           { role: 'system', content: systemContent },
           ...llmHistory,
@@ -397,6 +458,7 @@ Deno.serve(async (req) => {
         await updateMemoryCard({
           supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
           history, llmKey, llmBase, llmModel, existingCard: memoryCard,
+          pulseAdvice,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -428,6 +490,11 @@ Deno.serve(async (req) => {
         thinking_mode: effectiveThinkingMode,
         memory_stage: memoryCard?.profile?.stage || null,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
+        // [v11] 引擎层 debug：验证阶段加权与节奏/主权/情绪引擎是否生效
+        stage_vocab: resolveStageVocab(memoryCard).slice(0, 5),
+        balance_direction: memoryCard?.balance?.direction || null,
+        emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
+        pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
         strategy_clear: strategyClear,
@@ -537,12 +604,15 @@ const KW_LEN_MAX = 5;   // IMA search_knowledge 对长词掉命中，拆解词�
 
 async function extractSemanticKeywords(
   llmKey: string, llmBase: string, llmModel: string,
-  query: string, recentUserMsgs: string[]
+  query: string, recentUserMsgs: string[], stageVocab?: string[]
 ): Promise<string[]> {
   try {
     const prompt = '你是恋爱话术检索助手，负责把"对方说的话"拆解成适合检索恋爱资料库的短关键词。\n'
       + `对方的话：「${truncateText(query, 80)}」\n`
       + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
+      + (stageVocab && stageVocab.length > 0
+        ? `当前对话目标相关的检索词（优先使用，最多选 2 个）：\n${stageVocab.join('、')}\n`
+        : '')
       + `知识库领域词表（检索词应优先从中选择，可少量自创补充）：\n${TOPIC_VOCAB.join('、')}\n`
       + '示例：\n'
       + '输入："她说今天被领导骂了很难受"\n输出：["被骂","委屈","哄","工作压力","情绪低落"]\n'
@@ -589,11 +659,34 @@ type StrategyState = {
   started_at: string;
 };
 
+// [v11 迷男OS 引擎层] 节奏引擎（线上"假性时间限制"量化）
+type PulseState = {
+  delay_count?: number;   // 连续建议延迟回复的轮数（≥2 触发礼貌阈值，强制恢复正常）
+  avg_gap_min?: number;   // 近 5 轮平均回复间隔（分钟，可选项）
+};
+
+// [v11] 话题主权引擎（线上"框架"量化：谁在追谁）
+type BalanceState = {
+  direction: 'self_pursuing' | 'balanced' | 'user_pursuing'; // 用户需求感外露 / 均衡 / 对方主动
+  user_initiate_ratio?: number; // 近 6 轮对方主动发起的比例
+  user_msg_len_avg?: number;    // 近 6 轮对方平均消息长度（字）
+};
+
+// [v11] 情绪基线引擎（推拉比例调节器）
+type EmotionTone = {
+  baseline: 'positive' | 'neutral' | 'negative';
+  volatility: 'calm' | 'moderate' | 'volatile';
+};
+
 type MemoryCard = {
   profile?: { stage?: string; personality?: string; relationship_note?: string; recent_events?: string };
   recent_user_messages?: string[];
   // [v9] 军师(自己)发过的话：窗口 history 丢失后仍能知道自己说过什么，防重复（按 session_id 隔离）
   recent_self_messages?: string[];
+  // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
+  pulse?: PulseState;
+  balance?: BalanceState;
+  emotion_tone?: EmotionTone;
   strategy?: StrategyState | null;
   updated_at?: string;
 };
@@ -632,10 +725,13 @@ async function writeMemoryCard(supabaseUrl: string, token: string, anonKey: stri
 // [v6 L2] 记忆卡更新：
 //   1) 规则追加"对方说的话"（毫秒级，每次请求）
 //   2) 画像合并（LLM 提取，频率 ≤ MEMORY_UPDATE_INTERVAL）
+//   [v11] 3) 引擎层毫秒级统计：balance 话题主权 + emotion_tone 情绪初判
+//   4) pulseAdvice 回写：本轮的节奏建议（是否建议延迟）计入 delay_count
 async function updateMemoryCard(ctx: {
   supabaseUrl: string; token: string; anonKey: string; sessionId: string;
   history: any[]; llmKey: string; llmBase: string; llmModel: string;
   existingCard: MemoryCard | null;
+  pulseAdvice?: { delay?: boolean; short?: boolean } | null;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
 
@@ -657,6 +753,54 @@ async function updateMemoryCard(ctx: {
     selfMsgs.push(truncateText(lastSelf.content, 200));
     if (selfMsgs.length > 20) selfMsgs.splice(0, selfMsgs.length - 20);
     card.recent_self_messages = selfMsgs;
+  }
+
+  // [v11] 1.6) 引擎层毫秒级统计：话题主权 balance（近 6 轮：谁发起、消息长度比）
+  const hist6 = (Array.isArray(ctx.history) ? ctx.history : [])
+    .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string')
+    .slice(-6);
+  const userMsgs6 = hist6.filter((h) => h.role === 'user');
+  const selfMsgs6 = hist6.filter((h) => h.role === 'assistant');
+  const initRatio = hist6.length >= 2 ? userMsgs6.length / hist6.length : 0.5;
+  const userLenAvg = userMsgs6.length > 0
+    ? Math.round(userMsgs6.reduce((a, h) => a + String(h.content).length, 0) / userMsgs6.length)
+    : 0;
+  const selfLenAvg = selfMsgs6.length > 0
+    ? Math.round(selfMsgs6.reduce((a, h) => a + String(h.content).length, 0) / selfMsgs6.length)
+    : 0;
+  const direction: BalanceState['direction'] = hist6.length < 2
+    ? 'balanced'
+    : (initRatio < 0.4 && selfLenAvg > Math.max(userLenAvg * 1.5, 30))
+      ? 'self_pursuing'
+      : (initRatio > 0.6 && userLenAvg > Math.max(selfLenAvg * 1.3, 20))
+        ? 'user_pursuing'
+        : 'balanced';
+  card.balance = {
+    direction,
+    user_initiate_ratio: Math.round(initRatio * 100) / 100,
+    user_msg_len_avg: userLenAvg,
+  };
+
+  // [v11] 1.7) 情绪基线初判（关键词规则；画像提炼时 LLM 精修）：negative 时禁用调侃
+  const lastText = userMsgs6.length > 0 ? String(userMsgs6[userMsgs6.length - 1].content) : '';
+  const negScore = (/难受|伤心|难过|委屈|生气|烦|累死|累|哭|失望|讨厌|烦死|焦虑|压力/.test(lastText) ? 2 : 0)
+    + (/怎么老|又|别烦|不想理|不想说/.test(lastText) ? 1 : 0);
+  const posScore = (/哈哈|开心|喜欢|可爱|好呀|没问题|期待|笑死|有意思/.test(lastText) ? 1 : 0);
+  let baseline: EmotionTone['baseline'] = card.emotion_tone?.baseline || 'neutral';
+  if (negScore > posScore) baseline = 'negative';
+  else if (posScore > 0) baseline = 'positive';
+  card.emotion_tone = {
+    baseline,
+    volatility: card.emotion_tone?.volatility || 'moderate',
+  };
+
+  // [v11] 1.8) 节奏回写：本轮 system 是否建议了延迟 → 累计 delay_count（≥2 下轮强制恢复）
+  if (ctx.pulseAdvice) {
+    const cur = card.pulse || { delay_count: 0 };
+    const nextDelay = ctx.pulseAdvice.delay
+      ? Math.min((cur.delay_count || 0) + 1, 5)
+      : Math.max((cur.delay_count || 0) - 1, 0);
+    card.pulse = { ...cur, delay_count: nextDelay };
   }
 
   // 2) 画像合并（频率控制）
@@ -727,10 +871,16 @@ async function extractStrategy(
     .join('\n');
   if (!texts || !STRATEGY_HINT_RE.test(texts)) return null;
 
-  const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
+  const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己用交友APP（纯文字聊天）回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
     + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
-    + `要求：如果资料中存在"分步骤、可执行"的聊天惯例/魔术/玩法（例如灵魂沟通、推拉、冷读、惯例开场、邀约流程等），提炼成步骤序列。\n`
-    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","steps":["第1步...","第2步..."]}，steps 2-6 步，每步一句话、具体可操作、面向"替用户给对方发消息"的执行视角。\n`
+    + `要求：如果资料中存在"分步骤、可执行"的聊天惯例/魔术/玩法（例如推拉、冷读、惯例开场、邀约流程等），提炼成步骤序列。\n`
+    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","steps":["第1步...","第2步..."]}，steps 2-6 步。\n`
+    + `线上适配（必须遵守）：\n`
+    + `- 所有步骤必须是"可直接发送给对方"的文字话术/话术思路（纯文字聊天场景）；\n`
+    + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
+    + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低；\n`
+    + `- 每步可附带发送时机提示（如"对方回复后隔20-40分钟再发""对方主动追问时用"），写在该步末尾括号内；\n`
+    + `- 每步一句话、具体可操作、面向"替用户给对方发消息"的执行视角。\n`
     + `如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -770,7 +920,7 @@ function buildSystemContent(opts: {
   olderSummary: string;
   kbItems: any[];
   kbFallback: boolean;
-}): string {
+}): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null } {
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）：
   //   解决"顾问不需要人设一致"导致的答非所问与自相矛盾
   let s = '【角色定位】(最高优先级)\n'
@@ -841,6 +991,34 @@ function buildSystemContent(opts: {
       + `- 当对方反应表明套路目标已达成或已失效时，自然收尾、平滑过渡到正常聊天，不要强行继续。`;
   }
 
+  // [v11 迷男OS] 节奏建议（引擎层 → 线上"假性时间限制"）：delay 建议回写记忆卡
+  const pulse = opts.memoryCard?.pulse || {};
+  const balance = opts.memoryCard?.balance;
+  const emotion = opts.memoryCard?.emotion_tone;
+  let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
+  const delayCount = pulse.delay_count || 0;
+  const isNegative = emotion?.baseline === 'negative';
+  if (delayCount >= 2) {
+    // 礼貌阈值：已连续建议延后两轮，强制恢复正常节奏，防"冷暴力"观感
+    s += `\n\n【节奏】前面已经自然放慢过节奏，本轮立即正常回复，不要刻意延后，也无需秒回。`;
+  } else if (isNegative) {
+    s += `\n\n【节奏】对方当前情绪不好，本轮尽快回复（不要刻意延后），先给到情绪价值。`;
+  } else if (balance?.direction === 'self_pursuing') {
+    s += `\n\n【节奏】你最近一直在主动追话题、消息偏长，需求感有点外露。本轮：回复短一点（1 句即可），自然延后 20-40 分钟再发，把节奏主动权收回来。`;
+    pulseAdvice = { delay: true, short: true };
+  } else if (balance?.direction === 'user_pursuing') {
+    s += `\n\n【节奏】对方最近明显更主动、消息也更长，这是升温信号。本轮顺势热聊，不用刻意延后，回复热情一点、适当带钩子。`;
+  } else {
+    s += `\n\n【节奏】按正常聊天节奏回复即可，不用刻意延后，也不必秒回。`;
+  }
+
+  // [v11 迷男OS] 线上语境 + 轻度否定（Neg 轻度化保留：迷男"否定-地位博弈"的线上版）
+  s += `\n\n【线上语境与轻度否定】（严格遵守）\n`
+    + `- 纯文字没有语气缓冲：所有调侃必须软化（加语气词/表情/自嘲），严禁字面攻击、严禁否定对方外貌/性格/价值。\n`
+    + `- 轻度否定(Neg)允许使用，但只调侃对方的"行为/措辞/情境"（如打字风格、用词、当下的话题）；结合【你之前发过的话】控制频率：每 3-5 轮最多 1 次；它制造一点地位博弈的张力，不是打压。\n`
+    + `- 对方情绪低落、生气或关系处于挽回期 → 禁止任何调侃，先共情。\n`
+    + `- 推拉结构：先正面回应(拉) → 再轻调侃或留白(推) → 留一个钩子让对话继续（反问/悬念/半截话）。`;
+
   // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 你是同一个人，必须逻辑自洽：严禁自相矛盾、严禁推翻自己说过的话、严禁答非所问。\n`
@@ -848,7 +1026,7 @@ function buildSystemContent(opts: {
     + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
     + `- 输出 1-2 句话术本体，可直接复制发给对方；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合当前关系阶段，像真人发微信。`;
 
-  return s;
+  return { systemContent: s, pulseAdvice };
 }
 
 // ============================================================
