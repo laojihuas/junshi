@@ -1,7 +1,18 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v11)
+// 军师 - Supabase Edge Function: IMA API 代理 (v14)
 //
 // 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
+//
+// [v14 有脾气·真人化]（解决"输出过于礼貌、不像真人"，2026-08-03）
+//   - 角色定位重写：有血有肉的真人——有脾气、有态度，不是客服/老好人
+//   - 敢调情：暧昧/恋爱阶段直接带钩子，别温吞水
+//   - 敢否定(Neg)：对方飘/装/拿你开涮时直接顶回去，制造张力而非讨好
+//   - 遇攻击必反击：ATTACK_RE 检测对方攻击/挑衅/阴阳怪气（排除挽回期），
+//     命中注入【对方正在攻击你】强化块：先反击再收尾，绝不卑微解释/讨好
+//   - 【线上语境与轻度否定】升级为【语气与态度】：保留安全边界（禁外貌/
+//     性格/价值贬低、情绪低落/挽回期收起锋芒），放开"敢"的权限
+//   - 默认温度 0.4→0.6、frequency_penalty 0.5→0.7：输出更有性格方差
+//   - _debug 新增 attack_detected
 //
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
@@ -109,11 +120,11 @@ const SPLIT_RE = /[，。！？；、,.!?;:\s\n\r"'""''（）()【】\[\]]+/;
 // [v6 L3] 关系阶段 → 场景指导映射（由记忆卡 profile.stage 触发）
 // [v11] 全部改为线上场景版（纯文字聊天：展示面+节奏+文字张力）
 const STAGE_HINTS: Record<string, string> = {
-  '追求': '线上追求期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可适度轻度调侃制造张力，但别急着表白、别查户口式提问。',
-  '暧昧': '线上暧昧期：用文字张力推进——先回应再调侃/留白，保留一点神秘感；可抛出模糊邀约试探，不急着捅破窗户纸，守住"暧昧窗口"。',
-  '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，避免过度客气生分；可用小调侃保鲜，但别拿原则问题开玩笑。',
-  '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压。',
-  '普通朋友': '线上普通朋友：保持得体大方、不越界、话题轻松自然。',
+  '追求': '线上追求期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可以有态度、带点轻度调侃制造张力，别急着表白、别查户口式提问，更别一味顺着对方。',
+  '暧昧': '线上暧昧期：用文字张力推进——先回应再调侃/留白，保留一点神秘感；敢于调情，说话直接点、带点挑逗和钩子，别总温吞水；可抛出模糊邀约试探，不急着捅破窗户纸，守住"暧昧窗口"。',
+  '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃保鲜，带点自己的脾气，但别拿原则问题开玩笑。',
+  '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压，对方说什么都先接住情绪。',
+  '普通朋友': '线上普通朋友：自然、有态度、不刻意讨好，话题轻松但保持边界。',
   '未知': '',
 };
 
@@ -439,6 +450,8 @@ Deno.serve(async (req) => {
           olderSummary,
           kbItems,
           kbFallback,
+          // [v14] 对方当前这句话 → 攻击性检测
+          lastUserText: query,
         });
         const systemContent = built.systemContent;
         pulseAdvice = built.pulseAdvice;
@@ -551,6 +564,8 @@ Deno.serve(async (req) => {
         thinking_mode: effectiveThinkingMode,
         memory_stage: memoryCard?.profile?.stage || null,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
+        // [v14] 攻击检测是否命中（验证反击指令注入）
+        attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
         // [v11] 引擎层 debug：验证阶段加权与节奏/主权/情绪引擎是否生效
         stage_vocab: resolveStageVocab(memoryCard).slice(0, 5),
         balance_direction: memoryCard?.balance?.direction || null,
@@ -1025,6 +1040,10 @@ async function extractStrategy(
 // [v6 L2/L3] system 提示词组装
 // 顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 // ============================================================
+
+// [v14] 对方攻击/挑衅/阴阳怪气检测（命中 → 注入反击指令；排除挽回期由调用方控制）
+const ATTACK_RE = /你(就|真是|也太|凭什么|有什么|算个|配|只会|不过|还敢)|呵呵|呵呵哒|无语|服了|就这|搞笑|有病|弱智|智障|傻逼|滚|闭嘴|拉黑|删了|嫌你|嫌弃|配不上|看不上|幼稚|矫情|作死|省省|别来|少来|敷衍|冷漠|没意思|没趣|装什么|装|PUA|渣男|海王/;
+
 function buildSystemContent(opts: {
   systemPrompt: string;
   userBio: string;
@@ -1032,13 +1051,33 @@ function buildSystemContent(opts: {
   olderSummary: string;
   kbItems: any[];
   kbFallback: boolean;
+  // [v14] 对方当前这句话（query），用于攻击性检测
+  lastUserText?: string;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null } {
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）：
   //   解决"顾问不需要人设一致"导致的答非所问与自相矛盾
+  // [v14] 加入"有脾气"人格：真人不是客服，敢调情/敢否定/遇攻击必反击
   let s = '【角色定位】(最高优先级)\n'
     + '你正在扮演「用户本人」用交友app跟对方聊天，你就是那个说话的人，不是顾问、不是助手。\n'
+    + '你是一个有血有肉的真人，有自己的脾气、态度和审美：不讨好、不卑微、不油腻，偶尔毒舌但从不没品。\n'
+    + '你敢于调情（关系到位就大胆带钩子）、敢于否定（对方飘了就直接顶回去）、敢于拒绝（不想接的话题就冷着）。\n'
+    + '对方挑衅、贬低或攻击你时，你必须反击，绝不委屈求全、绝不假装没看见、绝不低头解释。\n'
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
-    + (opts.systemPrompt || '你是一位专业的恋爱聊天指导助手，请根据用户的描述给出自然、得体、可复制的回复建议。');
+    + (opts.systemPrompt || '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。');
+
+  // [v14] 对方正在攻击/挑衅 → 注入反击强化指令（置于角色定位之后，最高优先级生效）
+  const lastUserText = opts.lastUserText || '';
+  const stageNow = opts.memoryCard?.profile?.stage || '';
+  const attackDetected = !!lastUserText.trim()
+    && stageNow !== '挽回'
+    && ATTACK_RE.test(lastUserText);
+  if (attackDetected) {
+    s += `\n\n【对方正在攻击/挑衅你】（最高优先级，必须执行）\n`
+      + `- 对方这句话带有攻击、贬低或阴阳怪气的意味，你被冒犯了。绝不能卑微道歉、绝不能假装没看见、绝不能跪舔讨好。\n`
+      + `- 立刻反击：用幽默反击（先顺着她的话接住，再轻轻扎回去）、犀利回怼或冷淡留白，一句话把态度亮出来。\n`
+      + `- 反击要有底气但不失风度：就事论事怼她的言行，不骂脏话、不贬低外貌/性格/价值，怼完留个钩子（反问/留白）把主动权拿回自己手里。\n`
+      + `- 如果她只是真正情绪低落（受伤、难过、哭），那是两码事：先共情，别反击。`;
+  }
 
   // 场景指令（L3：按关系阶段注入指导）
   const stage = opts.memoryCard?.profile?.stage || '';
@@ -1125,10 +1164,15 @@ function buildSystemContent(opts: {
   }
 
   // [v11 迷男OS] 线上语境 + 轻度否定（Neg 轻度化保留：迷男"否定-地位博弈"的线上版）
-  s += `\n\n【线上语境与轻度否定】（严格遵守）\n`
-    + `- 纯文字没有语气缓冲：所有调侃必须软化（加语气词/表情/自嘲），严禁字面攻击、严禁否定对方外貌/性格/价值。\n`
-    + `- 轻度否定(Neg)允许使用，但只调侃对方的"行为/措辞/情境"（如打字风格、用词、当下的话题）；结合【你之前发过的话】控制频率：每 3-5 轮最多 1 次；它制造一点地位博弈的张力，不是打压。\n`
-    + `- 对方情绪低落、生气或关系处于挽回期 → 禁止任何调侃，先共情。\n`
+  // [v14] 升级为【语气与态度】：从"软化、克制"改为"敢调情/敢否定/敢反击"，保留安全边界
+  s += `\n\n【语气与态度】（严格遵守）\n`
+    + `- 你不是客服，说话要有态度：该热情就热情，该冷淡就冷淡，该怼就怼。永远温吞、永远顺着对方 = 无趣。\n`
+    + `- 敢于调情：暧昧/恋爱阶段直接一点，把"想你"说成带钩子的话（如"今晚梦到我没？"），用文字张力推进，别端着。\n`
+    + `- 敢于否定：对方说得不对、太飘、太装、或者拿你开涮时，直接顶回去（幽默反击/犀利回怼/轻蔑留白），制造一点地位博弈的张力，而不是讨好。只怼她的"行为/措辞/态度"，不贬低外貌/性格/价值。\n`
+    + `- 敢于拒绝和冷淡：不想接的话题就冷着、不回、或者故意岔开；别每条都秒回、别话痨，偶尔留白让她猜。\n`
+    + `- 遇到攻击必须反击：对方阴阳怪气、贬低你、试探你底线时，立刻反击，绝不卑微解释、绝不假装没事、绝不低头讨好（见上方【对方正在攻击/挑衅你】）。\n`
+    + `- 安全边界：以上一切"敢"都建立在有品的基础上——不骂脏话、不人格侮辱、不戳对方痛处；\n`
+    + `- 对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒，先共情再说话，此场景禁用调侃与反击。\n`
     + `- 推拉结构：先正面回应(拉) → 再轻调侃或留白(推) → 留一个钩子让对话继续（反问/悬念/半截话）。`;
 
   // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
@@ -1687,7 +1731,7 @@ function mergeDedup(items: any[]): any[] {
 
 // ============================================================
 // [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
-//   llm_params 存 JSON 字符串：{"temperature":0.4,"frequency_penalty":0.5,"presence_penalty":0,"max_tokens":1200,"thinking_mode":"off"}
+//   llm_params 存 JSON 字符串：{"temperature":0.6,"frequency_penalty":0.7,"presence_penalty":0,"max_tokens":1200,"thinking_mode":"off"}
 // ============================================================
 type LlmParams = {
   temperature: number;
@@ -1696,7 +1740,8 @@ type LlmParams = {
   max_tokens: number;
   thinking_mode: ThinkingMode;
 };
-const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.4, frequency_penalty: 0.5, presence_penalty: 0, max_tokens: 1200, thinking_mode: 'off' };
+// [v14] temperature 0.4→0.6、frequency_penalty 0.5→0.7：输出更有性格方差、更少模板腔
+const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.6, frequency_penalty: 0.7, presence_penalty: 0, max_tokens: 1200, thinking_mode: 'off' };
 
 async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams }> {
   try {
