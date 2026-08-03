@@ -81,9 +81,7 @@ const Chat = {
         }
 
         container.innerHTML = this.messages.map(m => {
-            const time = new Date(m.created_at).toLocaleTimeString('zh-CN', {
-                hour: '2-digit', minute: '2-digit'
-            });
+            const time = this._formatTime(m.created_at);
             if (m.role === 'user') {
                 return `
                     <div class="message user">
@@ -132,8 +130,41 @@ const Chat = {
             });
         });
 
-        // 滚动到底部
-        container.scrollTop = container.scrollHeight;
+        // [v20260803] 滚动到底部：首次打开聊天页时页面还处于 display:none（未切换 active），
+        // 此时 scrollHeight 无效、直接赋值 scrollTop 不会生效（会停在最早记录），
+        // 必须等页面切换显示后再滚动，双重 requestAnimationFrame 确保布局已完成
+        this.scrollToBottom();
+    },
+
+    // [v20260803] 滚动到底部（延迟到页面显示后执行）
+    scrollToBottom() {
+        const container = document.getElementById('chat-messages');
+        if (!container) return;
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                container.scrollTop = container.scrollHeight;
+            });
+        });
+    },
+
+    // [v20260803] 消息时间显示：今天只显示时分（如 14:30）；
+    // 非今天（昨天/更早）显示日期 + 时间（今年内：08-02 14:30，往年：2026-08-02 14:30）
+    _formatTime(isoStr) {
+        const d = new Date(isoStr);
+        if (isNaN(d.getTime())) return '';
+        const now = new Date();
+        const hm = d.toLocaleTimeString('zh-CN', {
+            hour: '2-digit', minute: '2-digit'
+        });
+        const isToday = d.getFullYear() === now.getFullYear()
+            && d.getMonth() === now.getMonth()
+            && d.getDate() === now.getDate();
+        if (isToday) return hm;
+        const pad = n => String(n).padStart(2, '0');
+        const datePart = d.getFullYear() === now.getFullYear()
+            ? pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+            : d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+        return datePart + ' ' + hm;
     },
 
     // 发送消息
