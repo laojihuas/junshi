@@ -10,7 +10,7 @@
 
 - **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl）
 - **后端**：Supabase（ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 49）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
+  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 50）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
   - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`
   - **kb_blocks**（B 方案，15,107 块）：media_id+block_idx PK，content≤700 字，bigrams GIN 索引，folder_id/title 索引，RLS service_role 专用
   - SQL 脚本：`supabase/sql/001~007`（app_config / bio / note / invite / memory_card / **006 kb_docs 旧版** / **007 kb_blocks**）
