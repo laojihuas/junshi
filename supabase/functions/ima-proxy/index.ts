@@ -421,7 +421,7 @@ Deno.serve(async (req) => {
     const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
     if (llmKey) {
       try {
-        // 组装 system：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 套路 > 节奏 > 轻度否定 > 格式约束
+        // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
         const built = buildSystemContent({
           systemPrompt: effectivePrompt,
           userBio,
@@ -431,6 +431,8 @@ Deno.serve(async (req) => {
           kbFallback,
           // [v14] 对方当前这句话 → 攻击性检测
           lastUserText: query,
+          // [P0-3] llmHistory ≥4 条 → llmHistory 已含近期对话，system 不再重复注入
+          hasRecentHistory: llmHistory.length >= 4,
         });
         const systemContent = built.systemContent;
         pulseAdvice = built.pulseAdvice;
@@ -1034,7 +1036,14 @@ function buildSystemContent(opts: {
   kbFallback: boolean;
   // [v14] 对方当前这句话（query），用于攻击性检测
   lastUserText?: string;
+  // [P0-3] 窗口是否有足够历史（llmHistory ≥4 条）：
+  //   true → 不注入【对方近期话】/【自己发过话】（llmHistory 已含，避免冗余）
+  //   false/undefined → 注入（窗口恢复等 llmHistory 缺失场景兜底）
+  hasRecentHistory?: boolean;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null } {
+  // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
+  //   （角色定位/关系阶段/简介/语气态度/自洽输出 每轮不变 → 前缀稳定）
+  //   变化块（攻击检测/画像/近期话/自己话/摘要/知识库/套路/节奏）后移 → 后缀变化不影响缓存
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）：
   //   解决"顾问不需要人设一致"导致的答非所问与自相矛盾
   // [v14] 加入"有脾气"人格：真人不是客服，敢调情/敢否定/遇攻击必反击
@@ -1046,7 +1055,41 @@ function buildSystemContent(opts: {
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
     + (opts.systemPrompt || '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。');
 
-  // [v14] 对方正在攻击/挑衅 → 注入反击强化指令（置于角色定位之后，最高优先级生效）
+  // [v11 迷男OS] 线上语境 + 轻度否定（Neg 轻度化保留：迷男"否定-地位博弈"的线上版）
+  // [v14] 升级为【语气与态度】：从"软化、克制"改为"敢调情/敢否定/敢反击"，保留安全边界
+  // [P0-3] 固定块前移：语气态度不随轮次变化，放前缀内提高缓存命中
+  s += `\n\n【语气与态度】（严格遵守）\n`
+    + `- 你不是客服，说话要有态度：该热情就热情，该冷淡就冷淡，该怼就怼。永远温吞、永远顺着对方 = 无趣。\n`
+    + `- 敢于调情：暧昧/恋爱阶段直接一点，把"想你"说成带钩子的话（如"今晚梦到我没？"），用文字张力推进，别端着。\n`
+    + `- 敢于否定：对方说得不对、太飘、太装、或者拿你开涮时，直接顶回去（幽默反击/犀利回怼/轻蔑留白），制造一点地位博弈的张力，而不是讨好。只怼她的"行为/措辞/态度"，不贬低外貌/性格/价值。\n`
+    + `- 敢于拒绝和冷淡：不想接的话题就冷着、不回、或者故意岔开；别每条都秒回、别话痨，偶尔留白让她猜。\n`
+    + `- 遇到攻击必须反击：对方阴阳怪气、贬低你、试探你底线时，立刻反击，绝不卑微解释、绝不假装没事、绝不低头讨好（见上方【对方正在攻击/挑衅你】）。\n`
+    + `- 安全边界：以上一切"敢"都建立在有品的基础上——不骂脏话、不人格侮辱、不戳对方痛处；\n`
+    + `- 对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒，先共情再说话，此场景禁用调侃与反击。\n`
+    + `- 推拉结构：先正面回应(拉) → 再轻调侃或留白(推) → 留一个钩子让对话继续（反问/悬念/半截话）。`;
+
+  // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
+  // [P0-3] 固定块前移（同语气态度）
+  s += `\n\n【自洽与输出要求】（严格遵守）\n`
+    + `- 你是同一个人，必须逻辑自洽：严禁自相矛盾、严禁推翻自己说过的话、严禁答非所问。\n`
+    + `- 对方问什么，第一句必须正面回答；想幽默或转折，必须先正面回应再转折。\n`
+    + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
+    + `- 输出 1-2 句话术本体，可直接复制发给对方；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合当前关系阶段，像真人发微信。`;
+
+  // 场景指令（L3：按关系阶段注入指导）——阶段相对稳定，放前缀后段
+  const stage = opts.memoryCard?.profile?.stage || '';
+  if (stage && STAGE_HINTS[stage]) {
+    s += `\n\n【当前关系阶段】${STAGE_HINTS[stage]}`;
+  }
+
+  // 用户简介（固定）
+  if (opts.userBio && opts.userBio.trim()) {
+    s += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${opts.userBio.trim()}`;
+  }
+
+  // ===== 以下为每轮变化块（后缀，不影响缓存前缀）=====
+
+  // [v14] 对方正在攻击/挑衅 → 注入反击强化指令（变化，置于前缀之后）
   const lastUserText = opts.lastUserText || '';
   const stageNow = opts.memoryCard?.profile?.stage || '';
   const attackDetected = !!lastUserText.trim()
@@ -1060,18 +1103,7 @@ function buildSystemContent(opts: {
       + `- 如果她只是真正情绪低落（受伤、难过、哭），那是两码事：先共情，别反击。`;
   }
 
-  // 场景指令（L3：按关系阶段注入指导）
-  const stage = opts.memoryCard?.profile?.stage || '';
-  if (stage && STAGE_HINTS[stage]) {
-    s += `\n\n【当前关系阶段】${STAGE_HINTS[stage]}`;
-  }
-
-  // 用户简介
-  if (opts.userBio && opts.userBio.trim()) {
-    s += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${opts.userBio.trim()}`;
-  }
-
-  // 记忆卡：对方画像
+  // 记忆卡：对方画像（跨轮次相对稳定，但会随 updateMemoryCard 变化，放后缀）
   const profile = opts.memoryCard?.profile;
   if (profile && (profile.personality || profile.relationship_note || profile.recent_events)) {
     const parts: string[] = [];
@@ -1081,15 +1113,18 @@ function buildSystemContent(opts: {
     s += `\n\n【对方画像记忆】（跨轮次记住，回答时不要重复询问这些已知信息）\n${parts.join('\n')}`;
   }
 
+  // [P0-3] 去冗余：llmHistory ≥4 条时，其内容已含对方近期话/自己发过话，不再注入
+  //   （仅窗口恢复等 llmHistory 缺失场景注入，防重复占用上下文）
+  const hasRecent = opts.hasRecentHistory === true;
   // 记忆卡：对方近期说过的话
   const msgs = opts.memoryCard?.recent_user_messages || [];
-  if (msgs.length > 0) {
+  if (!hasRecent && msgs.length > 0) {
     s += `\n\n【对方近期说过的话】（供判断语感与关系状态）\n${msgs.slice(-8).join('\n')}`;
   }
 
   // [v9] 记忆卡：军师(自己)发过的话（防重复 + 保自洽；窗口 history 丢失后仍有效）
   const selfMsgs = opts.memoryCard?.recent_self_messages || [];
-  if (selfMsgs.length > 0) {
+  if (!hasRecent && selfMsgs.length > 0) {
     s += `\n\n【你之前发过的话】（跨轮次记住，严禁原样或意思重复，后续回复必须与之一致衔接）\n${selfMsgs.slice(-8).join('\n')}`;
   }
 
@@ -1143,25 +1178,6 @@ function buildSystemContent(opts: {
   } else {
     s += `\n\n【节奏】按正常聊天节奏回复即可，不用刻意延后，也不必秒回。`;
   }
-
-  // [v11 迷男OS] 线上语境 + 轻度否定（Neg 轻度化保留：迷男"否定-地位博弈"的线上版）
-  // [v14] 升级为【语气与态度】：从"软化、克制"改为"敢调情/敢否定/敢反击"，保留安全边界
-  s += `\n\n【语气与态度】（严格遵守）\n`
-    + `- 你不是客服，说话要有态度：该热情就热情，该冷淡就冷淡，该怼就怼。永远温吞、永远顺着对方 = 无趣。\n`
-    + `- 敢于调情：暧昧/恋爱阶段直接一点，把"想你"说成带钩子的话（如"今晚梦到我没？"），用文字张力推进，别端着。\n`
-    + `- 敢于否定：对方说得不对、太飘、太装、或者拿你开涮时，直接顶回去（幽默反击/犀利回怼/轻蔑留白），制造一点地位博弈的张力，而不是讨好。只怼她的"行为/措辞/态度"，不贬低外貌/性格/价值。\n`
-    + `- 敢于拒绝和冷淡：不想接的话题就冷着、不回、或者故意岔开；别每条都秒回、别话痨，偶尔留白让她猜。\n`
-    + `- 遇到攻击必须反击：对方阴阳怪气、贬低你、试探你底线时，立刻反击，绝不卑微解释、绝不假装没事、绝不低头讨好（见上方【对方正在攻击/挑衅你】）。\n`
-    + `- 安全边界：以上一切"敢"都建立在有品的基础上——不骂脏话、不人格侮辱、不戳对方痛处；\n`
-    + `- 对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒，先共情再说话，此场景禁用调侃与反击。\n`
-    + `- 推拉结构：先正面回应(拉) → 再轻调侃或留白(推) → 留一个钩子让对话继续（反问/悬念/半截话）。`;
-
-  // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
-  s += `\n\n【自洽与输出要求】（严格遵守）\n`
-    + `- 你是同一个人，必须逻辑自洽：严禁自相矛盾、严禁推翻自己说过的话、严禁答非所问。\n`
-    + `- 对方问什么，第一句必须正面回答；想幽默或转折，必须先正面回应再转折。\n`
-    + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
-    + `- 输出 1-2 句话术本体，可直接复制发给对方；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合当前关系阶段，像真人发微信。`;
 
   return { systemContent: s, pulseAdvice };
 }
