@@ -335,11 +335,11 @@ const Chat = {
         }
     },
 
-    // 调用 IMA API
+    // 调用知识库代理（本地 kb_blocks 块级检索）
     // [多窗口会话] opts.history：本窗口的对话历史数组（[{role, content}]）
     // [统一提示词] opts.system_prompt：后台统一管理的系统提示词（用户不可见）
     async _callIMA(query, opts = {}) {
-        const config = window.APP_CONFIG?.ima;
+        const config = window.APP_CONFIG?.kb;
         if (!config || !config.proxyUrl) {
             // [v20260802] 未接入 AI（配置缺失）：直接提示掉线，不再返回模拟回复
             return '掉线了';
@@ -348,7 +348,7 @@ const Chat = {
         try {
             const body = {
                 query: query,
-                knowledge_base_id: config.knowledgeBaseId,
+                // [vB] 知识库已完全本地化（kb_blocks），不再传 knowledge_base_id
                 // [v6 记忆卡] 会话 ID：后端据此读写该好友的对方画像记忆卡（跨窗口共享）
                 session_id: this.currentSessionId
             };

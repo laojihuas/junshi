@@ -8,13 +8,14 @@
 
 ## 部署架构
 
-- **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / IMA knowledgeBaseId）
+- **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl）
 - **后端**：Supabase（ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions：`ima-proxy`（核心，**v11 迷男OS**，version 38）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
+  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 47）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
   - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`
-  - SQL 脚本：`supabase/sql/001~005`（app_config / bio / note / invite / **005 memory_card**）
-  - 数据库函数：`redeem_invite`（SECURITY DEFINER，写邀请关系+邀请人 usage+50，防自邀/重复/上限 20 人）
-- **IMA 知识库**：「恋爱知识」ID `nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI=`，凭证本机 `~/.config/ima/`
+  - **kb_blocks**（B 方案，15,107 块）：media_id+block_idx PK，content≤700 字，bigrams GIN 索引，folder_id/title 索引，RLS service_role 专用
+  - SQL 脚本：`supabase/sql/001~007`（app_config / bio / note / invite / memory_card / **006 kb_docs 旧版** / **007 kb_blocks**）
+  - 数据库函数：`redeem_invite`（SECURITY DEFINER，写邀请关系+邀请人 usage+50，防自邀/重复/上限 20 人）、`kb_blocks_recall`（块级召回 RPC：bigrams && 粗筛 → 块内词频加权 → 同文档去重）
+- **知识库（B 方案已完全本地化）**：**IMA 已彻底移除**（secrets 已删，代码零引用）。本地切块源在 `C:\迷男\{恋爱话术,恋爱教学,聊天实战}\`，灌库脚本 `supabase/scripts/build_kb_blocks.mjs`（SBP_PAT 环境变量）。检索 = kb_blocks_recall RPC，命中块原文直入 LLM（summarizeRef 已下线）
 
 ## 记忆体系（三层，隔离边界）
 
@@ -24,7 +25,8 @@
 
 ## LLM 生成链路（ima-proxy）
 
-- 前端(query+history+session_id+system_prompt) → ima-proxy → [IMA 检索=弹药] + [DeepSeek=生成]；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
+- 前端(query+history+session_id+system_prompt) → ima-proxy → [**本地 kb_blocks 块级检索**=弹药] + [DeepSeek=生成]；降级链：LLM → 知识库拼装(assembleKbReply) → 通用建议
+- **检索（vB）**：语义词(semanticKws×2) + 整句词(sentenceKws×2.5) + bigram + 原句 → kb_blocks_recall RPC → 命中块 ≤700 字原文直入 system（同文档≤2块，总≤5块）；标题兜底 browseBlocksByTitle（ilike）。**summarizeRef 已下线**（块即原文，无需 LLM 摘要）
 - LLM secrets：`LLM_API_KEY`（DeepSeek）、`LLM_BASE_URL=https://api.deepseek.com`、**`LLM_MODEL=deepseek-v4-flash`（v10 起，deepseek-chat 已 2026-07-24 弃用）**；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200 + thinking_mode）
 - **v11 迷男OS（2026-08-02，version 38）**：迷男方法精髓 × 线上纯文字场景融合，三层架构
   - 战略层：记忆卡 profile.stage 定基调（STAGE_HINTS 全部改线上版：追求=展示面+节奏/暧昧=文字张力/恋爱=小调侃保鲜/挽回=禁调侃先稳情绪）

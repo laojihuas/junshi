@@ -1,7 +1,15 @@
 // ============================================================
-// 军师 - Supabase Edge Function: IMA API 代理 (v14)
+// 军师 - Supabase Edge Function: IMA API 代理 (vB 本地块级检索版)
 //
-// 功能：接收前端请求 → 校验用户状态 → 检索 IMA 知识库 → 生成专业回复
+// 功能：接收前端请求 → 校验用户状态 → 本地块级检索 kb_blocks → 生成专业回复
+//
+// [vB 完全移除 IMA]（2026-08-04）
+//   - 知识库：本地 kb_blocks 块级表（15,107 块），完全替代 IMA 检索
+//   - 检索：kb_blocks_recall RPC（bigrams GIN 粗筛 + 块内词频加权打分）
+//   - 命中块 ≤700 字直接原文进上下文 → summarizeRef 下线（省 44% token）
+//   - 移除：search_knowledge / get_media_info / get_knowledge_list / kb_docs
+//   - 保留：语义拆解(v8) + 整句压缩(v12) + 套路启动(v7) + 状态配额(v7)
+//   - 环境变量仅需：LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 //
 // [v14 有脾气·真人化]（解决"输出过于礼貌、不像真人"，2026-08-03）
 //   - 角色定位重写：有血有肉的真人——有脾气、有态度，不是客服/老好人
@@ -91,11 +99,8 @@
 //   session_id     可选 数据库会话 ID（chat_sessions.id），用于读写记忆卡
 //   thinking_mode  已忽略（档位仅由后台 app_config 默认控制，防用户刷最高档）
 //
-// 环境变量：IMA_API_KEY, IMA_CLIENT_ID, IMA_KNOWLEDGE_BASE_ID, FREE_TRIES,
-//           LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+// 环境变量：LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 // ============================================================
-
-const IMA_BASE = 'https://ima.qq.com';
 
 // [v10 思考模式] 档位类型与合法集合（优先级：请求体 > 后台默认 > off）
 type ThinkingMode = 'off' | 'low' | 'high' | 'max';
@@ -219,7 +224,7 @@ Deno.serve(async (req) => {
     mark('start');
 
     const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
-    const kbId = knowledge_base_id || Deno.env.get('IMA_KNOWLEDGE_BASE_ID') || '';
+    // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
 
     if (!query || !query.trim()) {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
@@ -283,9 +288,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ---- IMA / LLM 凭证 ----
-    const imaKey = Deno.env.get('IMA_API_KEY') || '';
-    const imaClientId = Deno.env.get('IMA_CLIENT_ID') || '';
+    // ---- LLM 凭证（[B方案] 完全移除 IMA，仅保留 LLM）----
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
     const llmBase = Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com';
     // [v10] 模型升级：deepseek-chat 已于 2026-07-24 弃用，V4 思考/非思考都走 deepseek-v4-flash
@@ -327,29 +330,27 @@ Deno.serve(async (req) => {
     // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
 
-    // ---- 知识库检索（L1 增强） ----
-    if (imaKey && imaClientId && kbId) {
+    // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
+    if (serviceRoleKey && supabaseUrl) {
       mark('ready'); // 认证/配置/记忆卡读取完成
       try {
-        // [v7] 知识库文件夹识别（话术=hs / 教学=jx），用于检索配额平衡
-        // [v13] 缓存 1 小时：文件夹结构几乎不变，每轮递归遍历纯浪费（实测 3.3s）
-        kbFolders = await fetchKbFoldersCached(imaClientId, imaKey, kbId);
-        // 配额：套路执行期话术为主(3)教学兜底(2)；未启动期教学为主(3)话术兜底(2)，
-        //   保证两类内容始终同在上下文——话术加权不消灭策略素材
+        // [B] 文件夹识别改为本地 folder_id 映射：话术=恋爱话术 / 教学=恋爱教学+聊天实战
+        //   用于检索配额平衡（执行期话术为主，未启动期教学为主）
+        kbFolders = { hs: '恋爱话术', jx: '恋爱教学' };
+        // 配额：套路执行期话术为主(3)教学兜底(2)；未启动期教学为主(3)话术兜底(2)
         const quotaOpts = {
           hsFolder: kbFolders.hs,
           jxFolder: kbFolders.jx,
           strategyActive: !!memoryCard?.strategy,
         };
 
-        // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 知识库主题检索词（语义路）
+        // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 检索词（语义路）
         const kw = extractKeywordsFromHistory(history, query);
         if (llmKey) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         mark('semantic');
-        // [v12] 1b. LLM 整句压缩（不限词表,贴近原话,IMA 命中甜区 2-4 字）→ 整句路检索词
-        //   实测:≥6字整句 IMA 100% 空,2-4 字短语命中正常;与语义路互补
+        // [v12] 1b. LLM 整句压缩（不限词表，贴近原话）→ 整句路检索词
         if (llmKey) {
           sentenceKws = await extractSentenceKws(llmKey, llmBase, llmModel, query, recentUserMessages);
         }
@@ -360,48 +361,26 @@ Deno.serve(async (req) => {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
-        // [v12] 3. 双路检索词序列：语义词(语义路) > 整句压缩词(整句路) > bigram > 原句垫底
-        //   语义优先：semanticSet 标记语义词，searchKb 内按 semanticHits 优先排序，
-        //   （内部按 hits 排序去重，前 5 条拉原文）
+        // [B] 3. 检索词序列：语义词(语义路) > 整句压缩词(整句路) > bigram > 原句垫底
+        //   统一走本地 kb_blocks_recall 块级召回（语义/整句同一 RPC，块内词频加权）
         const semanticSet = new Set<string>(semanticKws);
         const searchQueries = [...semanticKws, ...sentenceKws, ...kw, searchQuery];
-        // [v7] 定向摘要精读：LLM 可用时对长文档做"针对当前问题"的摘要，替代硬截断
-        const kbSummaryOpts = llmKey
-          ? { llm: { key: llmKey, base: llmBase, model: llmModel, question: query } }
-          : undefined;
-        kbItems = await searchKbAndFetch(imaClientId, imaKey, kbId, searchQueries, llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts, semanticSet, supabase: { url: supabaseUrl, key: serviceRoleKey } });
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, sentenceKws, searchQueries, quotaOpts);
         mark('kb1');
         // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await searchKbAndFetch(imaClientId, imaKey, kbId, kw2, llmHistory, effectivePrompt, { ...quotaOpts, ...kbSummaryOpts, semanticSet, supabase: { url: supabaseUrl, key: serviceRoleKey } });
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, sentenceKws, kw2, quotaOpts);
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_REF_COUNT);
             if (merged.length > kbItems.length) kbItems = merged;
           }
         }
-        // [v12b] 4b. 本地整句匹配补足：IMA 两路不足 KB_REF_COUNT 时，用 kb_docs 缓存表
-        //   全文相关度补位（真整句语义匹配，IMA 做不到；local media_id 不冲突）
-        if (kbItems.length < KB_REF_COUNT && serviceRoleKey) {
-          try {
-            const ftItems = await recallByFullText(
-              supabaseUrl, serviceRoleKey,
-              semanticKws, sentenceKws,
-              KB_REF_COUNT - kbItems.length
-            );
-            if (ftItems.length > 0) {
-              const merged = mergeDedup([...kbItems, ...ftItems]).slice(0, KB_REF_COUNT);
-              if (merged.length > kbItems.length) kbItems = merged;
-            }
-          } catch (e: any) {
-            console.warn('fulltext recall failed:', e.message);
-          }
-        }
-        // 5. 浏览回退：标题匹配
+        // 5. 标题兜底：块级召回空时按关键词过滤标题（本地 REST 查询）
         if (kbItems.length === 0) {
-          const browseItems = await browseKbByTitle(imaClientId, imaKey, kbId, searchQuery || query);
+          const browseItems = await browseBlocksByTitle(supabaseUrl, serviceRoleKey, searchQuery || query, quotaOpts);
           if (browseItems.length > 0) {
-            kbItems = await fetchItemsContent(imaClientId, imaKey, browseItems.slice(0, KB_REF_COUNT), { ...kbSummaryOpts, supabase: { url: supabaseUrl, key: serviceRoleKey } });
+            kbItems = browseItems;
             kbFallback = true;
           }
         }
@@ -414,10 +393,10 @@ Deno.serve(async (req) => {
         //   [v13] 降频：套路检索词 <3 个有实义内容（title/content 非空）不触发 LLM 提炼（LLM 4s 大头）
         if (llmKey && !strategyClear && !memoryCard?.strategy) {
           try {
-            const convItems = await searchKbAndFetch(
-              imaClientId, imaKey, kbId,
-              resolveStrategySearchKws(memoryCard),
-              llmHistory, effectivePrompt, { ...quotaOpts, pickCount: 5, supabase: { url: supabaseUrl, key: serviceRoleKey } }
+            const convItems = await recallBlocks(
+              supabaseUrl, serviceRoleKey,
+              resolveStrategySearchKws(memoryCard), [], resolveStrategySearchKws(memoryCard),
+              { ...quotaOpts, pickCount: 5 }
             );
             const usable = (Array.isArray(convItems) ? convItems : [])
               .filter((i) => i && (i.title || '') && (i.content || '')).length;
@@ -501,7 +480,7 @@ Deno.serve(async (req) => {
         `针对"${query}"，可以这样回：\n"嗯嗯，我明白你的意思。有空可以多聊聊~"`,
         `回应"${query}"的思路：先表示理解 → 表达看法 → 反问对方。三步法最自然。`,
       ];
-      const reason = !(imaKey && imaClientId) && !llmKey
+      const reason = !llmKey
         ? '（知识库服务未配置，以下为通用建议）'
         : '（未检索到知识库相关内容，以下为通用建议）';
       reply = reason + '\n\n' + fallbacks[Math.floor(Math.random() * fallbacks.length)];
@@ -547,13 +526,12 @@ Deno.serve(async (req) => {
         sentence_kws: sentenceKws,
         semantic_route_hits: kbItems.filter((it: any) => (it._semanticHits || 0) > 0).length,
         sentence_route_hits: kbItems.filter((it: any) => (it._hits || 0) > (it._semanticHits || 0)).length,
-        // [v12b] 本地整句匹配路命中
+        // [B方案] 本地块级检索命中统计
         fulltext_hits: kbItems.filter((it: any) => it._fulltext).length,
-        // [v13] 正文来源统计（验证 220021 兜底生效）
+        // [B方案] 正文来源：全部为本地块（block_idx 标记块级命中）
         content_src: {
-          ima: kbItems.filter((it: any) => it._content_source === 'ima').length,
-          kb_docs: kbItems.filter((it: any) => it._content_source === 'kb_docs').length,
-          empty: kbItems.filter((it: any) => !it._content_source && !it._fulltext).length,
+          blocks: kbItems.filter((it: any) => typeof it.block_idx === 'number').length,
+          empty: kbItems.filter((it: any) => !it.content).length,
         },
         // [v13] 阶段耗时（ms）：start/ready/semantic/sentence/kb1/kbft/strategy/llm_reply/memory
         perf: (() => {
@@ -1237,75 +1215,26 @@ async function llmChat(
 }
 
 // ============================================================
-// [v6 L1] 检索知识库（多查询）并拉取前 KB_REF_COUNT 条原文
-//   queries: 搜索词列表（改写/原句 + 关键词）
-//   内部 searchKb 按"多词命中次数"排序去重
-//   [v7] opts：{hsFolder,jxFolder,strategyActive,pickCount} 状态感知配额
-// ============================================================
-async function searchKbAndFetch(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string, opts?: {
-  hsFolder?: string | null;
-  jxFolder?: string | null;
-  strategyActive?: boolean;
-  pickCount?: number;
-  llm?: { key: string; base: string; model: string; question: string };
-  semanticSet?: Set<string>; // [v12] 语义词集合：标记语义路命中，语义优先排序
-  supabase?: { url: string; key: string }; // [v13] kb_docs 全文兜底（IMA get_media_info 220021 无权限时）
-}): Promise<any[]> {
-  const items = await searchKb(clientId, apiKey, kbId, queries, history, systemPrompt, opts?.semanticSet);
-  if (items.length === 0) return [];
-  const picked = opts ? applyQuota(items, opts) : items.slice(0, KB_REF_COUNT);
-  return fetchItemsContent(clientId, apiKey, picked, {
-    ...(opts?.llm ? { llm: opts.llm } : {}),
-    ...(opts?.supabase ? { supabase: opts.supabase } : {}),
-  });
-}
-
-// [v13] 从本地 kb_docs 缓存表按标题批量取全文（220021 兜底）
-//   返回 Map<title, content>；REST title=in.(...) 一次查询
-async function fetchLocalDocsByTitles(supabaseUrl: string, serviceRoleKey: string, titles: string[]): Promise<Map<string, string>> {
-  const map = new Map<string, string>();
-  if (!supabaseUrl || !serviceRoleKey || titles.length === 0) return map;
-  try {
-    for (let i = 0; i < titles.length; i += 20) {
-      const batch = titles.slice(i, i + 20);
-      const listParam = encodeURIComponent('("' + batch.map((t) => t.replace(/"/g, '""')).join('","') + '")');
-      const resp = await fetch(
-        `${supabaseUrl}/rest/v1/kb_docs?select=title,content&title=in.${listParam}`,
-        { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
-      );
-      if (!resp.ok) continue;
-      const rows: any[] = await resp.json();
-      for (const r of rows) {
-        if (r.title && typeof r.content === 'string' && r.content) map.set(r.title, r.content);
-      }
-    }
-  } catch (e: any) {
-    console.warn('fetchLocalDocsByTitles failed:', e.message);
-  }
-  return map;
-}
-
-// ============================================================
-// [v12b] 本地整句匹配（补充路）：kb_docs 缓存表 数组重叠粗筛 + 词来源加权精排
-//   背景：IMA 只认 2-4 字短语，真整句语义匹配只能本地做。
-//   缓存表：supabase/scripts/build_kb_cache.mjs 离线构建（4379 篇，media_id=local_+sha1(路径)）
-//   [v13b] 精排下推数据库 RPC（kb_recall）：库内完成 粗筛(&&)→词频加权打分→排序→limit，
-//   只返回 topN 含 content → 每轮带宽 560KB→14KB（免费套餐 egress 5GB 无后顾之忧）
-//   权重：整句词×2.5 / 语义词×2（与旧内存打分完全一致，行为不变）
-//   返回 items 带 _fulltext 标记与 _ft_score；content 已截断（≤KB_CONTENT_MAX）
+// [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
+//   kb_blocks 表（15,107 块）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
+//   权重：整句词×2.5 / 语义词×2（与旧 kb_recall 一致，行为可预期）
+//   块内容 ≤700 字直接原文进上下文——无需下载全文、无需 summarizeRef
+//   返回 items 带 _fulltext 标记与 _ft_score；同文档最多 2 块（RPC 内去重）
 //   失败/空缓存 → 返回 []，不影响主链路
 // ============================================================
-async function recallByFullText(
+async function recallBlocks(
   supabaseUrl: string, serviceRoleKey: string,
   semanticKws: string[], sentenceKws: string[],
-  targetCount: number = KB_REF_COUNT
+  extraQueries: string[],
+  opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean }
 ): Promise<any[]> {
   try {
-    // 查询词集：整句词 + 语义词（聚焦，不含 bigram/原句）
-    const queries = [...sentenceKws, ...semanticKws].filter((q) => q && q.length >= 2);
+    // 查询词集：语义词 + 整句词 + 额外词（bigram/原句垫底）
+    const queries = [...semanticKws, ...sentenceKws, ...extraQueries]
+      .filter((q) => q && typeof q === 'string' && q.trim().length >= 2);
     if (queries.length === 0) return [];
 
-    // 1. 查询词集 → bigram 数组（与构建脚本一致：过滤全停用字 2-gram）
+    // 1. 查询词集 → bigram 数组（过滤全停用字 2-gram）
     const grams = new Set<string>();
     const addGrams = (text: string) => {
       const clean = text.replace(/[^\u4e00-\u9fa5]/g, '');
@@ -1320,34 +1249,93 @@ async function recallByFullText(
     for (const q of queries) addGrams(q);
     if (grams.size === 0) return [];
 
-    // 2. 权重数组（与 queries 同序：整句词 2.5 / 语义词 2）
+    // 2. 权重数组（与 queries 同序：整句词 2.5 / 语义词 2 / 其他 1.5）
     const sentenceSet = new Set(sentenceKws);
-    const weights = queries.map((q) => (sentenceSet.has(q) ? 2.5 : 2));
+    const semanticSet = new Set(semanticKws);
+    const weights = queries.map((q) => {
+      if (sentenceSet.has(q)) return 2.5;
+      if (semanticSet.has(q)) return 2;
+      return 1.5;
+    });
 
-    // 3. [v13b] 调数据库 RPC：粗筛+打分+排序+limit 一次完成
-    const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/kb_recall`, {
+    // 3. 调数据库 RPC：粗筛+块内词频打分+同文档去重+limit 一次完成
+    const target = opts?.pickCount || KB_REF_COUNT;
+    const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/kb_blocks_recall`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         p_grams: [...grams].slice(0, 80),
-        p_words: queries,
-        p_weights: weights,
-        p_limit: targetCount,
+        p_words: queries.slice(0, 20),
+        p_weights: weights.slice(0, 20),
+        p_limit: Math.max(target * 2, 12),
+        p_max_blocks_per_doc: 2,
       }),
     });
     if (!resp.ok) return [];
     const rows: any[] = await resp.json();
     if (!Array.isArray(rows) || rows.length === 0) return [];
 
-    return rows.map((r) => ({
+    const items = rows.map((r) => ({
       media_id: r.media_id,
+      block_idx: r.block_idx,
       title: r.title,
-      folder_id: r.folder_id,
-      content: truncateText(r.content || '', KB_CONTENT_MAX),
+      block_title: r.block_title || '',
+      folder_id: r.folder_id || '',
+      content: r.content || '',
       _hits: 1, _semanticHits: 0, _fulltext: true, _ft_score: Number(r.score) || 0,
     }));
+
+    // 4. 状态感知配额（话术=恋爱话术 / 教学=恋爱教学+聊天实战）
+    return opts ? applyQuota(items, {
+      hsFolder: opts.hsFolder,
+      jxFolder: opts.jxFolder,
+      strategyActive: !!opts.strategyActive,
+      pickCount: target,
+    }) : items.slice(0, target);
   } catch (e: any) {
-    console.warn('recallByFullText failed:', e.message);
+    console.warn('recallBlocks failed:', e.message);
+    return [];
+  }
+}
+
+// ============================================================
+// [B方案] 标题兜底：块级召回空时，按关键词过滤本地 kb_blocks 标题
+//   REST 查询：title=ilike.*词* 匹配文档标题，取每文档第一块
+// ============================================================
+async function browseBlocksByTitle(
+  supabaseUrl: string, serviceRoleKey: string,
+  query: string, opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean }
+): Promise<any[]> {
+  try {
+    const keywords = extractKeywords(query);
+    if (keywords.length === 0) return [];
+    const target = opts?.pickCount || KB_REF_COUNT;
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const kw of keywords) {
+      if (out.length >= target) break;
+      const resp = await fetch(
+        `${supabaseUrl}/rest/v1/kb_blocks?select=media_id,block_idx,title,block_title,folder_id,content&title=ilike.*${encodeURIComponent(kw)}*&limit=10&order=block_idx.asc`,
+        { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+      );
+      if (!resp.ok) continue;
+      const rows: any[] = await resp.json();
+      for (const r of Array.isArray(rows) ? rows : []) {
+        if (out.length >= target) break;
+        const key = r.media_id + ':' + r.block_idx;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          media_id: r.media_id, block_idx: r.block_idx, title: r.title,
+          block_title: r.block_title || '', folder_id: r.folder_id || '',
+          content: r.content || '',
+          _hits: 0, _semanticHits: 0, _fulltext: true, _ft_score: 0,
+        });
+      }
+    }
+    return out.slice(0, target);
+  } catch (e: any) {
+    console.warn('browseBlocksByTitle failed:', e.message);
     return [];
   }
 }
@@ -1356,6 +1344,7 @@ async function recallByFullText(
 // [v7] 状态感知配额：话术/教学两类内容按 strategy 状态分桶选取，
 //   保证"话术加权"不消灭策略素材——两类始终同在上下文，LLM 自行取舍
 //   执行期：话术 ≤3 + 教学 ≤2；未启动期：教学 ≤3 + 话术 ≤2
+//   [B方案] hs/jx 判定改用 folder_id（本地 kb_blocks：恋爱话术=hs，恋爱教学/聊天实战=jx）
 // ============================================================
 function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean; pickCount?: number }): any[] {
   const count = opts.pickCount || KB_REF_COUNT;
@@ -1367,9 +1356,10 @@ function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: s
   const jxList: any[] = [];
   const otherList: any[] = [];
   for (const it of items) {
-    const pid = it.parent_folder_id || '';
+    const pid = it.folder_id || it.parent_folder_id || '';
     if (hs && pid === hs) hsList.push(it);
     else if (jx && pid === jx) jxList.push(it);
+    else if (jx && pid === '聊天实战') jxList.push(it); // 聊天实战归教学类
     else otherList.push(it);
   }
 
@@ -1381,112 +1371,6 @@ function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: s
     ...otherList,
   ];
   return picked.slice(0, count);
-}
-
-// ============================================================
-// [v7] 知识库文件夹识别：递归遍历，按名称匹配
-//   返回 {hs:话术文件夹id, jx:教学文件夹id}，识别不到则为 null（降级不配额）
-// ============================================================
-async function fetchKbFolders(clientId: string, apiKey: string, kbId: string): Promise<{ hs: string | null; jx: string | null }> {
-  const res: { hs: string | null; jx: string | null } = { hs: null, jx: null };
-  try {
-    async function walk(folderId: string): Promise<void> {
-      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 50 };
-      if (folderId) body.folder_id = folderId;
-      const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
-      const list = data?.knowledge_list || [];
-      for (const item of list) {
-        if (item.media_type === 99) {
-          const fid = item.folder_id || item.media_id || '';
-          const name = item.title || item.name || '';
-          if (!res.hs && /话术|惯例/.test(name)) res.hs = fid;
-          if (!res.jx && /教学|理论|课程/.test(name)) res.jx = fid;
-          if (fid) await walk(fid);
-        }
-      }
-    }
-    await walk('');
-  } catch (e: any) {
-    console.warn('fetchKbFolders failed:', e.message);
-  }
-  return res;
-}
-
-// [v13] fetchKbFolders 缓存：文件夹结构几乎不变，1 小时 TTL，避免每轮递归遍历（实测 3.3s）
-let kbFoldersCache: { result: { hs: string | null; jx: string | null }; ts: number } | null = null;
-const FOLDERS_CACHE_TTL = 60 * 60 * 1000; // 1 小时
-
-async function fetchKbFoldersCached(clientId: string, apiKey: string, kbId: string): Promise<{ hs: string | null; jx: string | null }> {
-  if (kbFoldersCache && Date.now() - kbFoldersCache.ts < FOLDERS_CACHE_TTL) {
-    return kbFoldersCache.result;
-  }
-  const result = await fetchKbFolders(clientId, apiKey, kbId);
-  kbFoldersCache = { result, ts: Date.now() };
-  return result;
-}
-
-// ============================================================
-// 对条目批量拉取 markdown 原文
-//   [v7] opts.llm 存在时：长文档（>KB_CONTENT_MAX）用 LLM 做
-//   "定向摘要"（针对当前问题提取要点），替代硬截断 500 字
-//   [v13] opts.supabase 存在时：IMA get_media_info 失败（220021 无查看原文权限）
-//   → 按标题从本地 kb_docs 缓存表批量兜底取全文（4379 篇已云端入库）
-// ============================================================
-async function fetchItemsContent(clientId: string, apiKey: string, items: any[], opts?: {
-  llm?: { key: string; base: string; model: string; question: string };
-  supabase?: { url: string; key: string };
-}): Promise<any[]> {
-  // [v13] kb_docs 兜底映射（块外声明防作用域事故）
-  let byTitle: Map<string, string> | null = null;
-
-  // 1. 并行拉取 IMA 全文
-  const fetched = await Promise.all(items.map(async (item) => ({
-    item,
-    full: await fetchDocContent(clientId, apiKey, item),
-    source: 'ima',
-  })));
-
-  // 2. [v13] IMA 拉不到的（220021 等）→ kb_docs 按标题兜底
-  const missing = fetched.filter((f) => !f.full);
-  if (missing.length > 0 && opts?.supabase) {
-    byTitle = await fetchLocalDocsByTitles(opts.supabase.url, opts.supabase.key, missing.map((f) => f.item.title || ''));
-    for (const f of missing) {
-      const local = byTitle.get(f.item.title || '');
-      if (local) { f.full = local; f.source = 'kb_docs'; }
-    }
-  }
-
-  // 3. 截断 / 定向摘要
-  return Promise.all(fetched.map(async ({ item, full, source }) => {
-    let content = full ? truncateText(full, KB_CONTENT_MAX) : '';
-    if (opts?.llm?.key && full && full.length > KB_CONTENT_MAX) {
-      const sum = await summarizeRef(opts.llm.key, opts.llm.base, opts.llm.model, opts.llm.question, item.title || '', full);
-      if (sum) content = sum;
-    }
-    return { ...item, content, _content_source: full ? source : '' };
-  }));
-}
-
-// ============================================================
-// [v7] 定向摘要精读：针对当前问题，从长文档中提取相关要点
-//   替代"硬截断前 500 字"——长文档关键内容常在后段（如套路步骤）
-//   返回摘要（≤320 字）；失败/无关时返回 null（上层降级为截断）
-// ============================================================
-async function summarizeRef(llmKey: string, llmBase: string, llmModel: string, question: string, title: string, fullText: string): Promise<string | null> {
-  const prompt = `你是恋爱话术提炼助手。用户正要回复对方，对方的话：「${truncateText(question, 60)}」。\n`
-    + `以下是从知识库检索到的资料【${title}】：\n${truncateText(fullText, 3500)}\n`
-    + `要求：提取与当前问题直接相关的话术要点、可操作步骤或关键语句（若资料是惯例/套路类，把步骤序列提取出来），150-300 字。`
-    + `直接输出要点，不要任何解释、标题或格式头；若资料与当前问题明显无关，只输出两个字：无关。`;
-  try {
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 400,
-    });
-    if (!content || content.includes('无关')) return null;
-    return truncateText(content.trim(), 320);
-  } catch (e: any) {
-    console.warn('summarizeRef failed:', e.message);
-    return null;
-  }
 }
 
 // ============================================================
@@ -1508,45 +1392,6 @@ function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
   });
   lines.push('结合实际情况灵活回应。');
   return lines.join('\n');
-}
-
-// ============================================================
-// 回退浏览：递归遍历知识库（含子文件夹），bigram 标题匹配
-// ============================================================
-async function browseKbByTitle(clientId: string, apiKey: string, kbId: string, query: string): Promise<any[]> {
-  const keywords = extractKeywords(query);
-  if (!keywords.length) return [];
-
-  const all: any[] = [];
-
-  async function walk(folderId: string): Promise<void> {
-    try {
-      const body: any = { knowledge_base_id: kbId, cursor: '', limit: 50 };
-      if (folderId) body.folder_id = folderId;
-      const data = await callIma(clientId, apiKey, 'get_knowledge_list', body);
-      const list = data?.knowledge_list || [];
-      for (const item of list) {
-        if (item.media_type === 99) {
-          const fid = item.folder_id || item.media_id || '';
-          if (fid) await walk(fid);
-        } else {
-          all.push(item);
-        }
-      }
-    } catch (e: any) {
-      console.error(`browse folder "${folderId}" failed:`, e.message);
-    }
-  }
-
-  try { await walk(''); } catch (e: any) { console.error('browseKbByTitle error:', e.message); return []; }
-
-  const matches = all.filter((item: any) => {
-    if ([2, 6, 8, 10, 12, 16, 17, 18, 19].includes(item.media_type)) return false;
-    const title = item.title || '';
-    return keywords.some((k) => title.includes(k)) || (query.length > 1 && title.includes(query));
-  });
-
-  return matches.slice(0, KB_REF_COUNT);
 }
 
 // ============================================================
@@ -1573,140 +1418,6 @@ function extractKeywords(query: string): string[] {
   }
 
   return [...new Set([...strict, ...loose])].slice(0, 5);
-}
-
-// ============================================================
-// [v6 L1] 搜索知识库：多搜索词轮询，合并去重并按"命中词数"排序
-//   每个词取前 2 条，总上限 8 条；hits 越多排越前
-//   [v12] 语义优先：semanticSet 内的词命中记 semanticHits，
-//   排序改为 semanticHits 降序 > hits 降序 > 先到顺序
-//   （语义路结果永远排在整句路/字面词路结果前面）
-//   [v13] 分批并发（每批 4 个 query Promise.all）：实测 15 词串行 9.3s → 并发 ~1.5s
-//   批间判断 map.size>=8；并发 4 起步防 IMA 频控（110021）
-// ============================================================
-const SEARCH_BATCH_CONCURRENCY = 4;
-
-async function searchKb(clientId: string, apiKey: string, kbId: string, queries: string[], history?: any[], systemPrompt?: string, semanticSet?: Set<string>): Promise<any[]> {
-  const map = new Map<string, { item: any; hits: number; semanticHits: number; order: number }>();
-  let order = 0;
-  const allQueries = (Array.isArray(queries) ? queries : []).filter((q) => q && q.length >= 2);
-
-  for (let i = 0; i < allQueries.length && map.size < 8; i += SEARCH_BATCH_CONCURRENCY) {
-    const batch = allQueries.slice(i, i + SEARCH_BATCH_CONCURRENCY);
-    const results = await Promise.all(batch.map(async (q) => {
-      try {
-        const data = await callSearch(clientId, apiKey, kbId, q, history, systemPrompt);
-        return { q, list: (data?.info_list || []).slice(0, 2) };
-      } catch (e: any) {
-        console.error(`search "${q}" failed:`, e.message);
-        return { q, list: [] };
-      }
-    }));
-
-    for (const { q, list } of results) {
-      for (const item of list) {
-        if (item.media_type === 99) continue;
-        if ([2, 6, 8, 10, 12, 16, 17, 18, 19].includes(item.media_type)) continue;
-        const key = item.media_id;
-        const isSemantic = !!semanticSet?.has(q);
-        if (map.has(key)) {
-          const e = map.get(key)!;
-          e.hits += 1;
-          if (isSemantic) e.semanticHits += 1;
-        } else {
-          map.set(key, { item, hits: 1, semanticHits: isSemantic ? 1 : 0, order: order++ });
-        }
-      }
-    }
-  }
-
-  const sorted = [...map.values()].sort((a, b) => b.semanticHits - a.semanticHits || b.hits - a.hits || a.order - b.order);
-  // [v12] 挂命中统计到 item 上（_debug 用）：_semanticHits=语义路命中数, _hits=总命中数
-  return sorted.map((v) => ({ ...v.item, _semanticHits: v.semanticHits, _hits: v.hits }));
-}
-
-// ============================================================
-// search_knowledge 统一调用（带 history/system_prompt 透传 + 容错回退）
-// ============================================================
-async function callSearch(clientId: string, apiKey: string, kbId: string, q: string, history?: any[], systemPrompt?: string): Promise<any> {
-  const baseBody: any = { query: q, knowledge_base_id: kbId, cursor: '' };
-
-  const hasHistory = Array.isArray(history) && history.length > 0 &&
-    history.every((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
-  const hasPrompt = typeof systemPrompt === 'string' && systemPrompt.trim() !== '';
-
-  if (!hasHistory && !hasPrompt) {
-    return callIma(clientId, apiKey, 'search_knowledge', baseBody);
-  }
-
-  const extraBody = { ...baseBody };
-  if (hasHistory) extraBody.history = history.slice(-RECENT_FULL); // 最多携带最近 10 条
-  if (hasPrompt) extraBody.system_prompt = systemPrompt;
-
-  try {
-    return await callIma(clientId, apiKey, 'search_knowledge', extraBody);
-  } catch (e: any) {
-    console.warn(`IMA search with extra params failed (${e.message}), retry without extra params`);
-    return callIma(clientId, apiKey, 'search_knowledge', baseBody);
-  }
-}
-
-// ============================================================
-// 获取 markdown 文档原文
-// ============================================================
-async function fetchDocContent(clientId: string, apiKey: string, item: any): Promise<string> {
-  try {
-    const data = await callIma(clientId, apiKey, 'get_media_info', { media_id: item.media_id });
-    const urlInfo = data?.url_info;
-    if (!urlInfo?.url) return '';
-
-    const resp = await fetch(urlInfo.url, {
-      headers: urlInfo.headers || {},
-    });
-    if (!resp.ok) return '';
-    const text = await resp.text();
-    return cleanMarkdown(text);
-  } catch (e: any) {
-    console.error('fetch content failed:', e.message);
-    return '';
-  }
-}
-
-// ============================================================
-// Markdown 清洗：去 frontmatter、站点导航、标记符号
-// [v7] 不再在此截断——返回清洗后全文，
-//   由 fetchItemsContent 统一做"定向摘要 / 截断"
-// ============================================================
-const NAV_LINES = ['首页', '恋爱话术资源社区', '下载APP', '登录 / 注册', '个人中心', '我的书架', '我的话术', '退出登录', '当前位置', '情感文章'];
-
-function cleanMarkdown(text: string): string {
-  let t = text;
-
-  if (t.startsWith('---')) {
-    const end = t.indexOf('\n---', 3);
-    if (end !== -1) t = t.slice(end + 4);
-  }
-
-  t = t.split('\n').filter((line) => {
-    const l = line.trim();
-    if (!l) return true;
-    if (NAV_LINES.some((n) => l.includes(n))) return false;
-    if (/^(更新时间|更新日期|阅读数|责任编辑|来源|发布于)/.test(l)) return false;
-    return true;
-  }).join('\n');
-
-  t = t
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/^\s*[-*+]\s+/gm, '')
-    .replace(/^\s*\d+[.、)]\s+/gm, '')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_~`>]/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  return t;
 }
 
 // ============================================================
@@ -1776,27 +1487,3 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
   }
 }
 
-// ============================================================
-// IMA OpenAPI 统一调用
-// ============================================================
-async function callIma(clientId: string, apiKey: string, apiPath: string, body: any): Promise<any> {
-  const resp = await fetch(`${IMA_BASE}/openapi/wiki/v1/${apiPath}`, {
-    method: 'POST',
-    headers: {
-      'ima-openapi-clientid': clientId,
-      'ima-openapi-apikey': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!resp.ok) {
-    throw new Error(`IMA ${apiPath} HTTP ${resp.status}`);
-  }
-
-  const json = await resp.json();
-  if (json?.code !== 0) {
-    throw new Error(`IMA ${apiPath} code=${json?.code} msg=${json?.msg}`);
-  }
-  return json?.data || null;
-}

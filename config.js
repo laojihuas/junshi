@@ -9,12 +9,9 @@ window.APP_CONFIG = {
         anonKey: 'sb_publishable_2TJBUFOXCXL-Kp-f_qbp6g_TIlbMmfC'
     },
 
-    // IMA 知识库配置
-    ima: {
-        // IMA API 代理的 Supabase Edge Function URL（部署后填入）
-        proxyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/ima-proxy',
-        // 知识库 ID（在 IMA 开放平台创建知识库后填入）
-        knowledgeBaseId: 'nIUQTuLN18QIpfhpUKzd1iziyTgw0-Bj81KAUl31VFI='
+    // 知识库代理（本地 kb_blocks 块级检索，Edge Function 纯本地查询）
+    kb: {
+        proxyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/ima-proxy'
     },
 
     // [统一提示词管理] 后台提示词接口（Edge Function）
