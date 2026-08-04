@@ -445,6 +445,7 @@ Deno.serve(async (req) => {
           frequencyPenalty: llmParams.frequency_penalty,
           presencePenalty: llmParams.presence_penalty,
           thinking: effectiveThinkingMode,
+          _stage: 'main_reply',
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages : [];
@@ -554,6 +555,8 @@ Deno.serve(async (req) => {
         strategy_clear: strategyClear,
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
+        // [vB] LLM token 用量（token 测量用）
+        llm_usage: llmUsageLog.map((u) => ({ stage: u.stage, ...u.usage })),
       },
     }), { headers, status: 200 });
 
@@ -638,7 +641,7 @@ async function rewriteQuery(llmKey: string, llmBase: string, llmModel: string, q
       (recentUserMsgs.length > 0 ? `\n最近对话（对方说的话）：\n${recentUserMsgs.slice(-2).join('\n')}` : '') +
       `\n请把问题改写成一个完整、适合检索恋爱资料库的问句（例如："女生对我说不想理我，我该怎么回复"）。只输出改写后的问句本身，30 字以内，不要任何解释。`;
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.3, maxTokens: 60,
+      temperature: 0.3, maxTokens: 60, _stage: 'rewrite',
     });
     return content ? content.slice(0, 60) : '';
   } catch (e: any) {
@@ -674,7 +677,7 @@ async function extractSemanticKeywords(
       + `要求：只输出 JSON 数组（如 ["推拉","试探"]），${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个词 2-${KW_LEN_MAX} 字；`
       + '优先使用词表中的词，可加 1-2 个贴近原话的字面词；不要任何解释文字。';
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 150,
+      temperature: 0.2, maxTokens: 150, _stage: 'semantic_kws',
     });
     const start = content.indexOf('[');
     const end = content.lastIndexOf(']');
@@ -725,7 +728,7 @@ async function extractSentenceKws(
       + `要求：只输出 JSON 数组（如 ["怎么安慰","难过"]），${SENTENCE_KW_MIN}-${SENTENCE_KW_MAX} 个短语，每个 ${SENTENCE_LEN_MIN}-${SENTENCE_LEN_MAX} 字；`
       + '不要解释文字。';
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 150,
+      temperature: 0.2, maxTokens: 150, _stage: 'sentence_kws',
     });
     const start = content.indexOf('[');
     const end = content.lastIndexOf(']');
@@ -941,7 +944,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
   const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.3, maxTokens: 300,
+      temperature: 0.3, maxTokens: 300, _stage: 'extract_profile',
     });
     const start = content.indexOf('{');
     const end = content.lastIndexOf('}');
@@ -989,7 +992,7 @@ async function extractStrategy(
     + `如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 400,
+      temperature: 0.2, maxTokens: 400, _stage: 'extract_strategy',
     });
     const start = content.indexOf('{');
     const end = content.lastIndexOf('}');
@@ -1174,7 +1177,7 @@ function buildSystemContent(opts: {
 // ============================================================
 async function llmChat(
   llmKey: string, llmBase: string, llmModel: string,
-  messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number; thinking?: ThinkingMode } = {}
+  messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number; thinking?: ThinkingMode; _stage?: string } = {}
 ): Promise<string> {
   const thinking = opts.thinking ?? 'off';
   const isV4 = /v4/.test(llmModel);
@@ -1211,8 +1214,15 @@ async function llmChat(
   if (typeof content !== 'string' || !content.trim()) {
     throw new Error('LLM 返回内容为空');
   }
+  // [vB] usage 采集（token 测量用，_debug 透传）
+  if (data?.usage) {
+    llmUsageLog.push({ stage: (opts as any)._stage || 'llm', usage: data.usage });
+  }
   return content.trim();
 }
+
+// [vB] LLM usage 日志（token 测量；顶层声明防作用域事故）
+const llmUsageLog: { stage: string; usage: any }[] = [];
 
 // ============================================================
 // [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
