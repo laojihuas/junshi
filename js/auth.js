@@ -1,159 +1,136 @@
 // ============================================================
-// 军师 - 认证模块
+// 军师 - 设备身份模块（v20260805 剔除邮箱登录）
+//
+// 架构：Supabase 匿名登录（会话载体）+ 设备指纹 device_id（业务身份）。
+//   device_id 决定：免费档位/邀请余额/VIP/配额归属。
+//   匿名 user 只是 JWT 通行证，保住现有 chat 表 RLS 与前端直查。
 // ============================================================
 
 const Auth = {
-    currentUser: null,
-    currentProfile: null,
+    currentUser: null,      // 匿名登录 user（会话载体）
+    currentProfile: null,   // profiles 行（bio 编辑等仍用）
+    device: null,           // { device_id, invite_bonus, is_vip, vip_days_left, free_daily, vip_expires_at }
+    pendingInvite: null,    // URL 携带的邀请码（首次新建好友成功后兑现）
 
-    // 初始化：检查登录状态
+    // 初始化：匿名登录 → 设备注册（幂等）
     async init() {
         const sb = getSupabaseClient();
         if (!sb) return false;
 
-        // 获取当前会话
-        const { data: { session }, error } = await sb.auth.getSession();
-        if (error || !session) {
-            return false;
+        // 1. 匿名登录（无 session 则创建；匿名登录失败视为网络异常）
+        const { data: { session } } = await sb.auth.getSession();
+        if (session && session.user) {
+            this.currentUser = session.user;
+        } else {
+            const { data, error } = await sb.auth.signInAnonymously();
+            if (error || !data.user) {
+                console.error('[军师] 匿名登录失败:', error);
+                return false;
+            }
+            this.currentUser = data.user;
         }
 
-        this.currentUser = session.user;
+        // 2. 加载 profile（bio 等；匿名用户注册时 ensure_profile 已建行）
+        this.currentProfile = await DB.getProfile(this.currentUser.id);
 
-        // 获取 profile
-        this.currentProfile = await DB.getProfile(session.user.id);
-
-        // 监听认证状态变化
-        // 注意：这里【不能】导航页面！
-        //   SIGNED_IN 事件在页面初始化恢复会话、token 自动刷新、多标签页同步等
-        //   场景都会被触发，回调是异步的——若在此处 App.navigate('friends')，
-        //   会把已经停留在聊天页的用户"秒切"回好友列表（用户切后台再回来时复现）。
-        //   登录/恢复后的导航统一由 app.js 显式控制。
-        sb.auth.onAuthStateChange(async (event, session) => {
-            try {
-                Utils.dlog('auth-event', 'event=' + event + ' session=' + (session ? 'yes' : 'no'));
-            } catch (e) { /* 日志失败忽略 */ }
-
-            if (event === 'SIGNED_IN' && session) {
-                // 仅同步状态，不导航（导航由 app.js 登录流程控制）
-                this.currentUser = session.user;
-                this.currentProfile = await DB.getProfile(session.user.id);
-            } else if (event === 'SIGNED_OUT') {
-                this.currentUser = null;
-                this.currentProfile = null;
-                // 同步清理窗口会话与"最后查看页"记录
-                if (typeof WindowSession !== 'undefined') {
-                    WindowSession.clear();
-                    WindowSession.clearLastView();
-                }
-                App.navigate('auth');
-            }
-        });
+        // 3. 设备注册（指纹 → devices 表，幂等；URL 邀请码一并暂存）
+        await this._registerDevice();
 
         return true;
     },
 
-    // 注册（inviteCode：邀请码，选填；填写后邀请人获得 +50 次额度）
-    async register(email, password, inviteCode) {
-        const sb = getSupabaseClient();
-        if (!sb) return { success: false, message: '系统未配置' };
+    // 设备注册（已存在则返回状态；新设备受"同 IP 每日新设备 ≤5"防刷）
+    async _registerDevice() {
+        this.device = {
+            device_id: await this._getDeviceId(),
+            invite_bonus: 0,
+            is_vip: false,
+            vip_days_left: 0,
+            vip_expires_at: null,
+            free_daily: 50,
+            invite_redeemed: false,
+        };
 
+        const gateUrl = window.APP_CONFIG?.device?.gateUrl;
+        if (!gateUrl) return;
+
+        const invite = this._inviteFromUrl();
         try {
-            const { data, error } = await sb.auth.signUp({
-                email: email.trim(),
-                password: password,
-                options: {
-                    data: { nickname: email.split('@')[0] }
-                }
+            const token = await this._token();
+            const resp = await fetch(gateUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': token ? 'Bearer ' + token : '' },
+                body: JSON.stringify({ action: 'register', device_id: this.device.device_id, invite_code: invite })
             });
-
-            if (error) {
-                return { success: false, message: this._friendlyError(error.message) };
-            }
-
-            if (data.user) {
-                // 注册成功，记录设备指纹
-                const deviceId = await this._getDeviceId();
-                await DB.updateProfile(data.user.id, { device_id: deviceId });
-
-                // [邀请功能] 注册成功即兑现邀请：给邀请人 +50 次使用额度
-                if (inviteCode) {
-                    const inviteResult = await Invite.redeem(inviteCode, data.user.id, email.trim());
-                    if (inviteResult.success) {
-                        return { success: true, message: '注册成功！已邀请好友获得 50 次额度，请查看邮箱确认链接后登录。' };
-                    }
-                    // 邀请码无效/已被用过：不阻止注册，仅提示
-                    return {
-                        success: true,
-                        message: '注册成功！(' + inviteResult.message + ') 请查看邮箱确认链接后登录。'
-                    };
+            if (!resp.ok) return;
+            const r = await resp.json();
+            if (r && r.success) {
+                this.device.invite_bonus = r.invite_bonus || 0;
+                this.device.is_vip = !!r.is_vip;
+                this.device.vip_expires_at = r.vip_expires_at || null;
+                this.device.free_daily = r.free_daily || 50;
+                this.device.invite_redeemed = !!r.invite_redeemed;
+                // 带邀请码且未绑定 → 记待兑现（首次新建好友成功后调用 redeem）
+                if (invite && !r.invite_redeemed) {
+                    this.pendingInvite = invite;
                 }
-
-                return { success: true, message: '注册成功！请查看邮箱确认链接后登录。' };
+                if (r.vip_expires_at) {
+                    this.device.vip_days_left = Math.max(1, Math.ceil((new Date(r.vip_expires_at) - Date.now()) / 86400000));
+                }
             }
-
-            return { success: false, message: '注册失败，请重试' };
         } catch (e) {
-            return { success: false, message: '网络错误，请检查连接' };
+            console.warn('[军师] 设备注册失败:', e);
         }
     },
 
-    // 登录
-    async login(email, password) {
-        const sb = getSupabaseClient();
-        if (!sb) return { success: false, message: '系统未配置' };
-
+    // 刷新配额状态（顶部导航用：只显示邀请赠送次数 + VIP 剩余天数）
+    async refreshStatus() {
+        const gateUrl = window.APP_CONFIG?.device?.gateUrl;
+        if (!gateUrl || !this.device) return;
         try {
-            const { data, error } = await sb.auth.signInWithPassword({
-                email: email.trim(),
-                password: password
+            const resp = await fetch(gateUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'status', device_id: this.device.device_id })
             });
-
-            if (error) {
-                return { success: false, message: this._friendlyError(error.message) };
+            if (!resp.ok) return;
+            const r = await resp.json();
+            if (r && r.registered) {
+                this.device.invite_bonus = r.invite_bonus || 0;
+                this.device.is_vip = !!r.is_vip;
+                this.device.vip_days_left = r.vip_days_left || 0;
+                this.device.vip_expires_at = r.vip_expires_at || null;
+                this.device.free_daily = r.free_daily || this.device.free_daily;
             }
-
-            if (data.user) {
-                this.currentUser = data.user;
-                this.currentProfile = await DB.getProfile(data.user.id);
-
-                // 设备指纹校验
-                const deviceId = await this._getDeviceId();
-                if (this.currentProfile.device_id && this.currentProfile.device_id !== deviceId) {
-                    // 设备不一致，记录但允许登录（软校验）
-                    console.warn('[军师] 设备指纹不匹配，可能在其他设备登录');
-                } else if (!this.currentProfile.device_id) {
-                    // 首次记录设备指纹
-                    await DB.updateProfile(data.user.id, { device_id: deviceId });
-                }
-
-                return { success: true, message: '登录成功' };
-            }
-
-            return { success: false, message: '登录失败' };
         } catch (e) {
-            return { success: false, message: '网络错误，请检查连接' };
+            console.warn('[军师] 配额状态刷新失败:', e);
         }
     },
 
-    // 退出登录
-    async logout() {
+    // URL ?invite=CODE（大写、去空格；非空返回）
+    _inviteFromUrl() {
+        try {
+            const params = new URLSearchParams(location.search);
+            const invite = (params.get('invite') || '').trim().toUpperCase();
+            return invite || null;
+        } catch (e) {
+            return null;
+        }
+    },
+
+    async _token() {
         const sb = getSupabaseClient();
-        if (!sb) return;
-        await sb.auth.signOut();
-        this.currentUser = null;
-        this.currentProfile = null;
-        // [多窗口会话] 退出登录时清空当前窗口的会话数据
-        if (typeof WindowSession !== 'undefined') {
-            WindowSession.clear();
-            // [杀进程恢复] 同时清除"最后查看页"记录，避免登录其他账号后误恢复
-            WindowSession.clearLastView();
+        if (!sb) return '';
+        try {
+            const { data: { session } } = await sb.auth.getSession();
+            return session?.access_token || '';
+        } catch (e) {
+            return '';
         }
-        App.navigate('auth');
     },
 
-    // 获取设备指纹
+    // ---- 设备指纹（FingerprintJS，失败降级备用指纹）----
     async _getDeviceId() {
-        // 动态加载 FingerprintJS（避免 ESM 报错影响其他脚本）
         try {
             if (typeof FingerprintJS === 'undefined' && !this._fpLoading) {
                 this._fpLoading = true;
@@ -167,7 +144,6 @@ const Auth = {
         } catch (e) {
             console.warn('[军师] FingerprintJS 加载失败，使用备用方案:', e.message || e);
         }
-        // 备用指纹方案（不依赖外部库）
         const fallback = [
             navigator.userAgent || '',
             navigator.language || '',
@@ -179,16 +155,14 @@ const Auth = {
         return 'fp_' + this._hashString(fallback);
     },
 
-    // 动态加载 FingerprintJS UMD
     _loadFingerprintJS() {
         return new Promise((resolve) => {
             const script = document.createElement('script');
             script.src = 'https://cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@4/dist/fp.umd.min.js';
             script.async = true;
             script.onload = () => resolve();
-            script.onerror = () => resolve(); // 加载失败也 resolve，让备用方案生效
+            script.onerror = () => resolve();
             document.head.appendChild(script);
-            // 5秒超时，避免等待太久
             setTimeout(resolve, 5000);
         });
     },
@@ -201,19 +175,5 @@ const Auth = {
             hash |= 0;
         }
         return Math.abs(hash).toString(36);
-    },
-
-    _friendlyError(message) {
-        const map = {
-            'Invalid login credentials': '邮箱或密码错误',
-            'Email not confirmed': '邮箱未验证，请先查看邮件确认',
-            'User already registered': '该邮箱已注册',
-            'Password should be at least 6 characters': '密码至少 6 位',
-            'rate limit': '操作太频繁，请稍后再试',
-        };
-        for (const [key, val] of Object.entries(map)) {
-            if (message.toLowerCase().includes(key.toLowerCase())) return val;
-        }
-        return message;
     }
 };

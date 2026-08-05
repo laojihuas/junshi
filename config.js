@@ -28,6 +28,11 @@ window.APP_CONFIG = {
         verifyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/activate-code'
     },
 
+    // [v20260805 设备身份] 设备注册 / 配额状态（剔除登录后统一入口）
+    device: {
+        gateUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/device-gate'
+    },
+
     // [邀请功能] 邀请好友得次数
     invite: {
         // 获取/生成我的邀请码（登录用户）
@@ -48,8 +53,7 @@ window.APP_CONFIG = {
     // 产品信息
     product: {
         name: '军师 - 聊天指导工具',
-        freeTries: 50,
-        price: 88, // 元/月
-        priceDisplay: '88 元/月'
+        price: 68, // 元/月
+        priceDisplay: '68 元/月'
     }
 };

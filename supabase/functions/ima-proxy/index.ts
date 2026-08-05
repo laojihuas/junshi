@@ -226,7 +226,7 @@ Deno.serve(async (req) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id',
     'Content-Type': 'application/json',
   };
 
@@ -248,7 +248,7 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
     }
 
-    // ---- 用户认证 ----
+    // ---- 用户认证（匿名登录 JWT，仅作会话校验）----
     const authHeader = req.headers.get('Authorization') || '';
     const token = authHeader.replace('Bearer ', '');
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
@@ -263,48 +263,50 @@ Deno.serve(async (req) => {
     }
     const user = await authResp.json();
 
+    // [v20260805] 设备身份 + 配额引擎：业务身份是 device_id（指纹），
+    // 匿名 user 只是会话载体。每次调用原子扣次（免费档/邀请余额/VIP 500/天/IP 防刷）。
+    const deviceId = (req.headers.get('X-Device-Id') || '').trim();
+    if (!deviceId) {
+      return new Response(JSON.stringify({ error: 'device_required', message: '缺少设备标识' }), { headers, status: 401 });
+    }
+    const clientIp = (req.headers.get('x-forwarded-for') || '').split(',')[0]?.trim() || '';
+
+    // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务）
+    let quotaInfo: any = null;
+    if (serviceRoleKey && supabaseUrl) {
+      const quotaResp = await fetch(`${supabaseUrl}/rest/v1/rpc/check_and_consume_quota`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${serviceRoleKey}`,
+          'apikey': serviceRoleKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ p_device_id: deviceId, p_ip: clientIp })
+      });
+      if (quotaResp.ok) {
+        quotaInfo = await quotaResp.json();
+      } else {
+        const errText = await quotaResp.text();
+        console.error('quota rpc failed:', quotaResp.status, errText.slice(0, 300));
+      }
+    }
+
+    if (!quotaInfo || quotaInfo.allowed !== true) {
+      const reason = quotaInfo?.reason || 'quota_error';
+      // 受限文案分层：免费档用完→付费墙；VIP 满 500→服务过载；IP 超限→使用太频繁
+      let message = '今日次数已用完，请明天再来';
+      if (reason === 'quota_exhausted') message = '今日免费额度已用完，升级 VIP 继续畅聊';
+      else if (reason === 'vip_daily_limit') message = '服务过载，请明天再试';
+      else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') message = '使用太频繁，请稍后再试';
+      else if (reason === 'device_not_found') message = '设备未注册';
+      return new Response(JSON.stringify({ error: reason, message, quota: quotaInfo }), { headers, status: 403 });
+    }
+
     // [v7] 读取 app_config：统一提示词兜底 + LLM 生成参数（后台可调）
     const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
     let effectivePrompt = (typeof system_prompt === 'string') ? system_prompt : '';
     if (!effectivePrompt.trim()) effectivePrompt = appConfig.system_prompt;
     const llmParams = appConfig.llm_params;
-
-    // ---- 查询 profile ----
-    const profileResp = await fetch(
-      `${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}&select=*`,
-      { headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey } }
-    );
-    const profiles = await profileResp.json();
-    const profile = profiles?.[0];
-
-    if (!profile) {
-      return new Response(JSON.stringify({ error: '用户不存在' }), { headers, status: 404 });
-    }
-
-    // ---- 检查 VIP / 免费次数 ----
-    const isVip = profile.is_vip === true;
-    let vipValid = isVip;
-    if (isVip && profile.vip_expires_at) {
-      vipValid = new Date(profile.vip_expires_at) > new Date();
-      if (!vipValid) {
-        await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}`, {
-          method: 'PATCH',
-          headers: { 'Authorization': `Bearer ${supabaseAnonKey}`, 'apikey': supabaseAnonKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ is_vip: false, vip_expires_at: null })
-        });
-      }
-    }
-
-    if (!vipValid) {
-      const usageCount = profile.usage_count || 0;
-      const freeTries = parseInt(Deno.env.get('FREE_TRIES') || '50');
-      if (usageCount >= freeTries) {
-        return new Response(JSON.stringify({
-          error: 'free_trial_ended',
-          message: `免费试用已用完（${freeTries}次），请升级 VIP`,
-        }), { headers, status: 403 });
-      }
-    }
 
     // ---- LLM 凭证（[B方案] 完全移除 IMA，仅保留 LLM）----
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
@@ -436,7 +438,20 @@ Deno.serve(async (req) => {
     }
 
     // ---- LLM 主回复 ----
-    const userBio = (profile && typeof profile.bio === 'string') ? profile.bio : '';
+    // [v20260805] 简介从 profiles.bio 读取（匿名用户注册时 ensure_profile 已建行，RLS 按 user 隔离）
+    let userBio = '';
+    try {
+      const bioResp = await fetch(
+        `${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}&select=bio`,
+        { headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey } }
+      );
+      const bioList = await bioResp.json();
+      if (Array.isArray(bioList) && bioList[0] && typeof bioList[0].bio === 'string') {
+        userBio = bioList[0].bio;
+      }
+    } catch (e: any) {
+      console.warn('读取简介失败:', e.message);
+    }
     if (llmKey) {
       try {
         // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
@@ -521,20 +536,16 @@ Deno.serve(async (req) => {
     }
     mark('memory');
 
-    // ---- 记录使用次数 ----
-    if (!vipValid) {
-      await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}`, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${supabaseAnonKey}`, 'apikey': supabaseAnonKey, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ usage_count: (profile.usage_count || 0) + 1 })
-      });
-    }
-
     return new Response(JSON.stringify({
       reply,
       from_knowledge_base: hitKnowledge,
-      usage_count: profile.usage_count + (vipValid ? 0 : 1),
-      is_vip: vipValid,
+      // [v20260805] 配额已在 RPC 内原子扣次，此处透传扣次信息（不暴露免费档上限以外的敏感值）
+      quota: quotaInfo ? {
+        tier: quotaInfo.tier,
+        used: quotaInfo.used,
+        limit: quotaInfo.limit,
+        bonus: quotaInfo.bonus ?? null,
+      } : null,
       _debug: {
         system_prompt_len: (effectivePrompt || '').length,
         history_len: Array.isArray(history) ? history.length : 0,

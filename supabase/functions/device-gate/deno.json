@@ -1,0 +1,7 @@
+{
+  "name": "device-gate",
+  "version": "1.0.0",
+  "tasks": {
+    "serve": "deno serve --allow-net index.ts"
+  }
+}

@@ -1,5 +1,5 @@
 // ============================================================
-// 军师 - 付费墙模块
+// 军师 - 付费墙模块（v20260805 设备版）
 // ============================================================
 
 const Paywall = {
@@ -17,19 +17,20 @@ const Paywall = {
     },
 
     _updateUI() {
-        const config = window.APP_CONFIG?.product || { priceDisplay: '88 元/月', price: 88 };
+        const config = window.APP_CONFIG?.product || { priceDisplay: '68 元/月', price: 68 };
         document.getElementById('paywall-price').innerHTML =
             `¥${config.price}<small>/月</small>`;
+        // [v20260805] 不暴露免费档位数字（50/30/15），只做引导
         document.getElementById('paywall-tries-desc').textContent =
-            `50 次免费试用已用完，升级 VIP 无限使用`;
-        // [邀请功能] 展示单次邀请赠送次数
+            `今日次数已用完，开通 VIP 继续畅聊`;
+        // [邀请功能] 展示单次邀请赠送次数（不显示 300 上限）
         const rewardEl = document.getElementById('invite-reward-tries');
         if (rewardEl) {
             rewardEl.textContent = window.APP_CONFIG?.invite?.rewardTries || 50;
         }
     },
 
-    // 激活码验证
+    // 激活码验证（服务端绑设备指纹，X-Device-Id 头携带）
     async activate() {
         const input = document.getElementById('activation-input');
         const btn = document.getElementById('activate-btn');
@@ -44,74 +45,46 @@ const Paywall = {
         btn.textContent = '验证中...';
 
         try {
-            // 优先尝试通过 Edge Function 验证
             const config = window.APP_CONFIG?.activation;
-            let success = false;
-
-            if (config && config.verifyUrl) {
-                const sb = getSupabaseClient();
-                const { data: { session } } = await sb.auth.getSession();
-                const token = session?.access_token;
-
-                const resp = await fetch(config.verifyUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': token ? 'Bearer ' + token : ''
-                    },
-                    body: JSON.stringify({
-                        code: code,
-                        user_id: Auth.currentUser?.id
-                    })
-                });
-
-                if (resp.ok) {
-                    const result = await resp.json();
-                    success = result.success;
-                    if (!success) {
-                        Utils.toast(result.message || '激活码无效或已使用');
-                    }
-                } else {
-                    throw new Error('API error');
-                }
-            } else {
-                // 降级：客户端直接验证（开发调试用）
-                const codeRecord = await DB.verifyActivationCode(code);
-                if (codeRecord && !codeRecord.used) {
-                    const sb = getSupabaseClient();
-                    // 标记激活码已使用
-                    await sb.from('activation_codes')
-                        .update({
-                            used: true,
-                            used_by: Auth.currentUser.id,
-                            used_at: new Date().toISOString()
-                        })
-                        .eq('id', codeRecord.id);
-
-                    // 更新用户 VIP 状态
-                    await DB.updateProfile(Auth.currentUser.id, {
-                        is_vip: true,
-                        vip_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-                    });
-
-                    success = true;
-                } else if (codeRecord && codeRecord.used) {
-                    Utils.toast('该激活码已被使用');
-                } else {
-                    Utils.toast('无效的激活码');
-                }
+            const verifyUrl = config && config.verifyUrl;
+            if (!verifyUrl) {
+                Utils.toast('激活服务未配置，请联系客服');
+                btn.disabled = false;
+                btn.textContent = '激活';
+                return;
             }
 
-            if (success) {
-                // 更新本地 profile
-                if (Auth.currentProfile) {
-                    Auth.currentProfile.is_vip = true;
-                    Auth.currentProfile.vip_expires_at = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+            const deviceId = (Auth.device && Auth.device.device_id) || '';
+            if (!deviceId) {
+                Utils.toast('设备初始化中，请重试');
+                btn.disabled = false;
+                btn.textContent = '激活';
+                return;
+            }
+
+            const resp = await fetch(verifyUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Device-Id': deviceId
+                },
+                body: JSON.stringify({ code: code })
+            });
+
+            const result = await resp.json().catch(() => ({}));
+            if (resp.ok && result.success) {
+                // 更新本地设备状态（VIP 剩余天数）
+                if (Auth.device) {
+                    Auth.device.is_vip = true;
+                    Auth.device.vip_days_left = result.vip_days_left || 30;
+                    Auth.device.vip_expires_at = result.vip_expires_at || null;
                 }
                 Utils.toast('🎉 激活成功！已升级为 VIP');
                 this.hide();
                 // 刷新好友列表头部状态
                 Friends.render();
+            } else {
+                Utils.toast(result.message || '激活码无效或已使用');
             }
         } catch (e) {
             Utils.toast('验证失败，请检查网络后重试');

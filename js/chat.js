@@ -220,6 +220,12 @@ const Chat = {
             const reply = await this._callIMA(text, { history, system_prompt: systemPrompt });
             container.removeChild(loadingEl);
 
+            // [v20260805] 配额受限：_callIMA 已按 reason 分层提示，直接结束本次发送
+            if (reply === '__QUOTA__') {
+                sendBtn.disabled = false;
+                return;
+            }
+
             if (reply) {
                 // [收到回复振动提醒] 模式振动，区别于 friends.js 长按的 15ms 短震
                 if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
@@ -234,8 +240,7 @@ const Chat = {
                 // [多窗口会话] 将助手回复追加到本窗口（该好友）的对话历史
                 WindowSession.append(this.currentSessionId, 'assistant', reply);
 
-                // 记录使用次数
-                await this._incrementUsage();
+                // [v20260805] 配额已在服务端原子扣次，移除本地计数
 
                 // 更新会话时间
                 await DB.updateSessionTime(this.currentSessionId);
@@ -293,48 +298,37 @@ const Chat = {
         }
     },
 
-    // 检查是否可调用 API
+    // [v20260805] 检查是否可调用 API：服务端配额引擎为准（原子扣次 + 分层拦截）
     async _checkCanUse() {
-        const profile = Auth.currentProfile;
-        if (!profile) {
-            Utils.toast('请先登录');
+        if (!Auth.currentUser) {
+            Utils.toast('初始化中，请稍候');
             return false;
         }
-
-        // VIP 用户无限使用
-        if (profile.is_vip) {
-            // 检查是否过期
-            if (profile.vip_expires_at && new Date(profile.vip_expires_at) < new Date()) {
-                // VIP 过期了
-                await DB.updateProfile(Auth.currentUser.id, { is_vip: false, vip_expires_at: null });
-                Auth.currentProfile.is_vip = false;
-                Auth.currentProfile.vip_expires_at = null;
-                // 继续走免费次数判断
-            } else {
-                return true;
-            }
+        if (!Auth.device || !Auth.device.device_id) {
+            // 设备未注册（异常兜底）：重新走注册流程
+            await Auth._registerDevice();
         }
-
-        const freeTries = window.APP_CONFIG?.product?.freeTries || 50;
-        if ((profile.usage_count || 0) >= freeTries) {
-            Paywall.show();
-            return false;
-        }
-
         return true;
     },
 
-    // 增加使用次数
-    async _incrementUsage() {
-        if (!Auth.currentUser || !Auth.currentProfile) return;
-
-        // 非 VIP 才计数
-        if (Auth.currentProfile.is_vip) return;
-
-        const newCount = (Auth.currentProfile.usage_count || 0) + 1;
-        const updated = await DB.updateProfile(Auth.currentUser.id, { usage_count: newCount });
-        if (updated) {
-            Auth.currentProfile.usage_count = newCount;
+    // [v20260805] 受限分层提示（不暴露真实阈值）
+    //   quota_exhausted  → 免费档用完 → 弹付费墙
+    //   vip_daily_limit  → VIP 当日满 500 → 服务过载
+    //   ip_limit / ip_new_device_limit → IP 防刷 → 使用太频繁
+    _handleQuotaBlock(err) {
+        const reason = err && err.error;
+        const message = (err && err.message) || '';
+        if (reason === 'quota_exhausted') {
+            Paywall.show();
+        } else if (reason === 'vip_daily_limit') {
+            Utils.toast('服务过载，请明天再试');
+        } else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') {
+            Utils.toast('使用太频繁，请稍后再试');
+        } else if (reason === 'device_not_found') {
+            Utils.toast('设备未注册，正在重试');
+            Auth._registerDevice().catch(() => {});
+        } else {
+            Utils.toast(message || '网络错误，请稍后重试');
         }
     },
 
@@ -368,10 +362,19 @@ const Chat = {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + (await this._getSessionToken())
+                    'Authorization': 'Bearer ' + (await this._getSessionToken()),
+                    // [v20260805] 设备指纹：服务端按 device_id 配额扣次/分层拦截
+                    'X-Device-Id': Auth.device ? Auth.device.device_id : ''
                 },
                 body: JSON.stringify(body)
             });
+
+            // [v20260805] 配额受限（403）：按 reason 分层提示，不把提示当回复发出
+            if (response.status === 403) {
+                const err = await response.json().catch(() => ({}));
+                this._handleQuotaBlock(err);
+                return '__QUOTA__';
+            }
 
             if (!response.ok) {
                 const errText = await response.text();

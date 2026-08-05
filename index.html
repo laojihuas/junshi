@@ -42,7 +42,7 @@
     </div>
 
     <!-- ============================================================
-         页面：登录/注册
+         页面：初始化异常（剔除登录后仅匿名登录失败时显示）
          ============================================================ -->
     <div id="page-auth" class="page">
         <div class="auth-container">
@@ -51,30 +51,8 @@
                 <h1>军师</h1>
                 <p>恋爱聊天指导助手</p>
             </div>
-
-            <div class="auth-tabs">
-                <div class="auth-tab active" data-form="login">登录</div>
-                <div class="auth-tab" data-form="register">注册</div>
-            </div>
-
-            <!-- 登录 -->
-            <div id="form-login" class="auth-form active">
-                <input id="login-email" class="input" type="email" placeholder="邮箱地址" autocomplete="email" inputmode="email">
-                <input id="login-password" class="input" type="password" placeholder="密码" autocomplete="current-password">
-                <button id="login-btn" class="btn btn-primary btn-block">登录</button>
-            </div>
-
-            <!-- 注册 -->
-            <div id="form-register" class="auth-form">
-                <input id="register-email" class="input" type="email" placeholder="邮箱地址" autocomplete="email" inputmode="email">
-                <input id="register-password" class="input" type="password" placeholder="密码（至少6位）" autocomplete="new-password">
-                <input id="register-confirm" class="input" type="password" placeholder="确认密码" autocomplete="new-password">
-                <input id="register-invite-code" class="input" type="text" placeholder="邀请码（选填）" maxlength="8" autocomplete="off">
-                <button id="register-btn" class="btn btn-primary btn-block">注册</button>
-            </div>
-
             <div class="auth-extra">
-                注册即表示同意 <a href="#">服务条款</a> 和 <a href="#">隐私政策</a>
+                <p>网络异常，请检查网络后重新打开</p>
             </div>
         </div>
     </div>
@@ -92,9 +70,6 @@
                 <span id="header-status" class="status-badge">加载中...</span>
                 <button id="bio-btn" class="icon-btn" title="我的简介">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-                </button>
-                <button id="logout-btn" class="icon-btn" title="退出登录">
-                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>
                 </button>
             </div>
         </div>
@@ -268,7 +243,7 @@
             <div class="paywall-title">免费试用已结束</div>
             <div class="paywall-subtitle" id="paywall-tries-desc">50 次免费试用已用完</div>
 
-            <div class="paywall-price" id="paywall-price">¥88<small>/月</small></div>
+            <div class="paywall-price" id="paywall-price">¥68<small>/月</small></div>
             <div class="paywall-desc">
                 解锁无限次聊天指导<br>
                 随时随地获得回复建议

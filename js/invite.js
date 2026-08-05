@@ -29,7 +29,7 @@ const Invite = {
         return window.APP_CONFIG?.invite?.rewardTries || 50;
     },
 
-    // 获取我的邀请码（Edge Function，无则生成）
+    // 获取我的邀请码（Edge Function，无则生成；X-Device-Id 标识设备）
     async getMyCode(force = false) {
         if (this._myCode && !force) return this._myCode;
         if (this._loading) return this._myCode;
@@ -42,13 +42,12 @@ const Invite = {
         }
 
         try {
-            const sb = getSupabaseClient();
-            const { data: { session } } = await sb.auth.getSession();
+            const deviceId = (Auth.device && Auth.device.device_id) || '';
             const resp = await fetch(cfg.getUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Authorization': 'Bearer ' + (session?.access_token || '')
+                    'X-Device-Id': deviceId
                 },
                 body: '{}'
             });
@@ -66,9 +65,9 @@ const Invite = {
         }
     },
 
-    // 兑现邀请：注册成功后调用，给邀请人 +50 次
+    // 兑现邀请：首次新建好友成功后调用，给邀请人 +50 次（封顶 300，不暴露上限）
     // 返回 { success, message }
-    async redeem(code, inviteeId, inviteeEmail) {
+    async redeem(code, deviceId) {
         const cfg = window.APP_CONFIG?.invite;
         if (!cfg || !cfg.redeemUrl || !code) {
             return { success: false, message: '邀请码无效' };
@@ -79,8 +78,7 @@ const Invite = {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     invite_code: code.trim().toUpperCase(),
-                    invitee_id: inviteeId,
-                    invitee_email: inviteeEmail
+                    device_id: deviceId
                 })
             });
             if (!resp.ok) return { success: false, message: '兑换失败，请重试' };

@@ -1,14 +1,13 @@
 // ============================================================
-// 军师 - Supabase Edge Function: 邀请码兑现
+// 军师 - Supabase Edge Function: 邀请码兑现（设备版）
 //
-// 功能：新用户注册成功后调用，校验邀请码 → 给邀请人 +50 次使用额度。
-//       服务端用 service_role 处理（注册用户此时可能未确认邮箱、
-//       未登录，不能依赖前端 token），并通过数据库函数 redeem_invite
-//       原子完成"写邀请关系 + 加额度"。
-//
-// 请求：POST  body: { invite_code: string, invitee_id: string, invitee_email?: string }
-// 返回：{ success: boolean, message: string, usage_count?: number }
+// 功能：被邀请设备"首次新建好友成功"后调用（前端控制时机）。
+//   校验邀请码 → 给邀请人 +50 次（封顶 300，超出不计）→ 绑定邀请关系。
+//   POST body: { invite_code, device_id }
+// 返回：{ success, message, bonus? }
 // ============================================================
+
+const DEVICE_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 Deno.serve(async (req) => {
   const headers = {
@@ -24,15 +23,14 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { invite_code, invitee_id, invitee_email } = await req.json();
+    const { invite_code, device_id } = await req.json();
     if (!invite_code || typeof invite_code !== 'string') {
       return new Response(JSON.stringify({ success: false, message: '缺少邀请码' }), { headers, status: 400 });
     }
-    if (!invitee_id) {
-      return new Response(JSON.stringify({ success: false, message: '缺少用户信息' }), { headers, status: 400 });
+    if (!device_id || !DEVICE_RE.test(device_id)) {
+      return new Response(JSON.stringify({ success: false, message: '设备标识无效' }), { headers, status: 400 });
     }
 
-    const code = invite_code.trim().toUpperCase();
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
@@ -42,32 +40,19 @@ Deno.serve(async (req) => {
       'Content-Type': 'application/json'
     };
 
-    // ---- 根据邀请码找邀请人 ----
-    const inviterResp = await fetch(
-      `${supabaseUrl}/rest/v1/profiles?invite_code=eq.${encodeURIComponent(code)}&select=id`,
-      { headers: restHeaders }
-    );
-    const inviterList = await inviterResp.json();
-    const inviter = inviterList?.[0];
-
-    if (!inviter) {
-      return new Response(JSON.stringify({ success: false, message: '邀请码无效' }), { headers, status: 200 });
-    }
-
-    // ---- 调数据库函数原子兑现（写邀请关系 + 给邀请人 +50 次）----
-    const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/redeem_invite`, {
+    // 调数据库函数原子兑现（写邀请关系 + 邀请人 +50，封顶 300）
+    const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/redeem_invite_device`, {
       method: 'POST',
       headers: restHeaders,
       body: JSON.stringify({
-        p_inviter: inviter.id,
-        p_invitee: invitee_id,
-        p_invitee_email: invitee_email || null
+        p_invitee_device_id: device_id,
+        p_invite_code: invite_code.trim().toUpperCase()
       })
     });
 
     if (!rpcResp.ok) {
       const errText = await rpcResp.text();
-      console.error('invite-redeem rpc failed:', rpcResp.status, errText);
+      console.error('invite-redeem rpc failed:', rpcResp.status, errText.slice(0, 300));
       return new Response(JSON.stringify({ success: false, message: '兑换失败，请重试' }), { headers, status: 500 });
     }
 

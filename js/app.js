@@ -21,43 +21,44 @@ const App = {
         // 绑定事件
         this._bindEvents();
 
-        // [邀请功能] URL 携带 ?invite=XXX 时：切到注册页并预填邀请码
-        this._applyInviteParam();
+        // [v20260805] 设备身份：匿名登录（打开即用，无注册页）
+        // URL 携带 ?invite=CODE 时由 auth.js 自动暂存，首次新建好友后兑现
+        const ok = await Auth.init();
 
-        // 检查登录状态
-        const loggedIn = await Auth.init();
+        if (!ok) {
+            // 匿名登录失败（网络/服务异常）：提示后重试，不进入页面
+            Utils.toast('网络异常，请重试');
+            this.navigate('auth');
+            return;
+        }
 
-        if (loggedIn) {
-            await Friends.load();
+        await Friends.load();
 
-            // [杀进程恢复] 上次停留在聊天页（切后台被浏览器回收后重新加载）→
-            // 自动恢复到该聊天会话，不再每次都回到好友列表
-            const lastView = WindowSession.getLastView();
-            if (lastView && lastView.friendId) {
-                let restored = false;
-                try {
-                    // restoreContext=true：杀进程后 sessionStorage 丢失，
-                    // 从数据库重建最近 50 条对话作为 AI 上下文
-                    restored = await Chat.open(lastView.friendId, true);
-                } catch (e) {
-                    // 恢复异常（网络/查询失败等）绝不能中断初始化，
-                    // 更不能再把用户卡在半路，安全回退好友列表
-                    console.error('[军师] 恢复会话异常:', e);
-                    Utils.dlog('init', 'restore chat FAILED: ' + (e && e.message));
-                }
-                if (!restored) {
-                    this.navigate('friends');
-                }
-            } else {
+        // [杀进程恢复] 上次停留在聊天页（切后台被浏览器回收后重新加载）→
+        // 自动恢复到该聊天会话，不再每次都回到好友列表
+        const lastView = WindowSession.getLastView();
+        if (lastView && lastView.friendId) {
+            let restored = false;
+            try {
+                // restoreContext=true：杀进程后 sessionStorage 丢失，
+                // 从数据库重建最近 50 条对话作为 AI 上下文
+                restored = await Chat.open(lastView.friendId, true);
+            } catch (e) {
+                // 恢复异常（网络/查询失败等）绝不能中断初始化，
+                // 更不能再把用户卡在半路，安全回退好友列表
+                console.error('[军师] 恢复会话异常:', e);
+                Utils.dlog('init', 'restore chat FAILED: ' + (e && e.message));
+            }
+            if (!restored) {
                 this.navigate('friends');
             }
-
-            // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导（4 道防打扰：standalone/已安装/冷却/未登录；
-            // 仅好友列表页弹出，恢复聊天页时 currentPage 非 friends 不会触发）
-            PWAInstall.maybeShow();
         } else {
-            this.navigate('auth');
+            this.navigate('friends');
         }
+
+        // [PWA] 进入首页 2 秒后，弹出"添加到桌面"引导（4 道防打扰：standalone/已安装/冷却/未登录；
+            // 仅好友列表页弹出，恢复聊天页时 currentPage 非 friends 不会触发）
+        PWAInstall.maybeShow();
 
         Utils.dlog('init', 'done currentPage=' + this.currentPage);
 
@@ -86,101 +87,9 @@ const App = {
         }
     },
 
-    // [邀请功能] 读取 URL 参数 ?invite=XXX，切到注册 tab 并预填邀请码
-    _applyInviteParam() {
-        try {
-            const params = new URLSearchParams(location.search);
-            const invite = (params.get('invite') || '').trim().toUpperCase();
-            if (!invite) return;
-            // 已登录用户无需注册，不预填
-            if (Auth.currentUser) return;
-            const input = document.getElementById('register-invite-code');
-            if (!input) return;
-            input.value = invite;
-            // 切换到注册 tab（好友点链接进来直接看到注册表单）
-            const tab = document.querySelector('.auth-tab[data-form="register"]');
-            if (tab) tab.click();
-            Utils.toast('已为你填好邀请码，注册即得 50 次免费额度');
-        } catch (e) {
-            console.warn('[军师] 应用邀请参数失败:', e);
-        }
-    },
+    // [v20260805] 已剔除邮箱登录：URL ?invite=CODE 由 auth.js 自动暂存（首次建好友后兑现）
 
     _bindEvents() {
-        // 登录/注册切换 tab
-        document.querySelectorAll('.auth-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
-                tab.classList.add('active');
-                document.getElementById('form-' + tab.dataset.form).classList.add('active');
-            });
-        });
-
-        // 登录按钮
-        document.getElementById('login-btn').addEventListener('click', async () => {
-            const email = document.getElementById('login-email').value.trim();
-            const password = document.getElementById('login-password').value;
-            if (!email || !password) {
-                Utils.toast('请填写邮箱和密码');
-                return;
-            }
-            Utils.showLoading();
-            const result = await Auth.login(email, password);
-            Utils.hideLoading();
-            if (result.success) {
-                Utils.toast('登录成功');
-                await Friends.load();
-                App.navigate('friends');
-                // [PWA] 登录进入首页 2 秒后，弹出"添加到桌面"引导
-                PWAInstall.maybeShow();
-            } else {
-                Utils.toast(result.message);
-            }
-        });
-
-        // 登录回车键
-        document.getElementById('login-password').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') document.getElementById('login-btn').click();
-        });
-
-        // 注册按钮
-        document.getElementById('register-btn').addEventListener('click', async () => {
-            const email = document.getElementById('register-email').value.trim();
-            const password = document.getElementById('register-password').value;
-            const confirm = document.getElementById('register-confirm').value;
-            if (!email || !password || !confirm) {
-                Utils.toast('请填写完整信息');
-                return;
-            }
-            if (password !== confirm) {
-                Utils.toast('两次密码不一致');
-                return;
-            }
-            if (password.length < 6) {
-                Utils.toast('密码至少 6 位');
-                return;
-            }
-            // [邀请功能] 读取邀请码（选填）
-            const inviteCode = document.getElementById('register-invite-code').value.trim().toUpperCase();
-            Utils.showLoading();
-            const result = await Auth.register(email, password, inviteCode);
-            Utils.hideLoading();
-            Utils.toast(result.message);
-            if (result.success) {
-                // 清空注册表单
-                document.getElementById('register-email').value = '';
-                document.getElementById('register-password').value = '';
-                document.getElementById('register-confirm').value = '';
-                document.getElementById('register-invite-code').value = '';
-            }
-        });
-
-        // 注册回车键
-        document.getElementById('register-confirm').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') document.getElementById('register-btn').click();
-        });
-
         // 新建好友按钮
         document.getElementById('fab-add-friend').addEventListener('click', () => {
             Friends.showCreateModal();
@@ -278,12 +187,7 @@ const App = {
             Invite.copy();
         });
 
-        // 退出登录
-        document.getElementById('logout-btn').addEventListener('click', async () => {
-            if (confirm('确定退出登录？')) {
-                await Auth.logout();
-            }
-        });
+        // [v20260805] 已剔除登录：无退出登录按钮
 
         // [长按管理] Action Sheet - 按钮点击分发
         document.getElementById('action-sheet').addEventListener('click', (e) => {
