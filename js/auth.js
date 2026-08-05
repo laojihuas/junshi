@@ -76,7 +76,15 @@ const Auth = {
             const resp = await fetch(gateUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': token ? 'Bearer ' + token : '' },
-                body: JSON.stringify({ action: 'register', device_id: deviceId, invite_code: invite })
+                body: JSON.stringify({
+                    action: 'register',
+                    device_id: deviceId,
+                    invite_code: invite,
+                    // [方案C 召回信号] 前端辅助指纹特征（服务端存库，fallback 设备漂移时按多信号召回老设备）
+                    fp_screen: (screen.width && screen.height) ? screen.width + 'x' + screen.height : '',
+                    fp_tz: String(new Date().getTimezoneOffset()),
+                    fp_lang: navigator.language || ''
+                })
             });
             if (!resp.ok) {
                 console.warn('[军师] 设备注册 HTTP 失败:', resp.status);
@@ -90,7 +98,17 @@ const Auth = {
                 this.device = null;
                 return false;
             }
-            // 注册成功 / 已存在 → 更新状态
+            // [方案C 召回] 服务端按多信号召回 30 天内的老设备：换用老 ID（双写持久化），
+            // 后续所有请求（ima-proxy）都以老 ID 为准 → 额度/VIP 找回，不再生成新设备
+            if (r.recalled && r.recalled_device_id) {
+                deviceId = r.recalled_device_id;
+                this.device.device_id = deviceId;
+                try {
+                    localStorage.setItem('junshi_device_id', deviceId);
+                } catch (e) { /* 忽略 */ }
+                this._setCookie('junshi_device_id', deviceId);
+            }
+            // 注册成功 / 已存在 / 召回 → 更新状态
             this.device.invite_bonus = r.invite_bonus || 0;
             this.device.is_vip = !!r.is_vip;
             this.device.vip_expires_at = r.vip_expires_at || null;
