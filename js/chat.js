@@ -109,7 +109,12 @@ const Chat = {
         } catch (e) {
             console.warn('[军师] 拉取记忆失败，用缓存:', e.message);
         }
-        body.innerHTML = this._renderMemory(this.memoryCard);
+        try {
+            body.innerHTML = this._renderMemory(this.memoryCard);
+        } catch (e) {
+            console.error('[军师] 渲染记忆失败:', e);
+            body.innerHTML = '<div class="memory-empty">记忆数据解析失败，请稍后再试</div>';
+        }
     },
 
     // [v20260805] 渲染记忆面板
@@ -133,6 +138,9 @@ const Chat = {
             ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`
             : '';
 
+        const sec = (title, dotColor, html) =>
+            `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
+
         // [v58] 目标 + 阶段推进链（未知→普通→追求→暧昧→恋爱）
         const goalHtml = goal ? `<div class="memory-goal">目标：${this._escapeHtml(goal)}</div>` : '';
         const STAGE_CHAIN = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
@@ -146,8 +154,6 @@ const Chat = {
         const stageSec = sec('关系阶段', stageColor,
             (stageTag || '<div class="memory-empty">未知（聊过或手动设置后更新）</div>') + goalHtml + chainHtml);
 
-        const sec = (title, dotColor, html) =>
-            `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
         const factsHtml = facts.length > 0
             ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无长期事实。对方提到生日/约定/偏好等关键信息时，军师会自动记住。</div>';
