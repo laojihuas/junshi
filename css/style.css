@@ -429,6 +429,8 @@ textarea.input {
     font-weight: 600;
     flex-shrink: 0;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+    /* [v20260805] A方案：关系阶段变色时平滑过渡 */
+    transition: background-color 0.3s ease;
 }
 
 .friend-info {

@@ -48,9 +48,13 @@ const Friends = {
             const noteHtml = s.note
                 ? `<span class="friend-note" title="${this._escapeHtml(s.note)}">${this._escapeHtml(s.note)}</span>`
                 : '';
+            // [v20260805] A方案：头像底色随关系阶段变色（未知保持原 avatar_color）
+            const st = this._stageInfo(s);
+            const avatarBg = st ? st.color : (s.avatar_color || '#07C160');
+            const avatarTitle = st ? ` title="关系阶段：${this._escapeHtml(st.stage)}"` : '';
             return `
                 <div class="friend-item" data-session-id="${s.id}">
-                    <div class="friend-avatar" style="background: ${s.avatar_color || '#07C160'}">
+                    <div class="friend-avatar" style="background: ${avatarBg}"${avatarTitle}>
                         ${initial}
                     </div>
                     <div class="friend-info">
@@ -342,5 +346,31 @@ const Friends = {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    },
+
+    // [v20260805] A方案：关系阶段 → 头像底色（追求蓝/暧昧粉/恋爱红/挽回琥珀/普通灰）
+    // 未知/无画像 → null（保持原 avatar_color，不显示关系色）
+    _STAGE_COLORS: {
+        '追求': '#185FA5',
+        '暧昧': '#993556',
+        '恋爱': '#A32D2D',
+        '挽回': '#854F0B',
+        '普通朋友': '#5F5E5A',
+    },
+
+    _stageInfo(s) {
+        let stage = '';
+        try {
+            if (s && s.memory_card) {
+                // memory_card 为 text 列存 JSON 字符串（兼容已 parse 的对象）
+                const mc = typeof s.memory_card === 'string' ? JSON.parse(s.memory_card) : s.memory_card;
+                stage = (mc && mc.profile && mc.profile.stage) || '';
+            }
+        } catch (e) {
+            stage = '';
+        }
+        if (!stage || stage === '未知') return null;
+        const color = this._STAGE_COLORS[stage];
+        return color ? { stage, color } : null;
     }
 };
