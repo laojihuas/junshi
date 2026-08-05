@@ -49,6 +49,14 @@
 //     【话题锚点】块——跨轮次围绕共同梗延伸像连续剧；锚点保护：本轮没识别不清空旧值
 //   - 全部为提示词层，零额外 LLM 调用、零 token 增量
 //
+// [v57 长期记忆 facts]（2026-08-05，P0 facts清单 + P1 选择性回忆）
+//   - memory_card.facts：长期事实清单 [{text≤40字, at, last_mention}]，上限 20 条
+//   - extractProfile 顺带提取新事实（≤3 条/轮，挂 3 分钟画像限频，零新增调用）
+//   - mergeFacts：去重（互含=同条，刷新提及时间）+ 按提及新旧排序 + 超上限淘汰最旧
+//   - buildSystemContent 选择性注入【我记得这些】：按 query 与 fact 的 bigram 重叠
+//     挑 top4（FACTS_INJECT_MAX），不全量塞——像人按话题想起相关记忆
+//   - _debug 新增 facts_len
+//
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
 //     > 引擎层(pulse/balance/emotion_tone 实时输入)
@@ -358,6 +366,8 @@ Deno.serve(async (req) => {
     let sentenceKws: string[] = [];
     // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
+    // [v57] 长期记忆本轮注入条数（_debug 用；同样提到顶层防作用域事故）
+    let factsInjected = 0;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -478,6 +488,7 @@ Deno.serve(async (req) => {
         });
         const systemContent = built.systemContent;
         pulseAdvice = built.pulseAdvice;
+        factsInjected = built.factsInjected;
         const messages: any[] = [
           { role: 'system', content: systemContent },
           ...llmHistory,
@@ -579,6 +590,9 @@ Deno.serve(async (req) => {
         kb_gem_avg: kbItems.length
           ? Math.round(kbItems.reduce((a: number, it: any) => a + (it._gem || 0), 0) / kbItems.length * 10) / 10
           : null,
+        // [v57] 长期记忆统计：facts 总量 + 本轮命中注入数（验证选择性回忆）
+        facts_len: Array.isArray(memoryCard?.facts) ? memoryCard.facts.length : 0,
+        facts_injected: factsInjected,
         // [v13] 阶段耗时（ms）：start/ready/semantic/sentence/kb1/kbft/strategy/llm_reply/memory
         perf: (() => {
           const o: Record<string, number> = {};
@@ -841,6 +855,9 @@ type MemoryCard = {
   recent_user_messages?: string[];
   // [v9] 军师(自己)发过的话：窗口 history 丢失后仍能知道自己说过什么，防重复（按 session_id 隔离）
   recent_self_messages?: string[];
+  // [v57] 长期事实清单：值得跨天记住的硬事实（约定/日期/偏好/雷点/家庭/工作）
+  //   [{text(≤40字), at(首次记录), last_mention(最近提及)}]，上限 FACTS_MAX，按 last_mention 新旧排序
+  facts?: { text: string; at: string; last_mention: string }[];
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -848,6 +865,10 @@ type MemoryCard = {
   strategy?: StrategyState | null;
   updated_at?: string;
 };
+
+// [v57] facts 容量与注入上限
+const FACTS_MAX = 20;          // 长期记忆上限（超了淘汰最久没提的）
+const FACTS_INJECT_MAX = 4;    // 每轮按相关度最多注入几条
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
   try {
@@ -968,8 +989,10 @@ async function updateMemoryCard(ctx: {
     needProfile = !isNaN(last) && (Date.now() - last) > MEMORY_UPDATE_INTERVAL;
   }
   if (needProfile && ctx.llmKey) {
-    const profile = await extractProfile(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
-    if (profile) {
+    // [v57] extractProfile 现在返回 { profile, facts }
+    const extracted = await extractProfile(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
+    if (extracted) {
+      const profile = extracted.profile;
       // [v20260805] 手动标注优先：用户在前端手动设置过 stage（stage_source=manual）时，
       //   AI 推断不覆盖手动值；恢复 AI 判断（前端清除 manual 标记）后重新接管
       const prev = card.profile || {};
@@ -982,6 +1005,8 @@ async function updateMemoryCard(ctx: {
         profile.anchor = prev.anchor;
       }
       card.profile = profile;
+      // [v57] 长期事实合并（去重 + 上限淘汰）
+      mergeFacts(card, extracted.facts || []);
     }
     card.updated_at = new Date().toISOString();
   }
@@ -998,33 +1023,60 @@ async function updateMemoryCard(ctx: {
 }
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
-async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<any> {
+// [v57] 返回 {profile, facts}：profile=画像对象；facts=本轮新提取的长期事实（string[]）
+async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
   const recentDialogue = (Array.isArray(history) ? history : [])
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）。只输出 JSON 对象，不要任何其他文字。`;
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.3, maxTokens: 400, _stage: 'extract_profile',
+      temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
     });
     const start = content.indexOf('{');
     const end = content.lastIndexOf('}');
     if (start === -1 || end === -1) return null;
     const p = JSON.parse(content.slice(start, end + 1));
+    const facts = (Array.isArray(p.facts) ? p.facts : [])
+      .map((t: any) => (typeof t === 'string' ? t.trim().slice(0, 40) : ''))
+      .filter((t: string) => t.length > 0)
+      .slice(0, 3);
     return {
-      stage: typeof p.stage === 'string' && p.stage ? p.stage : '未知',
-      personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
-      relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
-      recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
-      // [v56] 话题锚点：跨轮次连续剧感的共同梗（无则空，不覆盖已有锚点由合并逻辑处理）
-      anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
+      profile: {
+        stage: typeof p.stage === 'string' && p.stage ? p.stage : '未知',
+        personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
+        relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
+        recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
+        // [v56] 话题锚点：跨轮次连续剧感的共同梗（无则空，不覆盖已有锚点由合并逻辑处理）
+        anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
+      },
+      facts,
     };
   } catch (e: any) {
     console.warn('extractProfile failed:', e.message);
     return null;
   }
+}
+
+// [v57] 合并新事实到长期记忆：去重(互含视为同条并刷新提及时间) + 上限淘汰(按提及新旧)
+function mergeFacts(card: MemoryCard, newFacts: string[]): void {
+  const now = new Date().toISOString();
+  const facts = Array.isArray(card.facts) ? card.facts.slice() : [];
+  for (const t of newFacts) {
+    const text = (t || '').trim().slice(0, 40);
+    if (!text) continue;
+    const dup = facts.find((f) => (f.text && f.text.includes(text)) || text.includes(f.text || ''));
+    if (dup) {
+      dup.last_mention = now; // 已有类似事实 → 只刷新提及时间
+      continue;
+    }
+    facts.push({ text, at: now, last_mention: now });
+  }
+  facts.sort((a, b) => ((b.last_mention || '').localeCompare(a.last_mention || '')));
+  if (facts.length > FACTS_MAX) facts.splice(FACTS_MAX);
+  card.facts = facts;
 }
 
 // ============================================================
@@ -1175,7 +1227,7 @@ function buildSystemContent(opts: {
   //   true → 不注入【对方近期话】/【自己发过话】（llmHistory 已含，避免冗余）
   //   false/undefined → 注入（窗口恢复等 llmHistory 缺失场景兜底）
   hasRecentHistory?: boolean;
-}): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null } {
+}): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
   //   （角色定位/关系阶段/简介/语气态度/自洽输出 每轮不变 → 前缀稳定）
   //   变化块（攻击检测/画像/近期话/自己话/摘要/知识库/套路/节奏）后移 → 后缀变化不影响缓存
@@ -1314,6 +1366,33 @@ function buildSystemContent(opts: {
     s += `\n\n${opts.olderSummary}`;
   }
 
+  // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
+  //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
+  let factsInjected = 0;
+  const factsList = opts.memoryCard?.facts || [];
+  const qText = opts.lastUserText || '';
+  if (factsList.length > 0 && qText.trim()) {
+    const qs = qText.replace(/\s/g, '');
+    const scoredFacts = factsList
+      .map((f) => {
+        const ft = (f.text || '').replace(/\s/g, '');
+        let hit = 0;
+        for (let i = 0; i + 2 <= ft.length; i++) {
+          if (qs.includes(ft.slice(i, i + 2))) hit++;
+        }
+        return { f, hit };
+      })
+      .filter((x) => x.hit > 0)
+      .sort((a, b) => b.hit - a.hit)
+      .slice(0, FACTS_INJECT_MAX);
+    if (scoredFacts.length > 0) {
+      factsInjected = scoredFacts.length;
+      s += `\n\n【我记得这些】(长期记忆，按当前话题想起的)\n`
+        + scoredFacts.map((x) => `- ${x.f.text}`).join('\n')
+        + `\n- 结合它们自然回应：对方提到相关的事时，要自然带出"我记得"的感觉，别生硬背诵、别每条都提。`;
+    }
+  }
+
   // 知识库参考
   if (opts.kbItems.length > 0) {
     const kbText = opts.kbItems
@@ -1363,7 +1442,7 @@ function buildSystemContent(opts: {
     s += `\n\n【节奏】按正常聊天节奏回复即可，不用刻意延后，也不必秒回。`;
   }
 
-  return { systemContent: s, pulseAdvice };
+  return { systemContent: s, pulseAdvice, factsInjected };
 }
 
 // ============================================================
