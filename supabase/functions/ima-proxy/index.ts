@@ -33,6 +33,13 @@
 //     只吸收"可直接复制的话术/金句/例子"，口水段落跳过，不被带偏风格和字数
 //   - 零成本零延迟；S2(LLM 精筛)/S3(切块治本) 留待后续
 //
+// [v53 gem 精华打分]（2026-08-05，Step 1 只改 index.ts，不碰数据库）
+//   - calcGemScore：纯规则精华分（零 LLM）——引号对话示范/操作词/短句/金句符号
+//     加分；说教连接词/长铺垫/形容词堆砌/套话 减分；范围 [-2,3]
+//   - recallBlocks：p_limit 12→24 多捞候选池 → 内存算 gem → 剔口水(< -1) →
+//     按 相关分+gem×0.8 重排 → 再走 applyQuota 取 target（候选不进 LLM，token 不变）
+//   - _debug 新增 kb_gem / kb_gem_avg
+//
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
 //     > 引擎层(pulse/balance/emotion_tone 实时输入)
@@ -547,6 +554,11 @@ Deno.serve(async (req) => {
           blocks: kbItems.filter((it: any) => typeof it.block_idx === 'number').length,
           empty: kbItems.filter((it: any) => !it.content).length,
         },
+        // [v53] 精华分统计（验证 gem 精排）：最终进上下文的块的 gem 分布
+        kb_gem: kbItems.map((it: any) => it._gem ?? null),
+        kb_gem_avg: kbItems.length
+          ? Math.round(kbItems.reduce((a: number, it: any) => a + (it._gem || 0), 0) / kbItems.length * 10) / 10
+          : null,
         // [v13] 阶段耗时（ms）：start/ready/semantic/sentence/kb1/kbft/strategy/llm_reply/memory
         perf: (() => {
           const o: Record<string, number> = {};
@@ -1258,6 +1270,50 @@ async function llmChat(
 const llmUsageLog: { stage: string; usage: any }[] = [];
 
 // ============================================================
+// [v53] 精华打分（零 LLM，规则驱动）：金句信号加分、口水信号减分
+//   用途：RPC 相关分之外的质量分，混合排序 + 剔口水
+//   设计要点：纯文本规则、可解释、随时调参；不增加任何 LLM 调用
+// ============================================================
+const GEM_WEIGHT = 0.8;                 // 精华分合并权重（相关分仍为主序）
+const GEM_MIN = -1;                     // 低于此分 = 口水块，直接剔出候选池
+const GEM_DIALOG_RE = /[""「」『』]/g;   // 对话示范引号（可复制例句）
+const GEM_ACTION_RE = /你说|你就|不如|试试|可以说|跟她说|告诉她|回她|回他/; // 可操作话术
+const GEM_CONNECTOR_RE = /首先|然后|总之|因此|很多人|一般来说|所以说/;      // 说教连接词
+const GEM_ADJ_RE = /非常|真的|特别|超级|十分|极其/;                       // 形容词堆砌
+const GEM_FLUFF_RE = /我觉得|其实呢|我们要知道|大家都知道/;               // 空话套话
+const GEM_SYMBOL_RE = /→|｜|👉/;                                        // 金句符号（话术分隔）
+const GEM_TITLE_RE = /话术|案例|例句|实战|示例/;                          // 块标题命中
+
+function calcGemScore(content: string, blockTitle: string): number {
+  const c = content || '';
+  if (!c) return 0;
+  let gem = 0;
+  // 加分：对话示范
+  const quotes = Math.floor((c.match(GEM_DIALOG_RE) || []).length / 2);
+  if (quotes >= 2) gem += 1.5;
+  else if (quotes >= 1) gem += 0.8;
+  // 加分：可操作话术
+  if (GEM_ACTION_RE.test(c)) gem += 0.5;
+  // 加分：短句密度（平均句长 ≤12 字 = 口语化金句）
+  const sents = c.split(/[。！？!?；;\n]+/).filter((s) => s.trim().length > 0);
+  const avgLen = sents.length ? c.replace(/\s/g, '').length / sents.length : 99;
+  if (avgLen <= 12) gem += 0.6;
+  // 加分：金句符号
+  if (GEM_SYMBOL_RE.test(c)) gem += 0.4;
+  // 加分：块标题含话术/案例
+  if (blockTitle && GEM_TITLE_RE.test(blockTitle)) gem += 0.5;
+  // 减分：说教连接词 ≥3
+  if ((c.match(GEM_CONNECTOR_RE) || []).length >= 3) gem -= 1.0;
+  // 减分：>30 字长句 ≥2（铺垫）
+  if (sents.filter((s) => s.length > 30).length >= 2) gem -= 0.6;
+  // 减分：形容词堆砌 ≥3
+  if ((c.match(GEM_ADJ_RE) || []).length >= 3) gem -= 0.5;
+  // 减分：空话套话 ≥2
+  if ((c.match(GEM_FLUFF_RE) || []).length >= 2) gem -= 0.5;
+  return Math.max(-2, Math.min(3, gem));
+}
+
+// ============================================================
 // [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
 //   kb_blocks 表（15,107 块）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
 //   权重：整句词×2.5 / 语义词×2（与旧 kb_recall 一致，行为可预期）
@@ -1302,6 +1358,7 @@ async function recallBlocks(
     });
 
     // 3. 调数据库 RPC：粗筛+块内词频打分+同文档去重+limit 一次完成
+    // [v53] p_limit 12→24：多捞候选池给 gem 精排（候选只做重排，最终仍取 target 进 LLM，token 不变）
     const target = opts?.pickCount || KB_REF_COUNT;
     const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/kb_blocks_recall`, {
       method: 'POST',
@@ -1310,7 +1367,7 @@ async function recallBlocks(
         p_grams: [...grams].slice(0, 80),
         p_words: queries.slice(0, 20),
         p_weights: weights.slice(0, 20),
-        p_limit: Math.max(target * 2, 12),
+        p_limit: Math.max(target * 4, 24),
         p_max_blocks_per_doc: 2,
       }),
     });
@@ -1318,7 +1375,7 @@ async function recallBlocks(
     const rows: any[] = await resp.json();
     if (!Array.isArray(rows) || rows.length === 0) return [];
 
-    const items = rows.map((r) => ({
+    let items = rows.map((r) => ({
       media_id: r.media_id,
       block_idx: r.block_idx,
       title: r.title,
@@ -1327,6 +1384,14 @@ async function recallBlocks(
       content: r.content || '',
       _hits: 1, _semanticHits: 0, _fulltext: true, _ft_score: Number(r.score) || 0,
     }));
+
+    // [v53] 内存 gem 精排：算精华分 → 剔口水块(< GEM_MIN) → 按 相关分+gem×权重 重排
+    //   全被剔光时退回原始列表（保证有弹药可用）；排序后 applyQuota 从精排池里挑
+    const scored = items
+      .map((it) => ({ ...it, _gem: calcGemScore(it.content || '', it.block_title || '') }))
+      .filter((it) => it._gem >= GEM_MIN)
+      .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * GEM_WEIGHT) - ((a._ft_score || 0) + (a._gem || 0) * GEM_WEIGHT));
+    if (scored.length > 0) items = scored;
 
     // 4. 状态感知配额（话术=恋爱话术 / 教学=恋爱教学+聊天实战）
     return opts ? applyQuota(items, {
