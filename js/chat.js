@@ -30,6 +30,8 @@ const Chat = {
         this.currentFriendName = session.friend_name;
         document.getElementById('chat-title').textContent = session.friend_name;
 
+        // [v20260805] 记忆：缓存 memory_card（记忆按钮弹层用；打开时已有，零额外请求）
+        this.memoryCard = session.memory_card || null;
         // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
         this._updateStrategyBadge(session.memory_card || null);
 
@@ -68,7 +70,84 @@ const Chat = {
             history.pushState({ page: 'chat', friendId: sessionId }, '');
         }
         App.navigate('chat');
+
+        // [v20260805] 记忆按钮：聊天右上角，查看军师对她的记忆
+        document.getElementById('chat-memory-btn').onclick = () => this.openMemoryModal();
         return true;
+    },
+
+    // [v20260805] 打开"关于她的记忆"弹层：实时拉最新 memory_card 再渲染
+    async openMemoryModal() {
+        const overlay = document.getElementById('modal-memory');
+        const body = document.getElementById('memory-body');
+        if (!overlay || !body || !this.currentSessionId) return;
+
+        overlay.classList.add('active');
+        body.innerHTML = '<div class="memory-loading">加载中...</div>';
+        const closeBtn = document.getElementById('memory-close');
+        closeBtn.onclick = () => overlay.classList.remove('active');
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.classList.remove('active'); };
+
+        try {
+            // 实时拉最新（会话中记忆一直在更新；一次轻量 GET，零成本）
+            const sb = getSupabaseClient();
+            const { data } = await sb
+                .from('chat_sessions')
+                .select('memory_card')
+                .eq('id', this.currentSessionId)
+                .single();
+            this.memoryCard = (data && data.memory_card) ? data.memory_card : this.memoryCard;
+        } catch (e) {
+            console.warn('[军师] 拉取记忆失败，用缓存:', e.message);
+        }
+        body.innerHTML = this._renderMemory(this.memoryCard);
+    },
+
+    // [v20260805] 渲染记忆面板
+    _renderMemory(raw) {
+        let mc = null;
+        try {
+            mc = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
+        } catch (e) {
+            mc = null;
+        }
+        if (!mc) {
+            return '<div class="memory-empty">还没有关于她的记忆。聊几轮之后，军师会自动记住她说过的话、性格和重要事情。</div>';
+        }
+        const p = mc.profile || {};
+        const facts = Array.isArray(mc.facts) ? mc.facts : [];
+        const userMsgs = Array.isArray(mc.recent_user_messages) ? mc.recent_user_messages : [];
+        const selfMsgs = Array.isArray(mc.recent_self_messages) ? mc.recent_self_messages : [];
+
+        const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '普通朋友': '#5F5E5A' };
+        const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
+        const stageTag = (p.stage && p.stage !== '未知')
+            ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`
+            : '';
+
+        const sec = (title, dotColor, html) =>
+            `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
+        const items = (arr, empty) => arr.length > 0
+            ? `<ul class="memory-items">${arr.slice(0, 8).map(x => `<li>${this._escapeHtml(x)}</li>`).join('')}</ul>`
+            : `<div class="memory-empty">${empty}</div>`;
+        const factsHtml = facts.length > 0
+            ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`
+            : '<div class="memory-empty">暂无长期事实。对方提到生日/约定/偏好等关键信息时，军师会自动记住。</div>';
+
+        const profileBits = [];
+        if (p.anchor) profileBits.push(`共同梗：${this._escapeHtml(p.anchor)}`);
+        if (p.personality) profileBits.push(`性格：${this._escapeHtml(p.personality)}`);
+        if (p.relationship_note) profileBits.push(`关系背景：${this._escapeHtml(p.relationship_note)}`);
+        if (p.recent_events) profileBits.push(`最近事件：${this._escapeHtml(p.recent_events)}`);
+        const profileHtml = profileBits.length > 0
+            ? `<ul class="memory-items">${profileBits.map(x => `<li>${x}</li>`).join('')}</ul>`
+            : '<div class="memory-empty">暂无画像信息</div>';
+
+        return sec('关系阶段', stageColor, stageTag || '<div class="memory-empty">未知（聊过或手动设置后更新）</div>')
+            + sec('长期记忆', '#1D9E75', factsHtml)
+            + sec('她的画像', '#378ADD', profileHtml)
+            + sec('她说过的话（最近）', '#BA7517', items(userMsgs, '暂无'))
+            + sec('我说过的话（最近）', '#888780', items(selfMsgs, '暂无'));
     },
 
     renderMessages() {
