@@ -117,8 +117,16 @@ const Chat = {
         }
     },
 
-    // [v20260805] 渲染记忆面板
+    // [v20260805b] 渲染记忆面板
     _renderMemory(raw) {
+        try {
+            return this._renderMemoryInner(raw);
+        } catch (e) {
+            console.error('[军师] _renderMemory 异常:', e);
+            return '<div class="memory-empty" style="color:#F09595">记忆面板渲染失败: ' + this._escapeHtml(String(e.message || e)) + '</div>';
+        }
+    },
+    _renderMemoryInner(raw) {
         let mc = null;
         try {
             mc = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : null;
