@@ -251,18 +251,17 @@
                     <table>
                         <thead>
                             <tr>
-                                <th>ID</th>
-                                <th>邮箱</th>
-                                <th>昵称</th>
-                                <th>状态</th>
-                                <th>使用次数</th>
-                                <th>VIP 到期</th>
                                 <th>设备 ID</th>
+                                <th>状态</th>
+                                <th>今日调用</th>
+                                <th>累计调用</th>
+                                <th>邀请赠送</th>
+                                <th>VIP 到期</th>
                                 <th>注册时间</th>
                             </tr>
                         </thead>
                         <tbody id="users-tbody">
-                            <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
+                            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -447,33 +446,36 @@
             }
         }
 
-        // 获取统计数据
+        // 获取统计数据（[v20260805] 改走 admin_stats RPC：设备维度真实口径）
+        //   用户数=devices 行数；调用次数=daily_quota 累计（旧 usage_count 字段已废弃不再更新）
         async function loadStats() {
             if (!sb) return;
-            const { data: users } = await sb.from('profiles').select('id, is_vip, usage_count');
-            const { data: codes } = await sb.from('activation_codes').select('id, used');
-            const { count: msgCount } = await sb.from('chat_messages').select('*', { count: 'exact', head: true });
-
-            if (users) {
-                document.getElementById('stat-users').textContent = users.length;
-                document.getElementById('stat-vip').textContent = users.filter(u => u.is_vip).length;
-                document.getElementById('stat-calls').textContent = users.reduce((s, u) => s + (u.usage_count || 0), 0);
-            }
-            if (codes) {
-                document.getElementById('stat-codes-used').textContent = codes.filter(c => c.used).length + '/' + codes.length;
-            }
-        }
-
-        // 加载用户列表
-        async function loadUsers() {
-            if (!sb) return;
-            const { data, error } = await sb.from('profiles').select('*').order('created_at', { ascending: false });
-            if (error || !data) {
-                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);">加载失败</td></tr>';
+            const { data, error } = await sb.rpc('admin_stats');
+            if (error || !data || data.error) {
+                console.warn('admin_stats 失败:', error || data);
                 return;
             }
-            document.getElementById('user-count').textContent = '共 ' + data.length + ' 人';
-            document.getElementById('users-tbody').innerHTML = data.map(u => {
+            document.getElementById('stat-users').textContent = data.user_count ?? '-';
+            document.getElementById('stat-vip').textContent = data.vip_count ?? '-';
+            document.getElementById('stat-calls').textContent = data.total_calls ?? '-';
+            const codesEl = document.getElementById('stat-codes-used');
+            if (codesEl && data.codes_total != null) {
+                codesEl.textContent = (data.codes_used ?? 0) + '/' + data.codes_total;
+            }
+            // 缓存用户列表供 loadUsers 渲染（避免重复请求）
+            window.__adminUsers = data.users || [];
+            document.getElementById('user-count').textContent = '共 ' + (data.user_count ?? 0) + ' 人';
+            renderUsers();
+        }
+
+        // 渲染用户列表（设备维度）
+        function renderUsers() {
+            const users = window.__adminUsers || [];
+            if (users.length === 0) {
+                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);">暂无设备</td></tr>';
+                return;
+            }
+            document.getElementById('users-tbody').innerHTML = users.map(u => {
                 let badge = '<span class="badge badge-free">免费</span>';
                 if (u.is_vip) {
                     if (u.vip_expires_at && new Date(u.vip_expires_at) < new Date()) {
@@ -483,16 +485,25 @@
                     }
                 }
                 return `<tr>
-                    <td class="code-display">${(u.id || '').slice(0, 8)}...</td>
-                    <td>${u.email || u.phone || '-'}</td>
-                    <td>${u.nickname || '-'}</td>
+                    <td class="code-display" title="${u.device_id}">${(u.device_id || '').slice(0, 12)}...</td>
                     <td>${badge}</td>
-                    <td>${u.usage_count || 0}</td>
+                    <td>${u.today_calls || 0}</td>
+                    <td>${u.total_calls || 0}</td>
+                    <td>${u.invite_bonus || 0}</td>
                     <td>${u.vip_expires_at ? new Date(u.vip_expires_at).toLocaleDateString() : '-'}</td>
-                    <td class="code-display">${u.device_id ? u.device_id.slice(0,10) + '...' : '-'}</td>
                     <td>${new Date(u.created_at).toLocaleDateString()}</td>
                 </tr>`;
             }).join('');
+        }
+
+        // 加载用户列表（数据来自 admin_stats，不再直查 profiles）
+        async function loadUsers() {
+            if (!sb) return;
+            if (!window.__adminUsers) {
+                await loadStats();
+            } else {
+                renderUsers();
+            }
         }
 
         // 加载激活码
