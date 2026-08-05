@@ -581,6 +581,9 @@ Deno.serve(async (req) => {
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
+        // [v15] 时间/位置注入验证
+        now_cn: formatCurrentTime(),
+        location: extractLocation(userBio || '') || null,
         // [v11] 引擎层 debug：验证阶段加权与节奏/主权/情绪引擎是否生效
         stage_vocab: resolveStageVocab(memoryCard).slice(0, 5),
         balance_direction: memoryCard?.balance?.direction || null,
@@ -1072,6 +1075,76 @@ async function extractStrategy(
 // [v14] 对方攻击/挑衅/阴阳怪气检测（命中 → 注入反击指令；排除挽回期由调用方控制）
 const ATTACK_RE = /你(就|真是|也太|凭什么|有什么|算个|配|只会|不过|还敢)|呵呵|呵呵哒|无语|服了|就这|搞笑|有病|弱智|智障|傻逼|滚|闭嘴|拉黑|删了|嫌你|嫌弃|配不上|看不上|幼稚|矫情|作死|省省|别来|少来|敷衍|冷漠|没意思|没趣|装什么|装|PUA|渣男|海王/;
 
+// ============================================================
+// [v15] 时间 + 位置事实块
+//   解决"17点说成8点""下午说成晚上""三更半夜都能约人"等时间/空间幻觉。
+//   时间：Asia/Shanghai，按"小时"粒度生成文本 → 同一小时内 system 前缀稳定，
+//         保住 DeepSeek 前缀缓存（跨小时才 miss 一次，成本可接受）。
+//   位置：从 profiles.bio 规则提取（城市词表 + 正则），命中才注入，绝不编造。
+// ============================================================
+
+// 小时 → 时段显式映射（LLM 直接拿结论，不再自己推断时段）
+function periodOfHour(h: number): string {
+  if (h >= 0 && h <= 4) return '凌晨';
+  if (h >= 5 && h <= 6) return '清晨';
+  if (h >= 7 && h <= 11) return '上午';
+  if (h >= 12 && h <= 13) return '中午';
+  if (h >= 14 && h <= 16) return '下午';
+  if (h >= 17 && h <= 18) return '傍晚';   // 关键：17-18 点是傍晚不是晚上
+  return '晚上';
+}
+
+function formatCurrentTime(): string {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: 'long', day: 'numeric',
+    weekday: 'long', hour: 'numeric', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value || '';
+  const y = get('year');
+  const mo = get('month').replace('月', '');   // "8月" → "8"
+  const d = get('day').replace('日', '');      // "5日" → "5"
+  const wd = get('weekday');                   // "星期三"
+  const h = parseInt(get('hour'), 10);
+  const period = periodOfHour(h);
+  const isWeekend = wd === '星期六' || wd === '星期日';
+  // 严格小时级稳定：同一小时内文本完全相同（保证 DeepSeek 前缀缓存命中），
+  // 不展示分钟——LLM 只需知道"几点多/什么时段"，误差 1 小时内不影响判断
+  return `现在是${y}年${mo}月${d}日 ${wd}（${isWeekend ? '周末' : '工作日'}），${period}${h}点多（北京时间）。`;
+}
+
+// 城市/地区词表（一线/新一线/省会 + 常见地级市 + 省级名；规则提取够用，不追求穷尽）
+const CITY_HINTS = [
+  '北京', '上海', '广州', '深圳', '杭州', '成都', '重庆', '武汉', '西安', '苏州', '南京',
+  '天津', '长沙', '郑州', '东莞', '青岛', '沈阳', '宁波', '昆明', '大连', '厦门', '合肥',
+  '佛山', '福州', '济南', '哈尔滨', '长春', '温州', '石家庄', '南昌', '贵阳', '南宁',
+  '太原', '兰州', '银川', '乌鲁木齐', '呼和浩特', '海口', '三亚', '拉萨', '西宁',
+  '泉州', '常州', '南通', '徐州', '扬州', '绍兴', '嘉兴', '金华', '台州', '惠州',
+  '珠海', '中山', '江门', '汕头', '湛江', '绵阳', '泸州', '宜宾', '南充', '达州', '乐山',
+  '遵义', '六盘水', '大理', '丽江', '桂林', '柳州', '襄阳', '宜昌', '岳阳', '衡阳',
+  '香港', '澳门', '台北', '高雄',
+  '广东', '江苏', '浙江', '四川', '湖北', '湖南', '山东', '河南', '福建', '安徽', '河北',
+  '陕西', '江西', '辽宁', '吉林', '黑龙江', '山西', '云南', '贵州', '广西', '甘肃', '青海',
+  '宁夏', '新疆', '内蒙古', '西藏', '海南',
+];
+
+function extractLocation(bio: string): string {
+  if (!bio) return '';
+  // 优先结构化表达：我在xx / 坐标xx / 住xx / 来自xx / 城市xx 等
+  const m = bio.match(/(?:我在|坐标|住|人在|来自|城市|位于|常驻|base)\s*[:：]?\s*([\u4e00-\u9fa5A-Za-z]{2,12})/i);
+  if (m) {
+    const t = m[1];
+    const hit = CITY_HINTS.find((c) => t.includes(c) || t.startsWith(c));
+    if (hit) return hit;
+    const suf = t.match(/^([\u4e00-\u9fa5]{2,6}[省市自治])/);
+    if (suf) return suf[1];
+  }
+  // 兜底：全文扫城市词表（如 bio 直接写"在北京""深圳工作"）
+  const hit = CITY_HINTS.find((c) => bio.includes(c));
+  return hit || '';
+}
+
 function buildSystemContent(opts: {
   systemPrompt: string;
   userBio: string;
@@ -1099,6 +1172,18 @@ function buildSystemContent(opts: {
     + '对方挑衅、贬低或攻击你时，你必须反击，绝不委屈求全、绝不假装没看见、绝不低头解释。\n'
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
     + (opts.systemPrompt || '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。');
+
+  // [v15] 当前时间（小时级稳定，不破坏前缀缓存）+ 我的位置（从简介提取，命中才注入）
+  //   放在角色定位后、语气态度前：基础事实靠前才有约束力
+  s += `\n\n【当前时间】（必须严格遵守，所有时刻/时段/星期表述以此为准）\n${formatCurrentTime()}\n`
+    + `- 严禁编造或猜错时刻；说"今晚/明天/周末/这么晚/三更半夜"等词必须与这个时间一致；\n`
+    + `- 判断"现在这个点还适不适合约人、打电话、聊深夜话题"以此为准，不要半夜答应见面或深夜约人。`;
+  const myLoc = extractLocation(opts.userBio || '');
+  if (myLoc) {
+    s += `\n\n【我的位置】（涉及见面、约人、距离、异地等表述以此为准）\n我所在城市：${myLoc}。\n`
+      + `- 不知道对方在哪时不得假设对方离我很近；\n`
+      + `- "过来找你/见面/顺路/接送"等邀约，必须同时结合【当前时间】与【我的位置】判断是否现实，不现实就委婉拒绝或改约。`;
+  }
 
   // [v11 迷男OS] 线上语境 + 轻度否定（Neg 轻度化保留：迷男"否定-地位博弈"的线上版）
   // [v14] 升级为【语气与态度】：从"软化、克制"改为"敢调情/敢否定/敢反击"，保留安全边界
