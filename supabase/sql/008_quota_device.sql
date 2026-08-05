@@ -112,7 +112,7 @@ BEGIN
         );
     END IF;
 
-    -- 新设备：同 IP 当日新设备数 ≤5（锁行防并发）
+    -- 新设备：同 IP 当日新设备数 ≤5（只读检查 + 锁行防并发；计数在设备落库后 +1）
     IF p_ip IS NOT NULL AND p_ip <> '' THEN
         INSERT INTO public.ip_usage (ip, day) VALUES (p_ip, v_day)
         ON CONFLICT (ip, day) DO NOTHING;
@@ -120,7 +120,6 @@ BEGIN
         IF v_cnt >= 5 THEN
             RETURN jsonb_build_object('success', false, 'reason', 'ip_new_device_limit', 'message', '使用太频繁，请稍后再试');
         END IF;
-        UPDATE public.ip_usage SET new_devices = new_devices + 1 WHERE ip = p_ip AND day = v_day;
     END IF;
 
     -- 校验来源邀请码（存在且非自己）
@@ -135,6 +134,12 @@ BEGIN
 
     INSERT INTO public.devices (device_id, inviter_code)
     VALUES (p_device_id, NULLIF(v_code, ''));
+
+    -- [v20260805 fix] 设备落库成功后才计数：new_devices 永远 = 实际新注册数，
+    -- 避免"设备行被清理/删除但计数不扣减"导致的幽灵计数 → ip_new_device_limit 误杀真实用户
+    IF p_ip IS NOT NULL AND p_ip <> '' THEN
+        UPDATE public.ip_usage SET new_devices = new_devices + 1 WHERE ip = p_ip AND day = v_day;
+    END IF;
 
     RETURN jsonb_build_object(
         'success', true, 'registered', true,
