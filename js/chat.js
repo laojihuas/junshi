@@ -116,8 +116,6 @@ const Chat = {
         }
         const p = mc.profile || {};
         const facts = Array.isArray(mc.facts) ? mc.facts : [];
-        const userMsgs = Array.isArray(mc.recent_user_messages) ? mc.recent_user_messages : [];
-        const selfMsgs = Array.isArray(mc.recent_self_messages) ? mc.recent_self_messages : [];
 
         const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '普通朋友': '#5F5E5A' };
         const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
@@ -127,9 +125,6 @@ const Chat = {
 
         const sec = (title, dotColor, html) =>
             `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
-        const items = (arr, empty) => arr.length > 0
-            ? `<ul class="memory-items">${arr.slice(0, 8).map(x => `<li>${this._escapeHtml(x)}</li>`).join('')}</ul>`
-            : `<div class="memory-empty">${empty}</div>`;
         const factsHtml = facts.length > 0
             ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无长期事实。对方提到生日/约定/偏好等关键信息时，军师会自动记住。</div>';
@@ -143,11 +138,10 @@ const Chat = {
             ? `<ul class="memory-items">${profileBits.map(x => `<li>${x}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无画像信息</div>';
 
+        // [v20260805b] 去掉"她说过的话/我说过的话"：聊天会话里本来就能看到，不重复展示
         return sec('关系阶段', stageColor, stageTag || '<div class="memory-empty">未知（聊过或手动设置后更新）</div>')
             + sec('长期记忆', '#1D9E75', factsHtml)
-            + sec('她的画像', '#378ADD', profileHtml)
-            + sec('她说过的话（最近）', '#BA7517', items(userMsgs, '暂无'))
-            + sec('我说过的话（最近）', '#888780', items(selfMsgs, '暂无'));
+            + sec('她的画像', '#378ADD', profileHtml);
     },
 
     renderMessages() {
