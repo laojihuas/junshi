@@ -708,6 +708,39 @@ textarea.input {
     vertical-align: middle;
 }
 
+/* [v58] 关系目标 + 阶段推进链 */
+.memory-goal {
+    margin-top: 8px;
+    font-size: 13px;
+    color: #9FE1CB;
+}
+.memory-chain {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 2px;
+}
+.memory-chain .chain-node {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-tertiary);
+}
+.memory-chain .chain-node.done {
+    color: #9FE1CB;
+}
+.memory-chain .chain-node.on {
+    background: #378ADD;
+    color: #fff;
+    font-weight: 500;
+}
+.memory-chain .chain-arrow {
+    font-size: 12px;
+    color: var(--text-tertiary);
+}
+
 /* 聊天消息区域 */
 .chat-messages {
     flex: 1;

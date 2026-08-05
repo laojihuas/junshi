@@ -212,12 +212,13 @@
     </div>
 
     <!-- ============================================================
-         弹窗：设置关系阶段（手动标注，覆盖 AI 判断；头像底色随其变色）
+         弹窗：设置关系阶段 + 关系目标（手动标注，覆盖 AI 判断；头像底色随其变色）
          ============================================================ -->
     <div id="modal-stage" class="modal-overlay">
         <div class="modal-content">
-            <div class="modal-title">设置关系阶段</div>
+            <div class="modal-title">设置关系</div>
             <div class="modal-body">
+                <div class="memory-sec-title" style="margin-top:0"><span class="memory-dot" style="background:#378ADD"></span>关系阶段</div>
                 <div class="stage-options" id="stage-options">
                     <button class="stage-option" data-stage="追求"><span class="stage-dot" style="background:#185FA5"></span>追求</button>
                     <button class="stage-option" data-stage="暧昧"><span class="stage-dot" style="background:#993556"></span>暧昧</button>
@@ -226,7 +227,15 @@
                     <button class="stage-option" data-stage="普通朋友"><span class="stage-dot" style="background:#5F5E5A"></span>普通朋友</button>
                     <button class="stage-option" data-stage="__auto__"><span class="stage-dot" style="background:linear-gradient(135deg,#185FA5,#993556,#A32D2D,#854F0B,#5F5E5A)"></span>恢复 AI 判断</button>
                 </div>
-                <div class="field-hint">手动设置后 AI 不再覆盖；选"恢复 AI 判断"交还自动识别</div>
+                <div class="memory-sec-title"><span class="memory-dot" style="background:#1D9E75"></span>关系目标（军师按此引导推进）</div>
+                <div class="stage-options" id="goal-options">
+                    <button class="stage-option" data-goal="约见面"><span class="stage-dot" style="background:#BA7517"></span>约见面</button>
+                    <button class="stage-option" data-goal="推进恋爱"><span class="stage-dot" style="background:#A32D2D"></span>推进恋爱</button>
+                    <button class="stage-option" data-goal="挽回修复"><span class="stage-dot" style="background:#854F0B"></span>挽回修复</button>
+                    <button class="stage-option" data-goal="保持暧昧"><span class="stage-dot" style="background:#993556"></span>保持暧昧</button>
+                    <button class="stage-option" data-goal="__none__"><span class="stage-dot" style="background:#5F5E5A"></span>不设目标</button>
+                </div>
+                <div class="field-hint">手动设阶段后 AI 不再覆盖；目标决定军师每轮往哪使劲</div>
             </div>
             <div class="modal-footer">
                 <button id="stage-cancel" class="btn btn-outline">取消</button>

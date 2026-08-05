@@ -57,6 +57,14 @@
 //     挑 top4（FACTS_INJECT_MAX），不全量塞——像人按话题想起相关记忆
 //   - _debug 新增 facts_len
 //
+// [v58 M3 目标引导]（2026-08-05，战略层：目标→路线→主动推进）
+//   - memory_card.goal（用户前端设置）：约见面/推进恋爱/挽回修复/保持暧昧
+//   - GOAL_HINTS 目标→行动映射；buildSystemContent 注入【关系目标与进度】
+//     （当前阶段+本轮动作），目标达成(按 STAGE_ORDER 达到目标 stage)则停止注入
+//   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 追求→暧昧→恋爱
+//     最多升一级；冷淡/回避可降级；拿不准保持
+//   - 战略层(目标引导) > 战术层(套路) > 弹药层(锚点/幽默/IOI) 三层叠加
+//
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
 //     > 引擎层(pulse/balance/emotion_tone 实时输入)
@@ -601,6 +609,8 @@ Deno.serve(async (req) => {
         })(),
         thinking_mode: effectiveThinkingMode,
         memory_stage: memoryCard?.profile?.stage || null,
+        // [v58] 关系目标（验证目标引导注入）
+        goal: memoryCard?.goal || null,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
@@ -858,6 +868,9 @@ type MemoryCard = {
   // [v57] 长期事实清单：值得跨天记住的硬事实（约定/日期/偏好/雷点/家庭/工作）
   //   [{text(≤40字), at(首次记录), last_mention(最近提及)}]，上限 FACTS_MAX，按 last_mention 新旧排序
   facts?: { text: string; at: string; last_mention: string }[];
+  // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / ''(未设置)
+  //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
+  goal?: string;
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -869,6 +882,27 @@ type MemoryCard = {
 // [v57] facts 容量与注入上限
 const FACTS_MAX = 20;          // 长期记忆上限（超了淘汰最久没提的）
 const FACTS_INJECT_MAX = 4;    // 每轮按相关度最多注入几条
+
+// [v58 M3 目标引导] 目标 → 行动路线（战略层）
+//   目标由用户在前端设置（memory_card.goal）；这里决定每轮注入的"本轮动作"
+//   正常推进顺序：未知/普通朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
+const GOAL_HINTS: Record<string, { hint: string }> = {
+  '约见面': {
+    hint: '本轮向"见面"推进：先用具体由头做模糊邀约（如"那家店感觉你会喜欢，改天带你去"）→ 她接住就敲定具体时间地点（结合当前时间/位置，不现实就改约）→ 她推脱就洒脱留钩子（"那这顿先记我账上"）绝不纠缠。',
+  },
+  '推进恋爱': {
+    hint: '本轮向"恋爱"推进：先确认舒适感够不够（聊三观/家庭/日常等深度话题的频率）→ 够就试探暧昧窗口（如"我们俩这状态算啥"的半玩笑试探）→ 不够就补舒适感话题+推进见面。她给兴趣信号（主动追问/发照片/吃醋）时，必须顺势推进一档。',
+  },
+  '挽回修复': {
+    hint: '挽回路径：本轮先稳情绪、重建信任——不追问不施压、稳定低压力的输出、她说啥先接住情绪；对方明显松动后再逐步重新制造吸引，此路径禁用调侃与反击。',
+  },
+  '保持暧昧': {
+    hint: '本轮维持暧昧张力：推拉+留白+神秘感，不急着捅破窗户纸；守住暧昧窗口，适度抛模糊邀约试探但不逼问。',
+  },
+};
+
+// [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
+const STAGE_ORDER = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
   try {
@@ -1030,7 +1064,9 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。只输出 JSON 对象，不要任何其他文字。`;
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+    + `[v58 阶段推进] stage 判定注意：若最近对话出现密集兴趣信号（她主动追问、发照片、秒回、调侃你、话明显变长、约你），stage 可按正常顺序"追求→暧昧→恋爱"升一级（最多升一级，不越级）；\n`
+    + `但若她明显冷淡/回避/争吵，stage 可降级或改为"普通朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
@@ -1390,6 +1426,26 @@ function buildSystemContent(opts: {
       s += `\n\n【我记得这些】(长期记忆，按当前话题想起的)\n`
         + scoredFacts.map((x) => `- ${x.f.text}`).join('\n')
         + `\n- 结合它们自然回应：对方提到相关的事时，要自然带出"我记得"的感觉，别生硬背诵、别每条都提。`;
+    }
+  }
+
+  // [v58] 关系目标与进度（战略层）：用户在前端设置 goal 后才注入；目标达成则停
+  //   正常顺序 未知→普通→追求→暧昧→恋爱；挽回是特殊路径
+  const goal = opts.memoryCard?.goal || '';
+  const goalHint = GOAL_HINTS[goal];
+  if (goalHint) {
+    const curStage = opts.memoryCard?.profile?.stage || '';
+    const curIdx = STAGE_ORDER.indexOf(curStage);
+    const goalTarget = goal === '挽回修复' || goal === '推进恋爱'
+      ? '恋爱'
+      : goal === '约见面' ? '' : '暧昧';
+    const goalIdx = goalTarget ? STAGE_ORDER.indexOf(goalTarget) : -1;
+    const achieved = goalIdx > -1 && curIdx >= goalIdx;
+    if (!achieved) {
+      s += `\n\n【关系目标与进度】(战略方向，严格遵守)\n`
+        + `目标：${goal}\n`
+        + `当前阶段：${curStage || '未知'}\n`
+        + `本轮动作：${goalHint.hint}`;
     }
   }
 

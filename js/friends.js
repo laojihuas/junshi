@@ -231,10 +231,11 @@ const Friends = {
         }
     },
 
-    // [v20260805] 设置关系阶段弹层（手动标注，覆盖 AI 判断）
+    // [v20260805] 设置关系阶段弹层（手动标注，覆盖 AI 判断）+ [v58] 关系目标
     showStageModal(session) {
         const overlay = document.getElementById('modal-stage');
         const opts = document.getElementById('stage-options');
+        const goalOpts = document.getElementById('goal-options');
         const cancelBtn = document.getElementById('stage-cancel');
 
         // 当前 stage（含手动标记判断）
@@ -243,11 +244,21 @@ const Friends = {
         const manual = this._isManualStage(session);
         if (manual && current === '未知') current = ''; // 手动未知态不参与高亮
 
-        // 高亮当前选项
+        // 高亮当前 stage
         opts.querySelectorAll('.stage-option').forEach(btn => {
             const val = btn.dataset.stage;
             btn.classList.toggle('selected', val === current);
         });
+
+        // [v58] 高亮当前目标
+        const mc = this._parseMemoryCard(session) || {};
+        const curGoal = mc.goal || '';
+        if (goalOpts) {
+            goalOpts.querySelectorAll('.stage-option').forEach(btn => {
+                const val = btn.dataset.goal;
+                btn.classList.toggle('selected', val === curGoal);
+            });
+        }
 
         overlay.classList.add('active');
 
@@ -255,7 +266,7 @@ const Friends = {
         cancelBtn.onclick = close;
         overlay.onclick = (e) => { if (e.target === overlay) close(); };
 
-        // 选项点击 → 写回 memory_card
+        // 阶段选项点击 → 写回 memory_card
         opts.querySelectorAll('.stage-option').forEach(btn => {
             btn.onclick = async () => {
                 close();
@@ -271,6 +282,40 @@ const Friends = {
                 }
             };
         });
+
+        // [v58] 目标选项点击 → 写回 memory_card.goal
+        if (goalOpts) {
+            goalOpts.querySelectorAll('.stage-option').forEach(btn => {
+                btn.onclick = async () => {
+                    close();
+                    const val = btn.dataset.goal;
+                    Utils.showLoading();
+                    const ok = await this._setGoal(session, val);
+                    Utils.hideLoading();
+                    if (ok) {
+                        Utils.toast(val === '__none__' ? '已取消目标' : '目标已设为「' + val + '」');
+                        await this.load();
+                    } else {
+                        Utils.toast('保存失败，请重试');
+                    }
+                };
+            });
+        }
+    },
+
+    // [v58] 写回关系目标：memory_card.goal（__none__ = 清除）
+    async _setGoal(session, goal) {
+        const mc = this._parseMemoryCard(session) || { profile: {} };
+        if (!mc.profile) mc.profile = {};
+        if (goal === '__none__') {
+            delete mc.goal;
+        } else {
+            mc.goal = goal;
+        }
+        const updated = await DB.updateSession(session.id, {
+            memory_card: JSON.stringify(mc)
+        });
+        return !!updated;
     },
 
     // [v20260805] 手动标注判定：memory_card.profile.stage_source === 'manual'

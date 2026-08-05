@@ -32,6 +32,15 @@ const Chat = {
 
         // [v20260805] 记忆：缓存 memory_card（记忆按钮弹层用；打开时已有，零额外请求）
         this.memoryCard = session.memory_card || null;
+        // [v58] 阶段升级提示基线：记录打开时的 stage
+        try {
+            const mc = this.memoryCard
+                ? (typeof this.memoryCard === 'string' ? JSON.parse(this.memoryCard) : this.memoryCard)
+                : null;
+            this._prevStage = (mc && mc.profile && mc.profile.stage) || '';
+        } catch (e) {
+            this._prevStage = '';
+        }
         // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
         this._updateStrategyBadge(session.memory_card || null);
 
@@ -116,12 +125,26 @@ const Chat = {
         }
         const p = mc.profile || {};
         const facts = Array.isArray(mc.facts) ? mc.facts : [];
+        const goal = mc.goal || '';
 
         const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '普通朋友': '#5F5E5A' };
         const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
         const stageTag = (p.stage && p.stage !== '未知')
             ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`
             : '';
+
+        // [v58] 目标 + 阶段推进链（未知→普通→追求→暧昧→恋爱）
+        const goalHtml = goal ? `<div class="memory-goal">目标：${this._escapeHtml(goal)}</div>` : '';
+        const STAGE_CHAIN = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
+        let chainHtml = '';
+        if (p.stage && STAGE_CHAIN.includes(p.stage)) {
+            const idx = STAGE_CHAIN.indexOf(p.stage);
+            chainHtml = '<div class="memory-chain">' + STAGE_CHAIN.map((st, i) =>
+                `<span class="chain-node${i === idx ? ' on' : ''}${i < idx ? ' done' : ''}">${st}</span>${i < STAGE_CHAIN.length - 1 ? '<span class="chain-arrow">→</span>' : ''}`
+            ).join('') + '</div>';
+        }
+        const stageSec = sec('关系阶段', stageColor,
+            (stageTag || '<div class="memory-empty">未知（聊过或手动设置后更新）</div>') + goalHtml + chainHtml);
 
         const sec = (title, dotColor, html) =>
             `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
@@ -139,7 +162,7 @@ const Chat = {
             : '<div class="memory-empty">暂无画像信息</div>';
 
         // [v20260805b] 去掉"她说过的话/我说过的话"：聊天会话里本来就能看到，不重复展示
-        return sec('关系阶段', stageColor, stageTag || '<div class="memory-empty">未知（聊过或手动设置后更新）</div>')
+        return stageSec
             + sec('长期记忆', '#1D9E75', factsHtml)
             + sec('她的画像', '#378ADD', profileHtml);
     },
@@ -470,6 +493,17 @@ const Chat = {
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
                 this._updateStrategyBadge(this.lastDebug);
+                // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/未知不提示）
+                const ns = this.lastDebug.memory_stage;
+                if (ns && ns !== '未知' && this._prevStage && ns !== this._prevStage) {
+                    const ORDER = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
+                    const a = ORDER.indexOf(this._prevStage);
+                    const b = ORDER.indexOf(ns);
+                    if (a > -1 && b > -1 && b > a) {
+                        Utils.toast('军师判断：关系进入「' + ns + '」阶段 🎉');
+                    }
+                }
+                this._prevStage = ns || this._prevStage;
             }
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
