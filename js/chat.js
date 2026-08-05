@@ -207,10 +207,10 @@ const Chat = {
                     <div class="message assistant">
                         <div class="message-content">${this._escapeHtml(m.content)}</div>
                         <div class="message-footer">
+                            <span class="message-time">${time}</span>
                             <button class="message-copy-btn" data-content="${this._escapeAttr(m.content)}">
                                 📋 复制
                             </button>
-                            <span class="message-time">${time}</span>
                         </div>
                     </div>
                 `;
