@@ -349,7 +349,7 @@ const Friends = {
     },
 
     // [v20260805] A方案：关系阶段 → 头像底色（追求蓝/暧昧粉/恋爱红/挽回琥珀/普通灰）
-    // 未知/无画像 → null（保持原 avatar_color，不显示关系色）
+    // 未知/无画像 → 一律灰色（与普通朋友同色；title 显示"未知"）
     _STAGE_COLORS: {
         '追求': '#185FA5',
         '暧昧': '#993556',
@@ -357,6 +357,7 @@ const Friends = {
         '挽回': '#854F0B',
         '普通朋友': '#5F5E5A',
     },
+    _DEFAULT_GRAY: '#5F5E5A',
 
     _stageInfo(s) {
         let stage = '';
@@ -369,8 +370,9 @@ const Friends = {
         } catch (e) {
             stage = '';
         }
-        if (!stage || stage === '未知') return null;
         const color = this._STAGE_COLORS[stage];
-        return color ? { stage, color } : null;
+        if (color) return { stage, color };
+        // [v20260805b] 没聊天/未知：一律灰色，不显示随机底色
+        return { stage: stage || '未知', color: this._DEFAULT_GRAY };
     }
 };
