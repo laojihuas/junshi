@@ -8,13 +8,16 @@
 
 ## 部署架构
 
-- **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl）
+- **前端**：静态 SPA（帽子云），配置在 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl / device.gateUrl）
 - **后端**：Supabase（ref: `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 50）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
-  - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes` / `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`
+  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 56）、`device-gate`（**v20260805 设备注册/状态**）、`activate-code`（设备绑定版 v13）、`prompt-get`、`prompt-update`、`invite-code`（设备版 v8）、`invite-redeem`（设备版 v7）
+  - 数据表：`profiles` / `chat_sessions`（note、**memory_card** text）/ `chat_messages` / `activation_codes`（+used_device_id）/ `app_config`（单行 id=1，统一 system_prompt + llm_params JSON）/ `invite_relations`（旧版遗留，未用）/ **`devices`（设备业务身份）/ `daily_quota`（device+day）/ `ip_usage`（ip+day，含 new_devices）**
   - **kb_blocks**（B 方案，15,107 块）：media_id+block_idx PK，content≤700 字，bigrams GIN 索引，folder_id/title 索引，RLS service_role 专用
-  - SQL 脚本：`supabase/sql/001~007`（app_config / bio / note / invite / memory_card / **006 kb_docs 旧版** / **007 kb_blocks**）
-  - 数据库函数：`redeem_invite`（SECURITY DEFINER，写邀请关系+邀请人 usage+50，防自邀/重复/上限 20 人）、`kb_blocks_recall`（块级召回 RPC：bigrams && 粗筛 → 块内词频加权 → 同文档去重）
+  - SQL 脚本：`supabase/sql/001~008`（app_config / bio / note / invite / memory_card / **006 kb_docs 旧版** / **007 kb_blocks** / **008 配额设备体系**）
+  - 数据库函数：`redeem_invite`（旧版遗留）、`kb_blocks_recall`（块级召回 RPC）、**配额体系函数（008，SECURITY DEFINER，仅 service_role 调）**：`register_device(device_id,ip,invite_code,user_id)`（IP 新设备≤5/天）、`check_and_consume_quota(device_id,ip)`（原子扣次，免费档/VIP500/IP150 分层）、`activate_device(device_id,code)`（绑指纹+30天，续期从 max(now,到期)）、`redeem_invite_device(invitee_device_id,code)`（+50封顶300）、`get_quota_status(device_id)`、`ensure_profile(user_id)`（匿名用户补 profiles 行保外键）
+- **认证（v20260805 剔除邮箱登录）**：Supabase **匿名登录**（signInAnonymously，Dashboard 已开启 external_anonymous_users_enabled）+ **device_id 指纹=业务身份**。前端 `js/auth.js` 重写：匿名登录→device-gate register（幂等）→Auth.device{invite_bonus,is_vip,vip_days_left}。URL ?invite=CODE 暂存 Auth.pendingInvite，**首次新建好友成功后 redeem 才生效**。chat_sessions.user_id 外键靠 ensure_profile 兜底
+- **配额规则**：①免费档：<3天50/天、3-7天30/天、7+天15/天，每日清零（按 Asia/Shanghai 自然日）②邀请：+50/人封顶300，余额不清零（先扣免费档再扣 bonus）③激活码 68元/月：500次/天×30天，到期自动回落；**VIP 豁免 IP 防刷**；IP 150次/天仅无 VIP
+- **受限分层文案（前端 chat.js _handleQuotaBlock）**：quota_exhausted→弹付费墙；vip_daily_limit→"服务过载请明天再试"；ip_limit/ip_new_device_limit→"使用太频繁"；**顶部导航（friends.js render）只显示"邀请赠送X次"和"VIP 剩余X天"，免费用户不显示**；免费档位/IP上限/VIP500 均不告知用户
 - **知识库（B 方案已完全本地化）**：**IMA 已彻底移除**（secrets 已删，代码零引用）。本地切块源在 `C:\迷男\{恋爱话术,恋爱教学,聊天实战}\`，灌库脚本 `supabase/scripts/build_kb_blocks.mjs`（SBP_PAT 环境变量）。检索 = kb_blocks_recall RPC，命中块原文直入 LLM（summarizeRef 已下线）
 
 ## 记忆体系（三层，隔离边界）
