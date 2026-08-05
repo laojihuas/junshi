@@ -860,6 +860,7 @@ textarea.input {
 .message.assistant .message-footer {
     display: flex;
     align-items: center;
+    justify-content: center; /* [v20260805d] 复制按钮+时间整体居中(消息下方屏幕中) */
     gap: 8px;
     margin-top: 4px;
 }
