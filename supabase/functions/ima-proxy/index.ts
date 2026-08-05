@@ -946,7 +946,16 @@ async function updateMemoryCard(ctx: {
   }
   if (needProfile && ctx.llmKey) {
     const profile = await extractProfile(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
-    if (profile) card.profile = profile;
+    if (profile) {
+      // [v20260805] 手动标注优先：用户在前端手动设置过 stage（stage_source=manual）时，
+      //   AI 推断不覆盖手动值；恢复 AI 判断（前端清除 manual 标记）后重新接管
+      const prev = card.profile || {};
+      if (prev.stage_source === 'manual') {
+        profile.stage = prev.stage;
+        profile.stage_source = 'manual';
+      }
+      card.profile = profile;
+    }
     card.updated_at = new Date().toISOString();
   }
 

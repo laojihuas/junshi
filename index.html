@@ -201,6 +201,11 @@
                 <span class="sheet-icon">✎</span>
                 <span>改名 / 备注</span>
             </button>
+            <button class="sheet-item" data-action="stage">
+                <span class="sheet-icon">🎯</span>
+                <span>设置关系</span>
+                <span class="sheet-extra" id="sheet-stage-current"></span>
+            </button>
             <button class="sheet-item" data-action="delete">
                 <span class="sheet-icon">🗑</span>
                 <span>删除</span>
@@ -209,6 +214,29 @@
                 <span class="sheet-icon">×</span>
                 <span>取消</span>
             </button>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：设置关系阶段（手动标注，覆盖 AI 判断；头像底色随其变色）
+         ============================================================ -->
+    <div id="modal-stage" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">设置关系阶段</div>
+            <div class="modal-body">
+                <div class="stage-options" id="stage-options">
+                    <button class="stage-option" data-stage="追求"><span class="stage-dot" style="background:#185FA5"></span>追求</button>
+                    <button class="stage-option" data-stage="暧昧"><span class="stage-dot" style="background:#993556"></span>暧昧</button>
+                    <button class="stage-option" data-stage="恋爱"><span class="stage-dot" style="background:#A32D2D"></span>恋爱</button>
+                    <button class="stage-option" data-stage="挽回"><span class="stage-dot" style="background:#854F0B"></span>挽回</button>
+                    <button class="stage-option" data-stage="普通朋友"><span class="stage-dot" style="background:#5F5E5A"></span>普通朋友</button>
+                    <button class="stage-option" data-stage="__auto__"><span class="stage-dot" style="background:linear-gradient(135deg,#185FA5,#993556,#A32D2D,#854F0B,#5F5E5A)"></span>恢复 AI 判断</button>
+                </div>
+                <div class="field-hint">手动设置后 AI 不再覆盖；选"恢复 AI 判断"交还自动识别</div>
+            </div>
+            <div class="modal-footer">
+                <button id="stage-cancel" class="btn btn-outline">取消</button>
+            </div>
         </div>
     </div>
 

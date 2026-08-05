@@ -1001,6 +1001,46 @@ textarea.input {
     text-align: center;
 }
 
+/* [v20260805] Action Sheet 右侧附加信息（当前关系阶段） */
+.action-sheet .sheet-item .sheet-extra {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text-tertiary);
+}
+
+/* [v20260805] 关系阶段选择弹层 */
+.stage-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+.stage-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-tertiary);
+    border-radius: 10px;
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    font-size: 15px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+.stage-option:active {
+    background: rgba(255, 255, 255, 0.06);
+}
+.stage-option.selected {
+    border-color: var(--color-info, #378ADD);
+    background: rgba(55, 138, 221, 0.12);
+}
+.stage-option .stage-dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
 .action-sheet .sheet-item.danger {
     color: var(--danger);
 }

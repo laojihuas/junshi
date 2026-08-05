@@ -170,6 +170,15 @@ const Friends = {
         const overlay = document.getElementById('action-sheet');
         const nameEl = document.getElementById('sheet-friend-name');
         nameEl.textContent = session.friend_name + (session.note ? ' · ' + session.note : '');
+        // [v20260805] 显示当前关系阶段
+        const st = this._stageInfo(session);
+        const stageEl = document.getElementById('sheet-stage-current');
+        if (st) {
+            stageEl.textContent = st.stage;
+            stageEl.style.color = st.color;
+        } else {
+            stageEl.textContent = '';
+        }
         overlay.classList.add('active');
     },
 
@@ -189,6 +198,10 @@ const Friends = {
                 this._hideActionSheet();
                 setTimeout(() => this.showEditModal(session), 200);
                 break;
+            case 'stage':
+                this._hideActionSheet();
+                setTimeout(() => this.showStageModal(session), 200);
+                break;
             case 'delete':
                 this._hideActionSheet();
                 setTimeout(() => this._confirmDelete(session.id), 200);
@@ -197,6 +210,86 @@ const Friends = {
             default:
                 this._hideActionSheet();
         }
+    },
+
+    // [v20260805] 设置关系阶段弹层（手动标注，覆盖 AI 判断）
+    showStageModal(session) {
+        const overlay = document.getElementById('modal-stage');
+        const opts = document.getElementById('stage-options');
+        const cancelBtn = document.getElementById('stage-cancel');
+
+        // 当前 stage（含手动标记判断）
+        const st = this._stageInfo(session);
+        let current = st ? st.stage : '';
+        const manual = this._isManualStage(session);
+        if (manual && current === '未知') current = ''; // 手动未知态不参与高亮
+
+        // 高亮当前选项
+        opts.querySelectorAll('.stage-option').forEach(btn => {
+            const val = btn.dataset.stage;
+            btn.classList.toggle('selected', val === current);
+        });
+
+        overlay.classList.add('active');
+
+        const close = () => overlay.classList.remove('active');
+        cancelBtn.onclick = close;
+        overlay.onclick = (e) => { if (e.target === overlay) close(); };
+
+        // 选项点击 → 写回 memory_card
+        opts.querySelectorAll('.stage-option').forEach(btn => {
+            btn.onclick = async () => {
+                close();
+                const val = btn.dataset.stage;
+                Utils.showLoading();
+                const ok = await this._setStage(session, val);
+                Utils.hideLoading();
+                if (ok) {
+                    Utils.toast(val === '__auto__' ? '已恢复 AI 判断' : '关系已更新');
+                    await this.load();
+                } else {
+                    Utils.toast('保存失败，请重试');
+                }
+            };
+        });
+    },
+
+    // [v20260805] 手动标注判定：memory_card.profile.stage_source === 'manual'
+    _isManualStage(session) {
+        try {
+            const mc = this._parseMemoryCard(session);
+            return !!(mc && mc.profile && mc.profile.stage_source === 'manual');
+        } catch (e) {
+            return false;
+        }
+    },
+
+    // [v20260805] 解析 memory_card（text 列 JSON 字符串，兼容已 parse 对象）
+    _parseMemoryCard(session) {
+        if (!session || !session.memory_card) return null;
+        return typeof session.memory_card === 'string'
+            ? JSON.parse(session.memory_card)
+            : session.memory_card;
+    },
+
+    // [v20260805] 写回关系阶段：合并进 memory_card.profile
+    //   __auto__ = 恢复 AI 判断（清除 manual 标记）；其他 = 手动标注（stage_source: manual）
+    async _setStage(session, stage) {
+        const mc = this._parseMemoryCard(session) || { profile: {} };
+        if (!mc.profile) mc.profile = {};
+        if (stage === '__auto__') {
+            if (mc.profile.stage_source === 'manual') {
+                delete mc.profile.stage_source;
+                // 手动值留给 AI 重新推断（保留现有 stage 但去掉手动锁）
+            }
+        } else {
+            mc.profile.stage = stage;
+            mc.profile.stage_source = 'manual';
+        }
+        const updated = await DB.updateSession(session.id, {
+            memory_card: JSON.stringify(mc)
+        });
+        return !!updated;
     },
 
     // [长按管理] 编辑好友（改名 + 备注）
