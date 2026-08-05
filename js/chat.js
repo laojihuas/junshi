@@ -149,22 +149,18 @@ const Chat = {
         const sec = (title, dotColor, html) =>
             `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
 
-        // [v58] 目标 + 阶段推进链（v20260805c 摘除关系词：色点链代替文字，hover 看提示）
+        // [v58] 目标 + 阶段推进链（文字版，已过.done 小绿、进行中.on 加亮）
         const goalHtml = goal ? `<div class="memory-goal">目标：${this._escapeHtml(goal)}</div>` : '';
         const STAGE_CHAIN = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
         let chainHtml = '';
         if (p.stage && STAGE_CHAIN.includes(p.stage)) {
             const idx = STAGE_CHAIN.indexOf(p.stage);
-            chainHtml = '<div class="memory-chain">' + STAGE_CHAIN.map((st, i) => {
-                const isOn = i === idx;
-                const isDone = i < idx;
-                const dotColor = isOn ? stageColor : (isDone ? '#9FE1CB' : 'rgba(255,255,255,0.2)');
-                return `<span class="chain-dot${isOn ? ' on' : ''}" style="background:${dotColor}" title="${this._escapeHtml(st)}"></span>`
-                    + (i < STAGE_CHAIN.length - 1 ? '<span class="chain-arrow">→</span>' : '');
-            }).join('') + '</div>';
+            chainHtml = '<div class="memory-chain">' + STAGE_CHAIN.map((st, i) =>
+                `<span class="chain-node${i === idx ? ' on' : ''}${i < idx ? ' done' : ''}">${st}</span>${i < STAGE_CHAIN.length - 1 ? '<span class="chain-arrow">→</span>' : ''}`
+            ).join('') + '</div>';
         }
-        // 摘除 stage 文字标签（隐私）：关系阶段区只显示色点推进链，不显示"普通朋友"等词
-        const stageSec = sec('关系阶段', stageColor, chainHtml || '<div class="memory-empty">暂无</div>');
+        // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
+        const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
         const factsHtml = facts.length > 0
             ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`

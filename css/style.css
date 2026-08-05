@@ -708,7 +708,7 @@ textarea.input {
     vertical-align: middle;
 }
 
-/* [v58] 关系目标 + 阶段推进链（v20260805c 摘除关系词：仅色点链，hover 提示） */
+/* [v58] 关系目标 + 阶段推进链（文字版：已过.done 小绿、进行中.on 加亮） */
 .memory-goal {
     margin-top: 8px;
     font-size: 13px;
@@ -719,22 +719,26 @@ textarea.input {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 2px;
 }
-.memory-chain .chain-dot {
-    display: inline-block;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.2);
+.memory-chain .chain-node {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-tertiary);
 }
-.memory-chain .chain-dot.on {
-    box-shadow: 0 0 0 3px rgba(55, 138, 221, 0.25);
+.memory-chain .chain-node.done {
+    color: #9FE1CB;
+}
+.memory-chain .chain-node.on {
+    background: #378ADD;
+    color: #fff;
+    font-weight: 500;
 }
 .memory-chain .chain-arrow {
     font-size: 12px;
     color: var(--text-tertiary);
-    line-height: 1;
 }
 
 /* 聊天消息区域 */
