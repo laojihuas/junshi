@@ -305,8 +305,13 @@ const Chat = {
             return false;
         }
         if (!Auth.device || !Auth.device.device_id) {
-            // 设备未注册（异常兜底）：重新走注册流程
-            await Auth._registerDevice();
+            // 设备未注册（异常兜底）：重新走注册流程；注册失败必须拦截，
+            // 否则拿"服务端不存在的 device_id"调用 ima-proxy 会一直 device_not_found
+            const ok = await Auth._registerDevice();
+            if (!ok) {
+                Utils.toast('设备注册失败，请稍后再试');
+                return false;
+            }
         }
         return true;
     },
@@ -315,7 +320,7 @@ const Chat = {
     //   quota_exhausted  → 免费档用完 → 弹付费墙
     //   vip_daily_limit  → VIP 当日满 500 → 服务过载
     //   ip_limit / ip_new_device_limit → IP 防刷 → 使用太频繁
-    _handleQuotaBlock(err) {
+    async _handleQuotaBlock(err) {
         const reason = err && err.error;
         const message = (err && err.message) || '';
         if (reason === 'quota_exhausted') {
@@ -325,8 +330,13 @@ const Chat = {
         } else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') {
             Utils.toast('使用太频繁，请稍后再试');
         } else if (reason === 'device_not_found') {
+            // 服务端查不到该设备：尝试重新注册（幂等）；
+            // 注册成功则提示重试；失败（如同 IP 新设备防刷）给明确提示，不再无限静默重试
             Utils.toast('设备未注册，正在重试');
-            Auth._registerDevice().catch(() => {});
+            const ok = await Auth._registerDevice().catch(() => false);
+            if (!ok) {
+                Utils.toast('设备注册失败，请稍后再试');
+            }
         } else {
             Utils.toast(message || '网络错误，请稍后重试');
         }

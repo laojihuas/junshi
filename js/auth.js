@@ -40,9 +40,21 @@ const Auth = {
     },
 
     // 设备注册（已存在则返回状态；新设备受"同 IP 每日新设备 ≤5"防刷）
+    // [v20260805 修复] 返回 boolean 表示注册结果；任何失败路径都把 this.device 置 null，
+    // 绝不让"服务端不存在的 device_id"被当作有效设备继续调用（否则 ima-proxy 每次
+    // 都返回 device_not_found → 前端无限"设备未注册，正在重试"死循环）。
     async _registerDevice() {
+        let deviceId;
+        try {
+            deviceId = await this._getDeviceId();
+        } catch (e) {
+            console.warn('[军师] 设备指纹获取失败:', e);
+            this.device = null;
+            return false;
+        }
+
         this.device = {
-            device_id: await this._getDeviceId(),
+            device_id: deviceId,
             invite_bonus: 0,
             is_vip: false,
             vip_days_left: 0,
@@ -52,7 +64,11 @@ const Auth = {
         };
 
         const gateUrl = window.APP_CONFIG?.device?.gateUrl;
-        if (!gateUrl) return;
+        if (!gateUrl) {
+            // 未配置网关：无法确认注册状态 → 视为未注册，由调用方拦截
+            this.device = null;
+            return false;
+        }
 
         const invite = this._inviteFromUrl();
         try {
@@ -60,26 +76,38 @@ const Auth = {
             const resp = await fetch(gateUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': token ? 'Bearer ' + token : '' },
-                body: JSON.stringify({ action: 'register', device_id: this.device.device_id, invite_code: invite })
+                body: JSON.stringify({ action: 'register', device_id: deviceId, invite_code: invite })
             });
-            if (!resp.ok) return;
-            const r = await resp.json();
-            if (r && r.success) {
-                this.device.invite_bonus = r.invite_bonus || 0;
-                this.device.is_vip = !!r.is_vip;
-                this.device.vip_expires_at = r.vip_expires_at || null;
-                this.device.free_daily = r.free_daily || 50;
-                this.device.invite_redeemed = !!r.invite_redeemed;
-                // 带邀请码且未绑定 → 记待兑现（首次新建好友成功后调用 redeem）
-                if (invite && !r.invite_redeemed) {
-                    this.pendingInvite = invite;
-                }
-                if (r.vip_expires_at) {
-                    this.device.vip_days_left = Math.max(1, Math.ceil((new Date(r.vip_expires_at) - Date.now()) / 86400000));
-                }
+            if (!resp.ok) {
+                console.warn('[军师] 设备注册 HTTP 失败:', resp.status);
+                this.device = null;
+                return false;
             }
+            const r = await resp.json();
+            if (!r || r.success !== true) {
+                // 服务端拒绝注册（如 ip_new_device_limit 同 IP 每日新设备超限 / 未登录）
+                console.warn('[军师] 设备注册被拒:', JSON.stringify(r || {}).slice(0, 200));
+                this.device = null;
+                return false;
+            }
+            // 注册成功 / 已存在 → 更新状态
+            this.device.invite_bonus = r.invite_bonus || 0;
+            this.device.is_vip = !!r.is_vip;
+            this.device.vip_expires_at = r.vip_expires_at || null;
+            this.device.free_daily = r.free_daily || 50;
+            this.device.invite_redeemed = !!r.invite_redeemed;
+            // 带邀请码且未绑定 → 记待兑现（首次新建好友成功后调用 redeem）
+            if (invite && !r.invite_redeemed) {
+                this.pendingInvite = invite;
+            }
+            if (r.vip_expires_at) {
+                this.device.vip_days_left = Math.max(1, Math.ceil((new Date(r.vip_expires_at) - Date.now()) / 86400000));
+            }
+            return true;
         } catch (e) {
             console.warn('[军师] 设备注册失败:', e);
+            this.device = null;
+            return false;
         }
     },
 
@@ -129,8 +157,25 @@ const Auth = {
         }
     },
 
-    // ---- 设备指纹（FingerprintJS，失败降级备用指纹）----
+    // ---- 设备指纹（FingerprintJS，失败降级备用指纹；首次生成后持久化固定复用）----
+    // [v20260805 修复] device_id 必须稳定：FingerprintJS 走 jsdelivr CDN（国内时好时坏），
+    // 加载状态变化会在 visitorId 与备用指纹间横跳 → 每次打开都像"新设备" → 撞上
+    // "同 IP 每日新设备 ≤5"防刷 → 注册被拒 → check_and_consume_quota 返回 device_not_found。
+    // 因此首次生成后写入 localStorage 固定复用（用户清缓存才会重新生成）。
     async _getDeviceId() {
+        const KEY = 'junshi_device_id';
+        try {
+            const cached = localStorage.getItem(KEY);
+            if (cached && /^[A-Za-z0-9_-]{8,64}$/.test(cached)) return cached;
+        } catch (e) { /* localStorage 不可用则忽略 */ }
+        const id = await this._generateDeviceId();
+        try {
+            localStorage.setItem(KEY, id);
+        } catch (e) { /* 忽略 */ }
+        return id;
+    },
+
+    async _generateDeviceId() {
         try {
             if (typeof FingerprintJS === 'undefined' && !this._fpLoading) {
                 this._fpLoading = true;
