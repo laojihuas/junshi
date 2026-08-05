@@ -577,6 +577,8 @@ Deno.serve(async (req) => {
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
+        // [v20260805] 套路总轮数上限（前端策略徽标显示进度 x/y 用；零成本，随 _debug 返回）
+        strategy_max_rounds: memoryCard?.strategy?.max_rounds ?? null,
         strategy_clear: strategyClear,
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,

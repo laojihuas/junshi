@@ -30,6 +30,9 @@ const Chat = {
         this.currentFriendName = session.friend_name;
         document.getElementById('chat-title').textContent = session.friend_name;
 
+        // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
+        this._updateStrategyBadge(session.memory_card || null);
+
         // [多窗口会话] 记录当前窗口正在对话的好友，
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
         WindowSession.setActiveFriend(sessionId);
@@ -377,11 +380,63 @@ const Chat = {
             }
 
             const data = await response.json();
+            // [v20260805] 保存 _debug 供策略徽标渲染（后端零成本白送字段，非 LLM 内容）
+            this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
+            if (this.lastDebug) {
+                this._updateStrategyBadge(this.lastDebug);
+            }
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
             // [v20260802] API 调用失败/未接入 AI：直接回复"掉线了"，不再返回模拟回复
             return '掉线了';
+        }
+    },
+
+    // [v20260805] 策略徽标：好友名下方显示当前执行套路/关系阶段（仅用户可见，纯前端 UI）
+    // 兼容两种输入：
+    //   memory_card 对象（打开会话时）：{ profile:{stage}, strategy:{name,rounds_used,max_rounds} }
+    //   _debug 对象（每次回复后）：{ strategy_name, strategy_rounds, strategy_max_rounds, strategy_clear, memory_stage }
+    _updateStrategyBadge(src) {
+        const el = document.getElementById('chat-strategy');
+        if (!el) return;
+        try {
+            let name = '', rounds = null, max = null, cleared = false, stage = '';
+            if (src && src.strategy_name !== undefined) {
+                // _debug 形态
+                name = src.strategy_name || '';
+                rounds = src.strategy_rounds;
+                max = src.strategy_max_rounds;
+                cleared = !!src.strategy_clear;
+                stage = src.memory_stage || '';
+            } else if (src && src.strategy) {
+                // memory_card 形态
+                const st = src.strategy;
+                if (st && st.name) {
+                    name = st.name;
+                    rounds = st.rounds_used;
+                    max = st.max_rounds;
+                }
+                const p = src.profile || {};
+                stage = p.stage || '';
+            }
+            if (cleared || !name) {
+                el.classList.remove('show');
+                el.innerHTML = '';
+                return;
+            }
+            const stageHtml = (stage && stage !== '未知')
+                ? `<span class="cs-stage">${this._escapeHtml(stage)}</span> · `
+                : '';
+            const prog = (typeof rounds === 'number' && typeof max === 'number')
+                ? `（${rounds}/${max}）`
+                : (typeof rounds === 'number' ? `（第${rounds}轮）` : '');
+            el.innerHTML = stageHtml + '策略「' + this._escapeHtml(name) + '」' + prog;
+            el.classList.add('show');
+        } catch (e) {
+            console.error('[军师] 策略徽标渲染失败:', e);
+            el.classList.remove('show');
+            el.innerHTML = '';
         }
     },
 
