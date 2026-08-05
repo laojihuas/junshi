@@ -157,22 +157,60 @@ const Auth = {
         }
     },
 
-    // ---- 设备指纹（FingerprintJS，失败降级备用指纹；首次生成后持久化固定复用）----
+    // ---- 设备指纹（FingerprintJS，失败降级备用指纹；首次生成后 Cookie + localStorage 双持久化固定复用）----
     // [v20260805 修复] device_id 必须稳定：FingerprintJS 走 jsdelivr CDN（国内时好时坏），
     // 加载状态变化会在 visitorId 与备用指纹间横跳 → 每次打开都像"新设备" → 撞上
     // "同 IP 每日新设备 ≤5"防刷 → 注册被拒 → check_and_consume_quota 返回 device_not_found。
     // 因此首次生成后写入 localStorage 固定复用（用户清缓存才会重新生成）。
+    // [v20260805 方案A Cookie兜底] 用户"清理浏览器缓存"会清掉 localStorage 但默认不清 Cookie，
+    // 老逻辑此时重算 device_id → 老设备被当成新设备 → 免费档回满（刷额度）。
+    // 现在 Cookie 优先：Cookie 命中即返回（并滚动续期），清缓存不再丢身份；
+    // 只有"清 Cookie / 无痕模式 / 换浏览器"才会重算（此时 FingerprintJS 对同一浏览器
+    // 仍算出同一指纹，天然找回原设备；仅指纹服务失败时的备用 hash 才会产生新 ID）。
     async _getDeviceId() {
         const KEY = 'junshi_device_id';
+        // 1. Cookie 优先（清缓存不掉；命中即滚动续期 90 天）
+        try {
+            const fromCookie = this._getCookie(KEY);
+            if (fromCookie && /^[A-Za-z0-9_-]{8,64}$/.test(fromCookie)) {
+                this._setCookie(KEY, fromCookie);
+                return fromCookie;
+            }
+        } catch (e) { /* 忽略 */ }
+        // 2. localStorage 兜底（并把已固化的 ID 回写 Cookie，一次性补位）
         try {
             const cached = localStorage.getItem(KEY);
-            if (cached && /^[A-Za-z0-9_-]{8,64}$/.test(cached)) return cached;
-        } catch (e) { /* localStorage 不可用则忽略 */ }
+            if (cached && /^[A-Za-z0-9_-]{8,64}$/.test(cached)) {
+                this._setCookie(KEY, cached);
+                return cached;
+            }
+        } catch (e) { /* 忽略 */ }
+        // 3. 全新生成（FingerprintJS 优先；失败走备用指纹），Cookie + localStorage 双写
         const id = await this._generateDeviceId();
         try {
             localStorage.setItem(KEY, id);
         } catch (e) { /* 忽略 */ }
+        this._setCookie(KEY, id);
         return id;
+    },
+
+    // Cookie 读取（带值编码；失效/不可用返回空串）
+    _getCookie(name) {
+        try {
+            const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]*)'));
+            return m ? decodeURIComponent(m[1] || '') : '';
+        } catch (e) {
+            return '';
+        }
+    },
+
+    // Cookie 写入（90 天过期；path=/ 全站可用；SameSite=Lax 防第三方上下文携带）
+    _setCookie(name, value) {
+        try {
+            const expires = new Date(Date.now() + 90 * 86400000).toUTCString();
+            document.cookie = name + '=' + encodeURIComponent(value) +
+                '; expires=' + expires + '; path=/; SameSite=Lax';
+        } catch (e) { /* Cookie 不可用（如 file:// 环境）则忽略 */ }
     },
 
     async _generateDeviceId() {
