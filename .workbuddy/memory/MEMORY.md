@@ -8,17 +8,18 @@
 
 ## 部署架构
 
-- **前端**：静态 SPA（帽子云），配置 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl / device.gateUrl）
+- **前端**：静态 SPA（帽子云），配置 `config.js`（git 跟踪，含 Supabase anon key / kb proxyUrl / device.gateUrl / **account.authUrl**）
 - **后端**：Supabase（ref `opzvvgixlfbfpdlsorbi`）
-  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，version 59）、`device-gate`（设备注册/状态）、`activate-code`、`prompt-get`、`prompt-update`、`invite-code`、`invite-redeem`
-  - 数据表：`profiles` / `chat_sessions`（note、memory_card text）/ `chat_messages` / `activation_codes`（+used_device_id）/ `app_config`（单行 id=1：统一 system_prompt + llm_params JSON）/ **`devices`（业务身份）/ `daily_quota`（device+day）/ `ip_usage`（ip+day，含 new_devices）**
+  - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，v62 双身份配额）、**`account-auth`（v4，verify_jwt=false！注册/登录/sync）**、`device-gate`（**游客专用** v4）、`activate-code`（**绑账号** v15）、`prompt-get`、`prompt-update`（旧 `invite-code`/`invite-redeem` **已删除**，邀请注册即兑现）
+  - 数据表：`profiles` / `chat_sessions`（note、memory_card text）/ `chat_messages` / `activation_codes`（+used_account_id）/ `app_config`（单行 id=1：统一 system_prompt + llm_params JSON）/ **`accounts`（账号，id=auth user id）/ `devices`（游客指纹）/ `daily_quota`（**identity_type+identity_key** 双轨）/ `ip_usage`（ip+day，含 new_devices）**
   - **kb_blocks**（B 方案，15,107 块）：media_id+block_idx PK，content≤700 字，bigrams GIN 索引，RLS service_role 专用
-  - SQL：`supabase/sql/001~008`（**006 kb_docs 旧版**、007 kb_blocks、008 配额设备体系）
-  - 配额函数（008，SECURITY DEFINER，仅 service_role 调）：`register_device`（IP 新设备≤5/天）、`check_and_consume_quota`（原子扣次）、`activate_device`（绑指纹+30天，续期 max(now,到期)）、`redeem_invite_device`（+50 封顶 300）、`get_quota_status`、`ensure_profile`（匿名补 profiles 行保外键）
-- **认证（v20260805 剔除邮箱登录）**：Supabase **匿名登录**（signInAnonymously）+ **device_id 指纹=业务身份**。前端 `js/auth.js`：匿名登录→device-gate register（幂等）→Auth.device。URL ?invite=CODE 暂存 pendingInvite，**首次新建好友成功后 redeem 才生效**
-- **设备指纹双持久化（v20260805 方案A）**：`_getDeviceId` 读取顺序 **Cookie → localStorage → FingerprintJS/fallback**，生成后 Cookie+localStorage 双写（Cookie 90 天滚动续期）。**清浏览器缓存不再丢身份**（Cookie 默认不清）；FingerprintJS 走 jsdelivr CDN 时好时坏，fallback 是漂移根源，方案 A 已封住"清缓存刷免费档"路径
-- **配额规则**：①免费档 <3天50/天、3-7天30/天、7+天15/天（Asia/Shanghai 自然日清零）②邀请 +50/人封顶 300（先扣免费档再扣 bonus）③激活码 68元/月 500次/天×30天；**VIP 豁免 IP 防刷**；IP 150次/天仅无 VIP
-- **受限文案（chat.js _handleQuotaBlock）**：quota_exhausted→付费墙；vip_daily_limit→"服务过载请明天再试"；ip_limit/ip_new_device_limit→"使用太频繁"；**顶部导航（friends.js）只显示邀请赠送/VIP 剩余天数，免费用户不显示**；免费档/IP上限/VIP500 均不告知用户
+  - SQL：`supabase/sql/001~011`（006 kb_docs 旧版、007 kb_blocks、008 配额设备体系、009 admin_stats、**010 设备召回**、**011 账号体系**）
+  - 配额函数（SECURITY DEFINER，仅 service_role 调）：`register_device`（游客，IP 新设备≤5/天，固定 20/天）、`check_and_consume_quota(identity_type,identity_key,ip)`（双身份原子扣次）、`register_account`（账号唯一+设备唯一+邀请兑现+游客数据迁移）、`login_account`（active_session 单点）、`check_account_session`、`activate_account`（绑账号+30天）、`get_quota_status`、`ensure_profile`
+- **认证（v20260805 用户机制重构）**：**游客+账号双轨**。游客=Supabase 匿名登录+device 指纹（20/天，用完→注册引导）；注册用户=账号+密码（**Supabase Auth 管理，email 伪装 hex(账号名)@jssl.local**，RLS/会话全复用；账号名存 user_metadata + accounts 表）。一机一号（accounts.device_id unique）；任意设备可登录但**同一时间仅一台在线**（登录生成 session_id 存 active_session，ima-proxy 每次校验，旧设备 401 session_expired→前端登出）。注册时游客 chat_sessions.user_id 自动迁移到账号
+- **设备指纹双持久化（v20260805 方案A）**：`_getDeviceId` 读取顺序 **Cookie → localStorage → FingerprintJS/fallback**，生成后 Cookie+localStorage 双写（Cookie 90 天滚动续期）。**清浏览器缓存不再丢身份**（Cookie 默认不清）；FingerprintJS 走 jsdelivr CDN 时好时坏，fallback 是漂移根源
+- **设备召回（v20260805 方案C 兜底式，010_device_recall.sql）**：fallback 设备天然带 `fp_` 前缀 → register_device 遇 fp_ 新设备按多信号召回 30 天内老设备（同 last_ip + 同 fp_ua(服务端算 UA 哈希) + 同 fp_screen + 同 fp_tz + 同 fp_lang），命中返回 recalled+recalled_device_id **不写新行**，前端换用老 ID 双写持久化；正常指纹路径零影响。**register_device 签名已变（+4 指纹参数，旧签名 DROP）**；device-gate v4 透传指纹特征
+- **配额规则（v20260805 重构后）**：①**游客固定 20 条/天**（Asia/Shanghai 自然日清零），用完→注册引导 ②**注册用户前 3 天 50/天、之后 20/天**，用完→付费墙 ③邀请 +50/人封顶 300（**好友注册成功即兑现**，先扣免费档再扣 bonus）④激活码 68元/月 500条/天×30天（绑账号）；**VIP 豁免 IP 防刷；IP 150次/天仅游客生效**（注册用户豁免防公司/宿舍误伤）
+- **受限文案（chat.js _handleQuotaBlock）**：guest_quota_exhausted→注册引导弹窗；quota_exhausted→付费墙；session_expired→"账号已在其他设备登录"+登出；vip_daily_limit→"服务过载请明天再试"；ip_limit/ip_new_device_limit→"使用太频繁"；**顶部导航（friends.js）账号模式显示邀请赠送/VIP 剩余天数，游客不显示**；免费档/IP上限/VIP500 均不告知用户
 - **知识库（B 方案完全本地化）**：**IMA 已彻底移除**（secrets 已删，代码零引用）。本地切块源 `C:\迷男\{恋爱话术,恋爱教学,聊天实战}\`，灌库脚本 `supabase/scripts/build_kb_blocks.mjs`（SBP_PAT 环境变量）。检索 = kb_blocks_recall RPC，命中块原文直入 LLM
 
 ## 记忆体系（三层隔离）
@@ -43,7 +44,8 @@
 
 ## 关键踩坑（务必先读）
 
-- **无 CLI 部署 Edge Function**（本机 CLI Bun 编译 CPU 不支持）：`POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart **file=单个源码文件**，metadata `{"entrypoint_path":"index.ts","name":slug}`；requests 需 `proxies={'http':None,'https':None}`；任意 SQL 用 `POST /v1/projects/{ref}/database/query`
+- **无 CLI 部署 Edge Function**（本机 CLI Bun 编译 CPU 不支持）：`POST /v1/projects/{ref}/functions/deploy?slug={slug}`，multipart **file=单个源码文件**，metadata `{"entrypoint_path":"index.ts","name":slug}`（**登录类函数需加 `"verify_jwt":false`**，否则无 JWT 请求被拦）；urllib/requests 均需禁代理 + 浏览器 UA（否则 Cloudflare 1010）；任意 SQL 用 `POST /v1/projects/{ref}/database/query`；**REST RPC 鉴权用 service_role JWT（api-keys 端点拿），PAT 只用于管理 API**（混用报 "Expected 3 parts in JWT"）
+- **req.json() 只能消费一次**：Deno.serve 里顶层解构后内层再 `await req.json()` → Body already consumed → 500；顶层解析一次，各分支复用
 - **prompt-update 校验坑（v11 修复）**：LLM_PARAM_RANGE 不能 `Array.isArray(range)` 区分枚举/区间（数值区间也是数组）→ 用 `typeof range[0]==='string'`
 - **作用域教训（v31 事故）**：函数内 `let` 声明必须提到 Deno.serve 顶层，_debug 外引用块内 let → ReferenceError 全 500；esbuild 查不到，部署前 tsc/transpileModule 校验
 - **端到端验证**：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true，**成功返回 200 非 201**）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey）→ 调函数看 _debug → 清理

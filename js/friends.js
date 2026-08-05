@@ -9,8 +9,10 @@ const Friends = {
 
     async load() {
         if (!Auth.currentUser) return;
-        // [v20260805] 刷新设备配额状态（顶部导航：只显示邀请赠送次数 + VIP 剩余天数）
-        if (typeof Auth.refreshStatus === 'function') {
+        // [v20260805] 刷新配额状态：账号模式刷新账号状态；游客模式刷新设备状态
+        if (Auth.isAccount && typeof Auth.refreshAccountStatus === 'function') {
+            await Auth.refreshAccountStatus();
+        } else if (typeof Auth.refreshStatus === 'function') {
             await Auth.refreshStatus();
         }
         this.sessions = await DB.getSessions(Auth.currentUser.id);
@@ -21,22 +23,30 @@ const Friends = {
         const container = document.getElementById('friends-list');
         const headerStatus = document.getElementById('header-status');
 
-        // [v20260805] 顶部导航显示策略：免费用户不显示任何额度数据；
-        // 只显示 ①邀请赠送累计次数（不显示 300 上限）②VIP 剩余天数
-        const dev = Auth.device;
+        // [v20260805] 顶部导航：账号模式显示 VIP 剩余天数/邀请赠送次数；
+        // 游客不显示任何额度（登入按钮引导注册）
         if (headerStatus) {
-            if (dev && dev.is_vip) {
-                const days = dev.vip_days_left || 0;
-                headerStatus.textContent = '👑 VIP · 剩余 ' + days + ' 天';
-                headerStatus.style.background = 'rgba(255, 215, 0, 0.25)';
-                headerStatus.style.display = '';
-            } else if (dev && (dev.invite_bonus || 0) > 0) {
-                headerStatus.textContent = '邀请赠送 ' + dev.invite_bonus + ' 次';
-                headerStatus.style.background = 'rgba(255,255,255,0.2)';
-                headerStatus.style.display = '';
+            if (Auth.isAccount && Auth.account) {
+                const acc = Auth.account;
+                if (acc.is_vip) {
+                    const days = acc.vip_days_left || 0;
+                    headerStatus.textContent = '👑 VIP · 剩余 ' + days + ' 天';
+                    headerStatus.style.background = 'rgba(255, 215, 0, 0.25)';
+                    headerStatus.style.display = '';
+                } else if ((acc.invite_bonus || 0) > 0) {
+                    headerStatus.textContent = '邀请赠送 ' + acc.invite_bonus + ' 次';
+                    headerStatus.style.background = 'rgba(255,255,255,0.2)';
+                    headerStatus.style.display = '';
+                } else {
+                    headerStatus.style.display = 'none';
+                }
             } else {
                 headerStatus.style.display = 'none';
             }
+        }
+        // 登入/退出按钮状态
+        if (typeof Auth._updateAuthButton === 'function') {
+            Auth._updateAuthButton();
         }
 
         if (!this.sessions || this.sessions.length === 0) {
@@ -146,18 +156,8 @@ const Friends = {
             try {
                 const session = await DB.createSession(Auth.currentUser.id, name);
                 if (session) {
-                    // [v20260805 邀请] 朋友通过邀请链接打开 + 首次新建好友成功 → 邀请才生效
-                    // 兑现成功后给邀请人 +50（本设备不重复兑现）
-                    if (Auth.pendingInvite) {
-                        const invCode = Auth.pendingInvite;
-                        Auth.pendingInvite = null;
-                        const r = await Invite.redeem(invCode, Auth.device ? Auth.device.device_id : '');
-                        if (r && r.success) {
-                            Utils.toast('邀请生效！已为好友赠送 50 次额度');
-                            await Auth.refreshStatus();
-                            this.render();
-                        }
-                    }
+                    // [v20260805 用户机制重构] 邀请改在注册时兑现（register_account），
+                    // 不再"首次新建好友"触发；此处仅提示添加成功
                     Utils.toast('已添加 ' + name);
                     await this.load();
                 } else {

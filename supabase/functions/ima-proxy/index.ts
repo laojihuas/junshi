@@ -251,7 +251,7 @@ Deno.serve(async (req) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id, X-Identity-Type, X-Session-Id',
     'Content-Type': 'application/json',
   };
 
@@ -288,15 +288,51 @@ Deno.serve(async (req) => {
     }
     const user = await authResp.json();
 
-    // [v20260805] 设备身份 + 配额引擎：业务身份是 device_id（指纹），
-    // 匿名 user 只是会话载体。每次调用原子扣次（免费档/邀请余额/VIP 500/天/IP 防刷）。
-    const deviceId = (req.headers.get('X-Device-Id') || '').trim();
-    if (!deviceId) {
-      return new Response(JSON.stringify({ error: 'device_required', message: '缺少设备标识' }), { headers, status: 401 });
-    }
+    // [v20260805 用户机制重构] 身份解析（双轨）：
+    //   游客（device）：X-Device-Id 头 → 20 条/天 + IP 防刷，用完弹注册引导
+    //   注册用户（account）：X-Identity-Type: account + 账号 JWT + X-Session-Id
+    //     → 按账号扣次（前3天50/之后20 + 邀请余额 + VIP500），单点校验
     const clientIp = (req.headers.get('x-forwarded-for') || '').split(',')[0]?.trim() || '';
+    const identityType = (req.headers.get('X-Identity-Type') || 'device').trim() === 'account' ? 'account' : 'device';
 
-    // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务）
+    let identityKey = '';
+    let sessionCheck: any = null;
+
+    if (identityType === 'account') {
+      // 注册用户：身份 = 账号 user id（JWT 解析）；必须带 X-Session-Id 校验单点
+      identityKey = user?.id || '';
+      if (!identityKey) {
+        return new Response(JSON.stringify({ error: 'account_required', message: '请先登录' }), { headers, status: 401 });
+      }
+      const sessionId = (req.headers.get('X-Session-Id') || '').trim();
+      if (!sessionId) {
+        return new Response(JSON.stringify({ error: 'session_required', message: '请重新登录' }), { headers, status: 401 });
+      }
+      // 单点校验：active_session 不匹配 → 账号已在其他设备登录
+      if (serviceRoleKey && supabaseUrl) {
+        const chkResp = await fetch(`${supabaseUrl}/rest/v1/rpc/check_account_session`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${serviceRoleKey}`,
+            'apikey': serviceRoleKey,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ p_account_user_id: identityKey, p_session_id: sessionId })
+        });
+        sessionCheck = chkResp.ok ? await chkResp.json() : { valid: false };
+        if (sessionCheck.valid !== true) {
+          return new Response(JSON.stringify({ error: 'session_expired', message: '账号已在其他设备登录' }), { headers, status: 401 });
+        }
+      }
+    } else {
+      // 游客：设备指纹
+      identityKey = (req.headers.get('X-Device-Id') || '').trim();
+      if (!identityKey) {
+        return new Response(JSON.stringify({ error: 'device_required', message: '缺少设备标识' }), { headers, status: 401 });
+      }
+    }
+
+    // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务；双身份）
     let quotaInfo: any = null;
     if (serviceRoleKey && supabaseUrl) {
       const quotaResp = await fetch(`${supabaseUrl}/rest/v1/rpc/check_and_consume_quota`, {
@@ -306,7 +342,7 @@ Deno.serve(async (req) => {
           'apikey': serviceRoleKey,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ p_device_id: deviceId, p_ip: clientIp })
+        body: JSON.stringify({ p_identity_type: identityType, p_identity_key: identityKey, p_ip: clientIp })
       });
       if (quotaResp.ok) {
         quotaInfo = await quotaResp.json();
@@ -318,12 +354,17 @@ Deno.serve(async (req) => {
 
     if (!quotaInfo || quotaInfo.allowed !== true) {
       const reason = quotaInfo?.reason || 'quota_error';
-      // 受限文案分层：免费档用完→付费墙；VIP 满 500→服务过载；IP 超限→使用太频繁
+      // 受限文案分层：
+      //   游客用完(guest_quota_exhausted) → 注册引导（不弹付费墙）
+      //   注册用户用完(quota_exhausted) → 付费墙（月卡/邀请）
+      //   VIP 满 500(vip_daily_limit) → 服务过载；IP 超限 → 使用太频繁
       let message = '今日次数已用完，请明天再来';
-      if (reason === 'quota_exhausted') message = '今日免费额度已用完，升级 VIP 继续畅聊';
+      if (reason === 'guest_quota_exhausted') message = '今日免费次数已用完，注册登录继续畅聊';
+      else if (reason === 'quota_exhausted') message = '今日免费额度已用完，升级 VIP 或邀请好友继续畅聊';
       else if (reason === 'vip_daily_limit') message = '服务过载，请明天再试';
       else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') message = '使用太频繁，请稍后再试';
-      else if (reason === 'device_not_found') message = '设备未注册';
+      else if (reason === 'device_not_found') message = '设备未注册，请重试';
+      else if (reason === 'account_not_found') message = '账号异常，请重新登录';
       return new Response(JSON.stringify({ error: reason, message, quota: quotaInfo }), { headers, status: 403 });
     }
 

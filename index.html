@@ -68,6 +68,9 @@
             </div>
             <div class="header-actions">
                 <span id="header-status" class="status-badge">加载中...</span>
+                <button id="auth-btn" class="auth-btn" title="登录/注册账号，畅聊更多">
+                    <span id="auth-btn-label">登入</span>
+                </button>
                 <button id="bio-btn" class="icon-btn" title="我的简介">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
                 </button>
@@ -258,6 +261,47 @@
             <div class="modal-footer">
                 <button id="bio-cancel" class="btn btn-outline">取消</button>
                 <button id="bio-save" class="btn btn-primary">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：登录（右上角"登入"按钮 / 游客用完弹注册引导）
+         ============================================================ -->
+    <div id="modal-login" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">登录账号</div>
+            <div class="modal-body">
+                <input id="login-account" class="input" type="text" placeholder="账号（3-20 位中文/英文/数字）" maxlength="20" autocomplete="username">
+                <input id="login-password" class="input" type="password" placeholder="密码" maxlength="64" autocomplete="current-password" style="margin-top:10px;">
+                <div class="field-hint" id="login-error" style="color:#E53935;display:none;"></div>
+            </div>
+            <div class="modal-footer" style="flex-direction:column;gap:10px;">
+                <button id="login-submit-btn" class="btn btn-primary btn-block">登录</button>
+                <button id="login-to-register-btn" class="btn btn-outline btn-block">没有账号？注册新账号</button>
+                <button id="login-cancel-btn" class="btn btn-outline btn-block">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================
+         弹窗：注册（账号/密码/确认密码/邀请码；?invite= 自动填入）
+         ============================================================ -->
+    <div id="modal-register" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-title">注册账号</div>
+            <div class="modal-body">
+                <input id="reg-account" class="input" type="text" placeholder="账号（3-20 位中文/英文/数字，唯一）" maxlength="20" autocomplete="username">
+                <input id="reg-password" class="input" type="password" placeholder="密码（至少 6 位）" maxlength="64" autocomplete="new-password" style="margin-top:10px;">
+                <input id="reg-confirm" class="input" type="password" placeholder="确认密码" maxlength="64" autocomplete="new-password" style="margin-top:10px;">
+                <input id="reg-invite" class="input" type="text" placeholder="邀请码（选填，来自好友分享链接）" maxlength="8" autocomplete="off" style="margin-top:10px;">
+                <div class="field-hint" style="margin-top:8px;">注册即绑定当前设备；邀请好友注册成功，双方各得 50 次额度</div>
+                <div class="field-hint" id="reg-error" style="color:#E53935;display:none;"></div>
+            </div>
+            <div class="modal-footer" style="flex-direction:column;gap:10px;">
+                <button id="reg-submit-btn" class="btn btn-primary btn-block">注册</button>
+                <button id="reg-to-login-btn" class="btn btn-outline btn-block">已有账号？去登录</button>
+                <button id="reg-cancel-btn" class="btn btn-outline btn-block">取消</button>
             </div>
         </div>
     </div>

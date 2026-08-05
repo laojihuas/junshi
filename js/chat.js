@@ -408,15 +408,18 @@ const Chat = {
         }
     },
 
-    // [v20260805] 检查是否可调用 API：服务端配额引擎为准（原子扣次 + 分层拦截）
+    // [v20260805 用户机制重构] 检查是否可调用 API
     async _checkCanUse() {
         if (!Auth.currentUser) {
             Utils.toast('初始化中，请稍候');
             return false;
         }
+        if (Auth.isAccount && Auth.account) {
+            // 账号模式：无需设备注册（配额按账号扣次）
+            return true;
+        }
         if (!Auth.device || !Auth.device.device_id) {
-            // 设备未注册（异常兜底）：重新走注册流程；注册失败必须拦截，
-            // 否则拿"服务端不存在的 device_id"调用 ima-proxy 会一直 device_not_found
+            // 游客模式：设备未注册（异常兜底）重新走注册流程
             const ok = await Auth._registerDevice();
             if (!ok) {
                 Utils.toast('设备注册失败，请稍后再试');
@@ -427,21 +430,32 @@ const Chat = {
     },
 
     // [v20260805] 受限分层提示（不暴露真实阈值）
-    //   quota_exhausted  → 免费档用完 → 弹付费墙
-    //   vip_daily_limit  → VIP 当日满 500 → 服务过载
+    //   guest_quota_exhausted → 游客 20 条用完 → 弹注册引导
+    //   quota_exhausted       → 注册用户用完 → 弹付费墙（月卡/邀请）
+    //   session_expired       → 账号已在其他设备登录 → 登出回游客
+    //   vip_daily_limit       → VIP 当日满 500 → 服务过载
     //   ip_limit / ip_new_device_limit → IP 防刷 → 使用太频繁
     async _handleQuotaBlock(err) {
         const reason = err && err.error;
         const message = (err && err.message) || '';
-        if (reason === 'quota_exhausted') {
+        if (reason === 'guest_quota_exhausted') {
+            // 游客用完：弹注册引导（注册后额度提升到 50/天）
+            Utils.toast('今日免费次数已用完，注册登录继续畅聊');
+            App.showRegisterModal();
+        } else if (reason === 'quota_exhausted') {
             Paywall.show();
+        } else if (reason === 'session_expired' || reason === 'account_required') {
+            Utils.toast(message || '账号已在其他设备登录');
+            if (Auth.isAccount) {
+                await Auth.logout();
+                await Friends.load();
+                App.navigate('friends');
+            }
         } else if (reason === 'vip_daily_limit') {
             Utils.toast('服务过载，请明天再试');
         } else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') {
             Utils.toast('使用太频繁，请稍后再试');
         } else if (reason === 'device_not_found') {
-            // 服务端查不到该设备：尝试重新注册（幂等）；
-            // 注册成功则提示重试；失败（如同 IP 新设备防刷）给明确提示，不再无限静默重试
             Utils.toast('设备未注册，正在重试');
             const ok = await Auth._registerDevice().catch(() => false);
             if (!ok) {
@@ -483,14 +497,18 @@ const Chat = {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer ' + (await this._getSessionToken()),
-                    // [v20260805] 设备指纹：服务端按 device_id 配额扣次/分层拦截
-                    'X-Device-Id': Auth.device ? Auth.device.device_id : ''
+                    // [v20260805 用户机制重构] 身份头：
+                    //   账号模式 → X-Identity-Type: account + X-Session-Id（单点校验，按账号扣次）
+                    //   游客模式 → X-Device-Id（按设备扣次 20/天）
+                    ...(Auth.isAccount && Auth.account
+                        ? { 'X-Identity-Type': 'account', 'X-Session-Id': Auth.account.session_id || '' }
+                        : { 'X-Device-Id': Auth.device ? Auth.device.device_id : '' })
                 },
                 body: JSON.stringify(body)
             });
 
-            // [v20260805] 配额受限（403）：按 reason 分层提示，不把提示当回复发出
-            if (response.status === 403) {
+            // [v20260805] 配额受限（403）/ 会话失效（401，账号被踢）：分层提示，不把提示当回复发出
+            if (response.status === 403 || response.status === 401) {
                 const err = await response.json().catch(() => ({}));
                 this._handleQuotaBlock(err);
                 return '__QUOTA__';

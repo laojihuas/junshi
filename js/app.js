@@ -21,8 +21,9 @@ const App = {
         // 绑定事件
         this._bindEvents();
 
-        // [v20260805] 设备身份：匿名登录（打开即用，无注册页）
-        // URL 携带 ?invite=CODE 时由 auth.js 自动暂存，首次新建好友后兑现
+        // [v20260805 账号体系] 身份初始化：
+        //   优先恢复账号会话（校验单点）；否则游客模式（匿名登录+设备注册）
+        //   URL ?invite=CODE 由注册弹窗自动填入
         const ok = await Auth.init();
 
         if (!ok) {
@@ -78,6 +79,34 @@ const App = {
         try { Utils.dlog('nav', (from || '?') + ' -> ' + page); } catch (e) {}
     },
 
+    // [v20260805 账号体系] 登录 / 注册弹窗
+    showLoginModal() {
+        document.getElementById('modal-register').classList.remove('active');
+        document.getElementById('modal-login').classList.add('active');
+        document.getElementById('login-account').value = '';
+        document.getElementById('login-password').value = '';
+        document.getElementById('login-error').style.display = 'none';
+        setTimeout(() => document.getElementById('login-account').focus(), 100);
+    },
+
+    showRegisterModal() {
+        document.getElementById('modal-login').classList.remove('active');
+        document.getElementById('modal-register').classList.add('active');
+        document.getElementById('reg-account').value = '';
+        document.getElementById('reg-password').value = '';
+        document.getElementById('reg-confirm').value = '';
+        document.getElementById('reg-error').style.display = 'none';
+        // URL ?invite=CODE 自动填入邀请码框
+        const invite = Auth._inviteFromUrl();
+        document.getElementById('reg-invite').value = invite || '';
+        setTimeout(() => document.getElementById('reg-account').focus(), 100);
+    },
+
+    _closeAuthModals() {
+        document.getElementById('modal-login').classList.remove('active');
+        document.getElementById('modal-register').classList.remove('active');
+    },
+
     _checkConfig() {
         if (!window.APP_CONFIG || !window.APP_CONFIG.supabase || !window.APP_CONFIG.supabase.url) {
             console.warn(
@@ -87,12 +116,114 @@ const App = {
         }
     },
 
-    // [v20260805] 已剔除邮箱登录：URL ?invite=CODE 由 auth.js 自动暂存（首次建好友后兑现）
+    // [v20260805 账号体系] URL ?invite=CODE 在注册弹窗自动填入（注册时兑现邀请）
 
     _bindEvents() {
         // 新建好友按钮
         document.getElementById('fab-add-friend').addEventListener('click', () => {
             Friends.showCreateModal();
+        });
+
+        // [v20260805 账号体系] 右上角"登入/退出"按钮
+        const authBtn = document.getElementById('auth-btn');
+        if (authBtn) {
+            authBtn.addEventListener('click', () => {
+                if (Auth.isAccount && Auth.account) {
+                    // 已登录 → 退出
+                    if (confirm('确定退出登录吗？')) {
+                        Auth.logout().then(() => {
+                            Friends.load();
+                            App.navigate('friends');
+                        });
+                    }
+                } else {
+                    // 游客 → 登录弹窗
+                    this.showLoginModal();
+                }
+            });
+        }
+
+        // [v20260805 账号体系] 登录弹窗
+        document.getElementById('login-submit-btn').addEventListener('click', async () => {
+            const name = document.getElementById('login-account').value.trim();
+            const pwd = document.getElementById('login-password').value;
+            const errEl = document.getElementById('login-error');
+            errEl.style.display = 'none';
+            if (!name || !pwd) {
+                errEl.textContent = '请输入账号和密码';
+                errEl.style.display = '';
+                return;
+            }
+            const btn = document.getElementById('login-submit-btn');
+            btn.disabled = true;
+            btn.textContent = '登录中...';
+            const r = await Auth.login(name, pwd);
+            btn.disabled = false;
+            btn.textContent = '登录';
+            if (r.success) {
+                this._closeAuthModals();
+                await Friends.load();
+                this.navigate('friends');
+            } else {
+                errEl.textContent = r.message || '登录失败';
+                errEl.style.display = '';
+            }
+        });
+        document.getElementById('login-to-register-btn').addEventListener('click', () => {
+            this._closeAuthModals();
+            this.showRegisterModal();
+        });
+        document.getElementById('login-cancel-btn').addEventListener('click', () => {
+            document.getElementById('modal-login').classList.remove('active');
+        });
+        // 登录框回车
+        document.getElementById('login-password').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('login-submit-btn').click();
+        });
+
+        // [v20260805 账号体系] 注册弹窗
+        document.getElementById('reg-submit-btn').addEventListener('click', async () => {
+            const name = document.getElementById('reg-account').value.trim();
+            const pwd = document.getElementById('reg-password').value;
+            const confirmPwd = document.getElementById('reg-confirm').value;
+            const invite = document.getElementById('reg-invite').value.trim();
+            const errEl = document.getElementById('reg-error');
+            errEl.style.display = 'none';
+            if (!name || !pwd || !confirmPwd) {
+                errEl.textContent = '请填写完整信息';
+                errEl.style.display = '';
+                return;
+            }
+            if (pwd !== confirmPwd) {
+                errEl.textContent = '两次密码不一致';
+                errEl.style.display = '';
+                return;
+            }
+            const btn = document.getElementById('reg-submit-btn');
+            btn.disabled = true;
+            btn.textContent = '注册中...';
+            const r = await Auth.register({ account_name: name, password: pwd, invite_code: invite });
+            btn.disabled = false;
+            btn.textContent = '注册';
+            if (r.success) {
+                this._closeAuthModals();
+                await Friends.load();
+                this.navigate('friends');
+            } else {
+                errEl.textContent = r.message || '注册失败';
+                errEl.style.display = '';
+            }
+        });
+        document.getElementById('reg-to-login-btn').addEventListener('click', () => {
+            this._closeAuthModals();
+            this.showLoginModal();
+        });
+        document.getElementById('reg-cancel-btn').addEventListener('click', () => {
+            document.getElementById('modal-register').classList.remove('active');
+        });
+        // 注册框回车
+        document.getElementById('reg-confirm').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') document.getElementById('reg-submit-btn').click();
         });
 
         // [我的简介] 打开编辑弹窗
@@ -187,7 +318,7 @@ const App = {
             Invite.copy();
         });
 
-        // [v20260805] 已剔除登录：无退出登录按钮
+        // [v20260805 账号体系] 登入/退出按钮已在 _bindEvents 顶部绑定
 
         // [长按管理] Action Sheet - 按钮点击分发
         document.getElementById('action-sheet').addEventListener('click', (e) => {

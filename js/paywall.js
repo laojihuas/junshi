@@ -30,7 +30,7 @@ const Paywall = {
         }
     },
 
-    // 激活码验证（服务端绑设备指纹，X-Device-Id 头携带）
+    // 激活码验证（v20260805 账号版：绑账号，Authorization 携带账号 JWT）
     async activate() {
         const input = document.getElementById('activation-input');
         const btn = document.getElementById('activate-btn');
@@ -38,6 +38,12 @@ const Paywall = {
 
         if (!code) {
             Utils.toast('请输入激活码');
+            return;
+        }
+        // 付费墙仅注册用户使用；游客先注册
+        if (!Auth.isAccount || !Auth.account) {
+            Utils.toast('请先注册登录后开通 VIP');
+            App.showRegisterModal();
             return;
         }
 
@@ -54,30 +60,24 @@ const Paywall = {
                 return;
             }
 
-            const deviceId = (Auth.device && Auth.device.device_id) || '';
-            if (!deviceId) {
-                Utils.toast('设备初始化中，请重试');
-                btn.disabled = false;
-                btn.textContent = '激活';
-                return;
-            }
-
+            const token = await Auth._token();
             const resp = await fetch(verifyUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Device-Id': deviceId
+                    'Authorization': token ? 'Bearer ' + token : ''
                 },
                 body: JSON.stringify({ code: code })
             });
 
             const result = await resp.json().catch(() => ({}));
             if (resp.ok && result.success) {
-                // 更新本地设备状态（VIP 剩余天数）
-                if (Auth.device) {
-                    Auth.device.is_vip = true;
-                    Auth.device.vip_days_left = result.vip_days_left || 30;
-                    Auth.device.vip_expires_at = result.vip_expires_at || null;
+                // 更新账号 VIP 状态
+                if (Auth.account) {
+                    Auth.account.is_vip = true;
+                    Auth.account.vip_days_left = result.vip_days_left || 30;
+                    Auth.account.vip_expires_at = result.vip_expires_at || null;
+                    Auth._saveAccountStorage();
                 }
                 Utils.toast('🎉 激活成功！已升级为 VIP');
                 this.hide();

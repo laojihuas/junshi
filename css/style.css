@@ -396,6 +396,38 @@ textarea.input {
     transform: scale(0.92);
 }
 
+/* [v20260805 账号体系] 右上角"登入/退出"按钮 */
+.friends-header .header-actions .auth-btn {
+    height: 30px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(7, 193, 96, 0.18);
+    border: 1px solid rgba(7, 193, 96, 0.55);
+    color: #7CFC9A;
+    font-size: 12px;
+    font-weight: 600;
+    border-radius: 15px;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+    max-width: 96px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.friends-header .header-actions .auth-btn:active {
+    background: rgba(7, 193, 96, 0.35);
+    transform: scale(0.94);
+}
+.friends-header .header-actions .auth-btn.logged-in {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #ddd;
+}
+
 .friends-list {
     flex: 1;
     overflow-y: auto;

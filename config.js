@@ -28,18 +28,19 @@ window.APP_CONFIG = {
         verifyUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/activate-code'
     },
 
-    // [v20260805 设备身份] 设备注册 / 配额状态（剔除登录后统一入口）
+    // [v20260805 设备身份] 游客设备注册 / 配额状态（未注册用户专用）
     device: {
         gateUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/device-gate'
     },
 
-    // [邀请功能] 邀请好友得次数
+    // [v20260805 账号体系] 注册 / 登录 / 会话（账号+密码，Supabase Auth 管理）
+    account: {
+        authUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/account-auth'
+    },
+
+    // [邀请功能] 邀请好友得次数（注册时填邀请码自动兑现，无需 redeem 接口）
     invite: {
-        // 获取/生成我的邀请码（登录用户）
-        getUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/invite-code',
-        // 兑现邀请（注册成功后调用，给邀请人 +50 次）
-        redeemUrl: 'https://opzvvgixlfbfpdlsorbi.supabase.co/functions/v1/invite-redeem',
-        // 站点地址：邀请链接前缀（如 https://junshi-3nnr22y.maozi.io；留空自动使用当前域名）
+        // 站点地址：邀请链接前缀（留空自动使用当前域名）
         siteUrl: 'https://junshi-3nnr22y.maozi.io',
         // 单次邀请赠送次数
         rewardTries: 50

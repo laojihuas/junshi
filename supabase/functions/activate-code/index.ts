@@ -1,19 +1,17 @@
 // ============================================================
-// 军师 - Supabase Edge Function: 激活码验证（设备绑定版）
+// 军师 - Supabase Edge Function: 激活码验证（账号绑定版）
 //
-// 功能：验证激活码 → 绑定设备指纹（devices.is_vip=true, +30 天）
+// [v20260805 用户机制重构] 激活码只服务注册用户（绑账号，68元/月 500条/天×30天）。
 //   POST body: { code }
-//   设备标识：X-Device-Id 头（前端每次请求携带指纹）
+//   认证：Authorization: Bearer <账号 JWT>（解析 user id → 账号）
 // 返回：{ success, message, vip_expires_at, vip_days_left }
 // ============================================================
-
-const DEVICE_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 Deno.serve(async (req) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Device-Id',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Content-Type': 'application/json',
   };
 
@@ -28,23 +26,40 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ success: false, message: '请输入激活码' }), { headers, status: 400 });
     }
 
-    const deviceId = (req.headers.get('X-Device-Id') || '').trim();
-    if (!deviceId || !DEVICE_RE.test(deviceId)) {
-      return new Response(JSON.stringify({ success: false, message: '设备标识无效' }), { headers, status: 400 });
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
+    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    if (!serviceRoleKey || !supabaseUrl) {
+      return new Response(JSON.stringify({ success: false, message: '服务未配置' }), { headers, status: 500 });
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
-    const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+    // 账号 JWT → user id
+    const authHeader = req.headers.get('Authorization') || '';
+    const token = authHeader.replace('Bearer ', '');
+    if (!token) {
+      return new Response(JSON.stringify({ success: false, message: '请先登录' }), { headers, status: 401 });
+    }
+    const uResp = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey }
+    });
+    if (!uResp.ok) {
+      return new Response(JSON.stringify({ success: false, message: '登录已失效，请重新登录' }), { headers, status: 401 });
+    }
+    const u = await uResp.json();
+    const accountUserId: string = u?.id || '';
+    if (!accountUserId) {
+      return new Response(JSON.stringify({ success: false, message: '登录已失效，请重新登录' }), { headers, status: 401 });
+    }
 
-    // 调数据库函数原子激活（绑设备指纹）
-    const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/activate_device`, {
+    // 调数据库函数原子激活（绑账号）
+    const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/activate_account`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${serviceRoleKey}`,
         'apikey': serviceRoleKey,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ p_device_id: deviceId, p_code: code.trim().toUpperCase() })
+      body: JSON.stringify({ p_account_user_id: accountUserId, p_code: code.trim().toUpperCase() })
     });
 
     if (!rpcResp.ok) {

@@ -1,15 +1,16 @@
 // ============================================================
-// 军师 - Supabase Edge Function: 设备注册 / 配额状态
+// 军师 - Supabase Edge Function: 游客设备注册 / 配额状态
 //
-// 功能：剔除登录后的设备身份入口。
+// [v20260805 用户机制重构] 本函数仅服务游客（未注册）：
+//   游客身份 = 设备指纹 device_id，免费 20 条/天，用完弹注册引导。
+//   注册用户走 account-auth（账号+密码），此处不再涉及。
 //   POST { action:'register'|'status', device_id, invite_code?, user_id?,
 //          fp_screen?, fp_tz?, fp_lang? }
 //   register：新设备写 devices（同 IP 每日新设备 ≤5 防刷），
-//             已存在设备直接返回状态；URL 邀请码暂存（首次建好友后兑现）
-//             [v20260805 方案C] fallback 设备(fp_ 前缀)额外带指纹特征，
-//             服务端按 同IP+同UA哈希+同屏幕+同时区+同语言+30天内 召回老设备，
+//             已存在设备直接返回状态；
+//             [方案C] fallback 设备(fp_ 前缀)按多信号召回 30 天内老设备，
 //             命中返回 recalled:true + recalled_device_id（前端换用老 ID）
-//   status：返回配额状态（顶部导航只展示邀请赠送次数 + VIP 剩余天数）
+//   status：返回游客配额状态（free_daily=20 条/天）
 //
 // 认证：匿名登录 JWT（Authorization: Bearer <token>）
 // ============================================================
@@ -98,8 +99,9 @@ Deno.serve(async (req) => {
         p_fp_lang: (fp_lang || '').toString().slice(0, 16) || null
       };
     } else {
+      // [v20260805] status 仅游客（device）使用；注册用户状态由 account-auth 登录/sync 返回
       rpcName = 'get_quota_status';
-      rpcBody = { p_device_id: device_id };
+      rpcBody = { p_identity_type: 'device', p_identity_key: device_id };
     }
 
     const rpcResp = await fetch(`${supabaseUrl}/rest/v1/rpc/${rpcName}`, {
