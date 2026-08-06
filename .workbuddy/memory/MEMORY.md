@@ -21,7 +21,7 @@
 - **设备召回（v20260805 方案C 兜底式，010_device_recall.sql）**：fallback 设备天然带 `fp_` 前缀 → register_device 遇 fp_ 新设备按多信号召回 30 天内老设备（同 last_ip + 同 fp_ua(服务端算 UA 哈希) + 同 fp_screen + 同 fp_tz + 同 fp_lang），命中返回 recalled+recalled_device_id **不写新行**，前端换用老 ID 双写持久化；正常指纹路径零影响。**register_device 签名已变（+4 指纹参数，旧签名 DROP）**；device-gate v4 透传指纹特征
 - **配额规则（v20260805 重构后）**：①**游客固定 20 条/天**（Asia/Shanghai 自然日清零），用完→注册引导 ②**注册用户前 3 天 50/天、之后 20/天**，用完→付费墙 ③邀请 +50/人封顶 300（**好友注册成功即兑现**，先扣免费档再扣 bonus）④激活码 68元/月 500条/天×30天（绑账号）；**VIP 豁免 IP 防刷；IP 150次/天仅游客生效**（注册用户豁免防公司/宿舍误伤）
 - **受限文案（chat.js _handleQuotaBlock）**：guest_quota_exhausted→注册引导弹窗；quota_exhausted→付费墙；session_expired→"账号已在其他设备登录"+登出；vip_daily_limit→"服务过载请明天再试"；ip_limit/ip_new_device_limit→"使用太频繁"；**顶部导航（friends.js）账号模式显示邀请赠送/VIP 剩余天数，游客不显示**；免费档/IP上限/VIP500 均不告知用户
-- **知识库（B 方案完全本地化）**：**IMA 已彻底移除**（secrets 已删，代码零引用）。本地切块源 `C:\迷男\{恋爱话术,恋爱教学,聊天实战}\`，灌库脚本 `supabase/scripts/build_kb_blocks.mjs`（SBP_PAT 环境变量）。检索 = kb_blocks_recall RPC，命中块原文直入 LLM
+- **知识库（B 方案完全本地化）**：**IMA 已彻底移除**（secrets 已删，代码零引用）。本地切块源仅 `C:\迷男\恋爱话术\`（**2026-08-06 恋爱教学/聊天实战 已删库且不再上传**，干扰检索；kb_blocks 现 739 块全为话术；如未来恢复：把目录加回 build_kb_blocks.mjs ROOTS 重跑）。灌库脚本 `supabase/scripts/build_kb_blocks.mjs`（SBP_PAT 环境变量）。检索 = kb_blocks_recall RPC，命中块原文直入 LLM。**ima-proxy kbFolders={hs:'恋爱话术',jx:null}，applyQuota !jx 分支 hs 吃满 pickCount**（防弹药从 5 条缩到 2-3 条）
 
 ## 记忆体系（三层隔离）
 
@@ -41,7 +41,7 @@
 - **v9 记忆自洽（version 32）**：记忆卡补记 recent_self_messages；buildSystemContent 首段硬编码"**你即用户本人**"；输出 1-2 句先正面回应再转折；自洽硬约束；主回复后 `isNearDuplicate`（bigram ≥0.85）→ 带提示重生成一次
 - v8 语义拆解：TOPIC_VOCAB 91 词 + extractSemanticKeywords（LLM 拆 3-5 个检索词）；首轮顺序 `[...semanticKws, ...kw, searchQuery]`
 - L0-L3：单条 history ≤800 字；知识库 5 条×500 字；近详远略（最近 10 条全文+更早仅对方消息 ≤120 字）；STAGE_HINTS 按 stage 注入；组装：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
-- 套路（v7/v18）：extractStrategy 提炼 2-6 步存 memory_card.strategy；`/` 开头输入清除；轮次上限自动终止；fetchKbFolders 状态感知配额（话术≤3+教学≤2）；套路走独立惯例检索通道
+- 套路（v7/v18）：extractStrategy 提炼 2-6 步存 memory_card.strategy；`/` 开头输入清除；轮次上限自动终止；**状态感知配额已失效（2026-08-06 教学/实战删库后仅剩话术，hs 吃满参考配额）**；套路走独立惯例检索通道
 
 ## 关键踩坑（务必先读）
 

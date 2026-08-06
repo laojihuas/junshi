@@ -426,10 +426,10 @@ Deno.serve(async (req) => {
     if (serviceRoleKey && supabaseUrl) {
       mark('ready'); // 认证/配置/记忆卡读取完成
       try {
-        // [B] 文件夹识别改为本地 folder_id 映射：话术=恋爱话术 / 教学=恋爱教学+聊天实战
-        //   用于检索配额平衡（执行期话术为主，未启动期教学为主）
-        kbFolders = { hs: '恋爱话术', jx: '恋爱教学' };
-        // 配额：套路执行期话术为主(3)教学兜底(2)；未启动期教学为主(3)话术兜底(2)
+        // [B] 文件夹识别改为本地 folder_id 映射：话术=恋爱话术
+        //   [2026-08-06] 恋爱教学/聊天实战 已删库（干扰检索），仅剩恋爱话术一类，jx 置空
+        kbFolders = { hs: '恋爱话术', jx: null };
+        // 配额：仅剩话术一类，hs 直接吃满参考配额（见 applyQuota 的 !jx 分支）
         const quotaOpts = {
           hsFolder: kbFolders.hs,
           jxFolder: kbFolders.jx,
@@ -1861,7 +1861,7 @@ async function recallBlocks(
       .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * GEM_WEIGHT) - ((a._ft_score || 0) + (a._gem || 0) * GEM_WEIGHT));
     if (scored.length > 0) items = scored;
 
-    // 4. 状态感知配额（话术=恋爱话术 / 教学=恋爱教学+聊天实战）
+    // 4. 状态感知配额（仅剩恋爱话术一类；jx 空时 hs 吃满，见 applyQuota）
     return opts ? applyQuota(items, {
       hsFolder: opts.hsFolder,
       jxFolder: opts.jxFolder,
@@ -1921,6 +1921,8 @@ async function browseBlocksByTitle(
 //   保证"话术加权"不消灭策略素材——两类始终同在上下文，LLM 自行取舍
 //   执行期：话术 ≤3 + 教学 ≤2；未启动期：教学 ≤3 + 话术 ≤2
 //   [B方案] hs/jx 判定改用 folder_id（本地 kb_blocks：恋爱话术=hs，恋爱教学/聊天实战=jx）
+//   [2026-08-06] 教学/实战已删库：jx 为空时 hs 直接吃满 pickCount
+//     （否则上下文弹药从 5 条缩水到 2-3 条，务必保留 !jx 分支）
 // ============================================================
 function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean; pickCount?: number }): any[] {
   const count = opts.pickCount || KB_REF_COUNT;
@@ -1935,12 +1937,11 @@ function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: s
     const pid = it.folder_id || it.parent_folder_id || '';
     if (hs && pid === hs) hsList.push(it);
     else if (jx && pid === jx) jxList.push(it);
-    else if (jx && pid === '聊天实战') jxList.push(it); // 聊天实战归教学类
     else otherList.push(it);
   }
 
-  const hsQuota = opts.strategyActive ? 3 : 2;
-  const jxQuota = opts.strategyActive ? 2 : 3;
+  const hsQuota = !jx ? count : (opts.strategyActive ? 3 : 2);
+  const jxQuota = !jx ? 0 : (opts.strategyActive ? 2 : 3);
   const picked = [
     ...hsList.slice(0, Math.min(hsQuota, count)),
     ...jxList.slice(0, Math.min(jxQuota, count)),
