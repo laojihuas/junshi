@@ -72,7 +72,9 @@ language sql stable as $$
       ) as sc
     from public.kb_blocks b
     where b.bigrams && p_grams
-    limit 500
+    -- [v76] 粗筛上限 500→1000：教学/实战删库后仅 739 块，bigram 命中常超 500（实测 270-596），
+    --   旧 limit 500 无排序截断会丢候选；小库全量打分无性能压力
+    limit 1000
   ),
   ranked as (
     select *, row_number() over (partition by media_id order by sc desc, block_idx) as rn

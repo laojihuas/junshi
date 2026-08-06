@@ -1850,6 +1850,7 @@ async function recallBlocks(
 
     // 3. 调数据库 RPC：粗筛+块内词频打分+同文档去重+limit 一次完成
     // [v53] p_limit 12→24：多捞候选池给 gem 精排（候选只做重排，最终仍取 target 进 LLM，token 不变）
+    // [v76] 教学/实战删库后仅剩 739 块（话术内容高度重叠）→ 候选池 24→12（target*3，覆盖 6 个文档足够）
     const target = opts?.pickCount || KB_REF_COUNT;
     const resp = await fetch(`${supabaseUrl}/rest/v1/rpc/kb_blocks_recall`, {
       method: 'POST',
@@ -1858,7 +1859,7 @@ async function recallBlocks(
         p_grams: [...grams].slice(0, 80),
         p_words: queries.slice(0, 20),
         p_weights: weights.slice(0, 20),
-        p_limit: Math.max(target * 4, 24),
+        p_limit: Math.max(target * 3, 12),
         p_max_blocks_per_doc: 2,
       }),
     });
