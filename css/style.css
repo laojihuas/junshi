@@ -543,7 +543,8 @@ textarea.input {
 /* 新建好友浮动按钮 */
 .fab {
     position: fixed;
-    bottom: 24px;
+    /* [v20260806] 底部上提 20px（24→44），与聊天输入栏留白一致 */
+    bottom: 44px;
     right: 20px;
     width: 56px;
     height: 56px;
@@ -901,7 +902,8 @@ textarea.input {
 .chat-input-area {
     background: var(--bg-header);
     padding: 10px 12px;
-    padding-bottom: calc(10px + var(--safe-bottom));
+    /* [v20260806] 底部整体上提 20px（10→30），避免贴屏过紧 */
+    padding-bottom: calc(30px + var(--safe-bottom));
     display: flex;
     align-items: flex-end;
     gap: 8px;
