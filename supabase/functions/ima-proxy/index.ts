@@ -946,6 +946,33 @@ const GOAL_HINTS: Record<string, { hint: string }> = {
 // [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
 const STAGE_ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
 
+// [v60 主动推进] 无目标时的默认推进指令：军师是主动方，不设目标也要"带着推进意图聊"
+//   每个 stage 定义本轮该往哪带一步；带台阶可退（不硬推），优先调用知识库话术当弹药。
+//   设了目标（goal）时由 GOAL_HINTS 接管推进方向，这里不重复注入；挽回特殊路径不推进。
+const ESCALATION_HINTS: Record<string, string> = {
+  '未知': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或具体的小邀约由头（如"那家店感觉你会喜欢，改天带你去"），自然开场，别查户口。',
+  '朋友': '本轮主动推进：从朋友往暧昧探一步——用推拉或惯例话术做一次轻度试探：模糊邀约（"改天带你去xx"）、半玩笑的拉近距离、或调侃里带一点暧昧钩子。带台阶可退：她接住就顺势带，她回避就洒脱退一步，绝不纠缠。',
+  '追求': '本轮主动推进：试探暧昧窗口——半玩笑的拉近距离（如"我们俩这状态算啥"）、推拉话术制造张力、或一次具体但轻松的邀约（结合时间/地点现实性）。她给正反馈就大胆往上抬一档，冷场就换话题养氛围。',
+  '暧昧': '本轮主动推进：把暧昧张力往上抬——推拉+留白+一次模糊邀约（"改天带你去那家店"）、调侃里带亲密暗示。敢于调情但守住暧昧窗口，不急着捅破，留钩子让她回味。',
+  '恋爱': '本轮主动推进：维持并加固恋爱浓度——具体约见面（结合时间/地点现实性）、共同回忆或未来钩子（"下次带你尝尝我说的那家"），有情绪价值、有小脾气，但别过度客气。',
+  '挽回': '',
+};
+
+// [v60 主动推进] 按当前 stage 拼装"主动推进"指令块（无目标/目标已达成时注入）
+//   核心：军师是主动方——主动制造窗口（试探/邀约/张力），读反馈再决定下一步；
+//   绝不表白、绝不逼问、绝不纠缠；优先调用知识库话术当弹药；挽回期禁用推进。
+function thisEscalationBlock(stage: string): string {
+  const hint = ESCALATION_HINTS[stage || '未知'];
+  if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
+  return `\n\n【主动推进】(战略方向，严格遵守)\n`
+    + `- 你是关系的主动推进方，不是等待者。每轮都要带着"往下一阶段带一步"的意图说话，但进攻藏在话术里，绝不暴露目的、绝不显得急。\n`
+    + `- 本轮推进动作：${hint}\n`
+    + `- 主动开窗：对方没给信号你就自己制造窗口——半玩笑试探、模糊邀约、调侃带钩子，选一个自然的角度发起；不必等她主动。\n`
+    + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
+    + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/邀约话术来执行推进，不要自己硬编。\n`
+    + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
+}
+
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
   try {
     if (!sessionId) return null;
@@ -1107,8 +1134,8 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
   const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
-    + `[v58 阶段推进] stage 判定注意：若最近对话出现密集兴趣信号（她主动追问、发照片、秒回、调侃你、话明显变长、约你），stage 可按正常顺序"追求→暧昧→恋爱"升一级（最多升一级，不越级）；\n`
-    + `但若她明显冷淡/回避/争吵，stage 可降级或改为"朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
+    + `[v60 阶段推进] stage 判定注意：你是主动推进方。升级信号包括两类——①对方给密集兴趣信号（她主动追问、发照片、秒回、调侃你、话明显变长、约你）；②用户（你）主动试探成功：用户发出试探/邀约/调侃带钩子/试探暧昧后，她积极接住（应约、回撩、延长话题、发照片、开玩笑接梗）。两类信号任一成立，stage 可按正常顺序"朋友→追求→暧昧→恋爱"升一级（最多升一级，不越级）；\n`
+    + `但若用户连续试探她都不接（冷淡/回避/转移话题/争吵），stage 可降级或改为"朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
@@ -1475,8 +1502,8 @@ function buildSystemContent(opts: {
   //   正常顺序 未知→普通→追求→暧昧→恋爱；挽回是特殊路径
   const goal = opts.memoryCard?.goal || '';
   const goalHint = GOAL_HINTS[goal];
+  const curStage = opts.memoryCard?.profile?.stage || '';
   if (goalHint) {
-    const curStage = opts.memoryCard?.profile?.stage || '';
     const curIdx = STAGE_ORDER.indexOf(curStage);
     const goalTarget = goal === '挽回修复' || goal === '推进恋爱'
       ? '恋爱'
@@ -1488,7 +1515,13 @@ function buildSystemContent(opts: {
         + `目标：${goal}\n`
         + `当前阶段：${curStage || '未知'}\n`
         + `本轮动作：${goalHint.hint}`;
+    } else {
+      // [v60] 目标已达成：不再按目标使劲，改按当前 stage 维持/加固（防"达成后失去方向"）
+      s += thisEscalationBlock(curStage);
     }
+  } else {
+    // [v60 主动推进] 没设目标 = 默认主动推进：军师永远是主动方，不躺着等对方给信号
+    s += thisEscalationBlock(curStage);
   }
 
   // 知识库参考
