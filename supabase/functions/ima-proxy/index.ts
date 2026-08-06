@@ -128,7 +128,7 @@
 //       主回复前读取注入 system；主回复后异步合并更新（画像提取频率 ≤ 每3分钟一次）
 //     - 输出格式约束：【分析】+【回复建议 N】+【小提示】结构化三段
 //   L3 提示词体系：
-//     - 场景指令：按记忆卡 stage 注入对应关系阶段的指导（追求/暧昧/恋爱/挽回/普通朋友）
+//     - 场景指令：按记忆卡 stage 注入对应关系阶段的指导（追求/暧昧/恋爱/挽回/朋友）
 //     - 全局提示词(后台可编辑) > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 //
 // 兼容性：所有增强均为服务端内部实现；旧前端（不传 session_id/history）自动降级，
@@ -172,7 +172,7 @@ const STAGE_HINTS: Record<string, string> = {
   '暧昧': '线上暧昧期：用文字张力推进——先回应再调侃/留白，保留一点神秘感；敢于调情，说话直接点、带点挑逗和钩子，别总温吞水；可抛出模糊邀约试探，不急着捅破窗户纸，守住"暧昧窗口"。',
   '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃保鲜，带点自己的脾气，但别拿原则问题开玩笑。',
   '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压，对方说什么都先接住情绪。',
-  '普通朋友': '线上普通朋友：自然、有态度、不刻意讨好，话题轻松但保持边界。',
+  '朋友': '线上朋友：自然、有态度、不刻意讨好，话题轻松但保持边界。',
   '未知': '',
 };
 
@@ -240,10 +240,11 @@ function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
 }
 
 // [v6 L0] 知识库参考条数与原文截断长度
-const KB_REF_COUNT = 5;
+// [v59 降本] KB 参考块 5→3（主回复 system 未命中部分 ≈15%↓，检索质量影响小）
+const KB_REF_COUNT = 3;
 const KB_CONTENT_MAX = 500;
 const HISTORY_ITEM_MAX = 800;   // 单条历史上限
-const SUMMARY_ITEM_MAX = 120;   // 更早消息摘要单条上限
+const SUMMARY_ITEM_MAX = 80;    // 更早消息摘要单条上限（v59 120→80 降本）
 const RECENT_FULL = 10;         // 近详远略：最近 N 条全文
 const MEMORY_UPDATE_INTERVAL = 3 * 60 * 1000; // 画像提取频率：3 分钟
 
@@ -926,7 +927,7 @@ const FACTS_INJECT_MAX = 4;    // 每轮按相关度最多注入几条
 
 // [v58 M3 目标引导] 目标 → 行动路线（战略层）
 //   目标由用户在前端设置（memory_card.goal）；这里决定每轮注入的"本轮动作"
-//   正常推进顺序：未知/普通朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
+//   正常推进顺序：未知/朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
 const GOAL_HINTS: Record<string, { hint: string }> = {
   '约见面': {
     hint: '本轮向"见面"推进：先用具体由头做模糊邀约（如"那家店感觉你会喜欢，改天带你去"）→ 她接住就敲定具体时间地点（结合当前时间/位置，不现实就改约）→ 她推脱就洒脱留钩子（"那这顿先记我账上"）绝不纠缠。',
@@ -943,7 +944,7 @@ const GOAL_HINTS: Record<string, { hint: string }> = {
 };
 
 // [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
-const STAGE_ORDER = ['未知', '普通朋友', '追求', '暧昧', '恋爱'];
+const STAGE_ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
   try {
@@ -995,7 +996,7 @@ async function updateMemoryCard(ctx: {
   const msgs = Array.isArray(card.recent_user_messages) ? card.recent_user_messages.slice() : [];
   if (lastUser && (msgs.length === 0 || msgs[msgs.length - 1] !== lastUser.content)) {
     msgs.push(truncateText(lastUser.content, 200));
-    if (msgs.length > 20) msgs.splice(0, msgs.length - 20);
+    if (msgs.length > 12) msgs.splice(0, msgs.length - 12); // [v59] 20→12 记忆卡压缩降本
     card.recent_user_messages = msgs;
   }
 
@@ -1005,7 +1006,7 @@ async function updateMemoryCard(ctx: {
   const selfMsgs = Array.isArray(card.recent_self_messages) ? card.recent_self_messages.slice() : [];
   if (lastSelf && (selfMsgs.length === 0 || selfMsgs[selfMsgs.length - 1] !== lastSelf.content)) {
     selfMsgs.push(truncateText(lastSelf.content, 200));
-    if (selfMsgs.length > 20) selfMsgs.splice(0, selfMsgs.length - 20);
+    if (selfMsgs.length > 12) selfMsgs.splice(0, selfMsgs.length - 12); // [v59] 20→12 记忆卡压缩降本
     card.recent_self_messages = selfMsgs;
   }
 
@@ -1105,9 +1106,9 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/普通朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v58 阶段推进] stage 判定注意：若最近对话出现密集兴趣信号（她主动追问、发照片、秒回、调侃你、话明显变长、约你），stage 可按正常顺序"追求→暧昧→恋爱"升一级（最多升一级，不越级）；\n`
-    + `但若她明显冷淡/回避/争吵，stage 可降级或改为"普通朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
+    + `但若她明显冷淡/回避/争吵，stage 可降级或改为"朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
