@@ -807,17 +807,19 @@ async function extractSemanticKeywords(
   query: string, recentUserMsgs: string[], stageVocab?: string[]
 ): Promise<string[]> {
   try {
+    // [v75 缓存③] prompt 固定部分（角色/词表/示例/要求）前移 → 前缀稳定可缓存命中；
+    //   query/最近对话/阶段词表 挪尾部（动态内容不影响前缀）
     const prompt = '你是恋爱话术检索助手，把"对方说的话"拆成检索恋爱话术库的短关键词。\n'
-      + `对方的话：「${truncateText(query, 80)}」\n`
-      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
-      + (stageVocab && stageVocab.length > 0
-        ? `当前目标相关检索词（优先选，最多 2 个）：${stageVocab.join('、')}\n`
-        : '')
       + `知识库词表（优先选词，可少量自创）：${TOPIC_VOCAB.join('、')}\n`
       + '示例：\n'
       + '输入："她说今天被领导骂了很难受"\n输出：["委屈","安慰","哄","难过","关心"]\n'
       + '输入："她两天没回我消息了"\n输出：["冷淡","高冷","忽冷忽热","追问"]\n'
-      + `要求：只输出 JSON 数组，${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个 2-${KW_LEN_MAX} 字，词表优先、可加 1-2 个贴近原话的字面词，无解释。`;
+      + `要求：只输出 JSON 数组，${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个 2-${KW_LEN_MAX} 字，词表优先、可加 1-2 个贴近原话的字面词，无解释。\n`
+      + `对方的话：「${truncateText(query, 80)}」\n`
+      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
+      + (stageVocab && stageVocab.length > 0
+        ? `当前目标相关检索词（优先选，最多 2 个）：${stageVocab.join('、')}`
+        : '');
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.2, maxTokens: 150, _stage: 'semantic_kws',
     });
@@ -1428,19 +1430,21 @@ function resolveTacticCategory(query: string, history: any[], memoryCard: Memory
   return { category, phase };
 }
 
-// 组装战术指令块（全局原则 + 阶段卡 + 命中类别卡组）
+// [v75 缓存白捡①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 进固定前缀可缓存命中）
+const GLOBAL_TACTIC_PREAMBLE = `\n\n【战术指令】(本轮最高优先，先判断后回复)\n`
+  + `执行顺序：①判断她这条消息属于防守/进攻/救场哪一类 ②匹配对应场景 ③按该场景的"态度+手法"输出一句话话术——可从范例选，或按范例风格重新生成，禁止照抄范例原文。\n`
+  + `全局原则（全程生效）：\n`
+  + `- 回复字数 ≤ 她字数的1.3倍，通常一句；整条 ≤20字，超20字=失败必须压缩。\n`
+  + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
+  + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒先共情，此场景禁用调侃与反击。`;
+
+// [v75] 战术变化部分（每轮按类别/阶段变化 → 放后缀不破坏前缀缓存）：阶段卡 + 命中类别卡组
 function buildTacticBlock(category: TacticCategory, phase: 'attract' | 'comfort' | 'seduce'): string {
   const cards = TACTIC_CARDS[category];
   const cardText = cards.map((c) =>
     `场景：${c.scene}\n态度：${c.attitude}｜手法：${c.method}\n范例：${c.examples.map((e) => `"${e}"`).join(' / ')}`
   ).join('\n\n');
-  return `\n\n【战术指令】(本轮最高优先，先判断后回复)\n`
-    + `执行顺序：①判断她这条消息属于防守/进攻/救场哪一类 ②匹配对应场景 ③按该场景的"态度+手法"输出一句话话术——可从范例选，或按范例风格重新生成，禁止照抄范例原文。\n`
-    + `全局原则（全程生效）：\n`
-    + `- 回复字数 ≤ 她字数的1.3倍，通常一句；整条 ≤20字，超20字=失败必须压缩。\n`
-    + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
-    + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒先共情，此场景禁用调侃与反击。\n\n`
-    + `【当前阶段】${TACTIC_PHASE_CARDS[phase]}\n\n`
+  return `\n\n【当前阶段】${TACTIC_PHASE_CARDS[phase]}\n\n`
     + `【${category === 'defense' ? '防守' : category === 'attack' ? '进攻' : '救场'}类战术卡】（本轮命中，严格按卡执行）\n${cardText}`;
 }
 
@@ -1478,16 +1482,10 @@ function buildSystemContent(opts: {
     + `动手前先想三件事：①她这句话的真实意图（试探/调情/拒绝/分享情绪/考验/寒暄）；②她为什么这么说（多是我上一句的某个点触发的）；③她期待我什么反应（接住/推进/化解/换话题）。\n`
     + `铁律：绝不盯字面回字面。她发"哈哈"不是要你夸她笑得好，而是你上一句戳中了她——找到"她为什么笑"，基于原因强化那个点或顺势推进，禁止回应笑本身。`;
 
-  // [v15] 当前时间（小时级稳定，不破坏前缀缓存）+ 我的位置（从简介提取，命中才注入）
-  //   放在角色定位后、语气态度前：基础事实靠前才有约束力
+  // [v15] 当前时间（小时级稳定，TTL 内不变，留在固定区）
+  //   [v75 缓存②] 【我的位置】已挪到后缀（用户相关，会破坏跨用户前缀一致性）
   s += `\n\n【当前时间】（严格遵守，所有时刻/时段表述以此为准）\n${formatCurrentTime()}\n`
     + `- 严禁编造或猜错时刻；"今晚/明天/周末/这么晚"等词必须与时间一致；判断这个点适不适合约人/打电话/聊深夜话题以此为准，别半夜答应见面或约人。`;
-  const myLoc = extractLocation(opts.userBio || '');
-  if (myLoc) {
-    s += `\n\n【我的位置】（涉及见面、约人、距离、异地等表述以此为准）\n我所在城市：${myLoc}。\n`
-      + `- 不知道对方在哪时不得假设对方离我很近；\n`
-      + `- "过来找你/见面/顺路/接送"等邀约，必须同时结合【当前时间】与【我的位置】判断是否现实，不现实就委婉拒绝或改约。`;
-  }
 
   // [v73] 【语气与态度】已删除：被战术卡组（防守/进攻类）+ 全局原则（含安全边界）覆盖
 
@@ -1503,9 +1501,32 @@ function buildSystemContent(opts: {
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲？我有个消磨时间的绝招"（17字）。`;
 
+  // [v75 缓存①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 前缀缓存白捡）
+  s += GLOBAL_TACTIC_PREAMBLE;
+
   // [v73] 【兴趣信号与升级】已删除：被进攻类战术卡（升高关系/推拉/筛选）覆盖
 
-  // [v56 话题锚点] 记忆卡 profile.anchor：跨轮次围绕同一意象延伸，像连续剧
+  // ===== 以下为每轮变化块（后缀，不影响缓存前缀）=====
+  // [v75 缓存②] 所有用户相关/会变的块（位置/锚点/阶段/简介）一律放后缀，
+  //   前缀只保留：角色定位+先解读+时间+自洽+战术前导（字节级稳定 → TTL 内可缓存命中）
+
+  // [v73 迷男精髓] 战术变化部分：当前阶段卡 + 命中类别卡组
+  //   防守（敷衍/打压/废物测试/ASD/服从度低/消失/提前男友/海王）→ 防守卡
+  //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
+  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
+  s += buildTacticBlock(tactic.category, tactic.phase);
+
+  // [v73] 【对方正在攻击/挑衅】独立块已删除：防守类战术卡覆盖（挽回期由全局原则兜底）
+
+  // [v75 缓存②] 【我的位置】（用户相关：按简介提取，命中才注入）
+  const myLoc = extractLocation(opts.userBio || '');
+  if (myLoc) {
+    s += `\n\n【我的位置】（涉及见面、约人、距离、异地等表述以此为准）\n我所在城市：${myLoc}。\n`
+      + `- 不知道对方在哪时不得假设对方离我很近；\n`
+      + `- "过来找你/见面/顺路/接送"等邀约，必须同时结合【当前时间】与【我的位置】判断是否现实，不现实就委婉拒绝或改约。`;
+  }
+
+  // [v75 缓存②] 【话题锚点】（记忆卡 profile.anchor，跨轮次变化）
   const anchor = opts.memoryCard?.profile?.anchor || '';
   if (anchor) {
     s += `\n\n【话题锚点】你和她的对话有一个长期共同梗：「${anchor}」——它是你俩的专属记忆，用来拉近距离。\n`
@@ -1513,26 +1534,16 @@ function buildSystemContent(opts: {
       + `- 它出现在她的话里时，立刻抓住做文章（升级/调侃/延伸），别忽略。`;
   }
 
-  // 场景指令（L3：按关系阶段注入指导）——阶段相对稳定，放前缀后段
+  // [v75 缓存②] 【当前关系阶段】（按 stage 变化，放后缀）
   const stage = opts.memoryCard?.profile?.stage || '';
   if (stage && STAGE_HINTS[stage]) {
     s += `\n\n【当前关系阶段】${STAGE_HINTS[stage]}`;
   }
 
-  // 用户简介（固定）
+  // [v75 缓存②] 【用户个人简介】（用户相关，放后缀）
   if (opts.userBio && opts.userBio.trim()) {
     s += `\n\n【用户个人简介】（对话中请结合以下用户信息给出更个性化的建议）\n${opts.userBio.trim()}`;
   }
-
-  // ===== 以下为每轮变化块（后缀，不影响缓存前缀）=====
-
-  // [v73 迷男精髓] 战术指令（全局原则 + 当前阶段卡 + 命中类别卡组）：
-  //   防守（敷衍/打压/废物测试/ASD/服从度低/消失/提前男友/海王）→ 防守卡
-  //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
-  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
-  s += buildTacticBlock(tactic.category, tactic.phase);
-
-  // [v73] 【对方正在攻击/挑衅】独立块已删除：防守类战术卡覆盖（挽回期由全局原则兜底）
 
   // 记忆卡：对方画像（跨轮次相对稳定，但会随 updateMemoryCard 变化，放后缀）
   const profile = opts.memoryCard?.profile;
