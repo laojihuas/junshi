@@ -688,6 +688,8 @@ Deno.serve(async (req) => {
         folder_jx: !!kbFolders?.jx,
         // [vB] LLM token 用量（token 测量用）
         llm_usage: llmUsageLog.map((u) => ({ stage: u.stage, ...u.usage })),
+        // [v72] 思考链原文（thinking 档才有；完整保留，调试/教学用）
+        llm_reasoning: llmReasoning || null,
       },
     }), { headers, status: 200 });
 
@@ -1660,6 +1662,9 @@ async function llmChat(
   }
   const data = await resp.json();
   const content = data?.choices?.[0]?.message?.content;
+  // [v72 调试] 捕获思考链（thinking 档才有；辅助调用 thinking off 无 reasoning，不会覆盖主回复）
+  const reasoning = data?.choices?.[0]?.message?.reasoning_content;
+  if (typeof reasoning === 'string' && reasoning.trim()) llmReasoning = reasoning;
   if (typeof content !== 'string' || !content.trim()) {
     throw new Error('LLM 返回内容为空');
   }
@@ -1672,6 +1677,8 @@ async function llmChat(
 
 // [vB] LLM usage 日志（token 测量；顶层声明防作用域事故）
 const llmUsageLog: { stage: string; usage: any }[] = [];
+// [v72 调试] 最近一次主回复的思考链原文（thinking 档才有；_debug 透传，辅助调用不覆盖）
+let llmReasoning = '';
 
 // ============================================================
 // [v53] 精华打分（零 LLM，规则驱动）：金句信号加分、口水信号减分
