@@ -14,7 +14,14 @@ if (!patLine) { console.error('找不到 PAT 行'); process.exit(1); }
 const PAT = patLine.replace(/^令牌/, '').trim();
 if (!PAT.startsWith('sbp_')) { console.error('PAT 格式异常'); process.exit(1); }
 
-const SQL_PATH = path.resolve(__dirname, '../sql/012_stage_rename_to_friend.sql');
+// 命令行参数：脚本文件名（相对 sql/ 目录）
+const fname = process.argv[2] || '012_stage_rename_to_friend.sql';
+const SQL_PATH = path.resolve(__dirname, '../sql', fname);
+if (!fs.existsSync(SQL_PATH)) {
+  console.error('SQL 文件不存在:', SQL_PATH);
+  process.exit(1);
+}
+console.log('Running:', fname);
 const SQL = fs.readFileSync(SQL_PATH, 'utf8');
 
 // [v20260805] 强制禁用代理 + 浏览器 UA，避开 Cloudflare 1010

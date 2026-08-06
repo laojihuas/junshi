@@ -245,7 +245,10 @@
             <div class="card">
                 <div class="card-title">
                     <span>用户列表</span>
-                    <span style="font-size:12px;color:var(--muted);" id="user-count">共 0 人</span>
+                    <span style="display:flex;gap:8px;align-items:center;">
+                        <span style="font-size:12px;color:var(--muted);" id="user-count">共 0 人</span>
+                        <button id="cleanup-ghost-btn" class="btn btn-outline" style="font-size:12px;padding:4px 10px;">🧹 清理幽灵</button>
+                    </span>
                 </div>
                 <div style="overflow-x:auto;">
                     <table>
@@ -809,7 +812,57 @@
             });
             // [LLM 生成参数] 保存
             document.getElementById('llm-save-btn').addEventListener('click', saveLlmParams);
+
+            // 清理幽灵设备（调 cleanup_ghost_devices RPC：先 dry_run 预览 → 确认真删）
+            document.getElementById('cleanup-ghost-btn').addEventListener('click', cleanupGhostDevices);
         });
+        // ============================================================
+        // 清理幽灵设备（前台 RPC：先 dry-run 列出候选 → 确认后真删）
+        //   规则 A：toktest_/test_/pytest_/debug_/jstest_ 前缀（脚本残留）
+        //   规则 B：fp_ fallback 设备 + 7 天前 + 无任何绑定（漂移孤岛）
+        // ============================================================
+        async function cleanupGhostDevices() {
+            const btn = document.getElementById('cleanup-ghost-btn');
+            btn.disabled = true;
+            const orig = btn.textContent;
+            try {
+                // 1) dry-run
+                btn.textContent = '🔍 扫描中...';
+                const dry = await sb.rpc('cleanup_ghost_devices', { p_dry_run: true });
+                if (dry.error) { toast('扫描失败：' + dry.error.message); return; }
+                const a = dry.rule_a_test_prefix || { count: 0, device_ids: [] };
+                const b = dry.rule_b_fp_island     || { count: 0, device_ids: [] };
+                const total = (a.count || 0) + (b.count || 0);
+                if (total === 0) {
+                    toast('✅ 干净，无幽灵设备');
+                    return;
+                }
+                const aIds = (a.device_ids || []).join('\n  • ');
+                const bIds = (b.device_ids || []).join('\n  • ');
+                const msg =
+                    `发现 ${total} 个候选设备：\n` +
+                    `\n【规则 A：测试前缀】${a.count || 0} 个${aIds ? '\n  • ' + aIds : ''}\n` +
+                    `\n【规则 B：fp_ 孤岛】${b.count || 0} 个${bIds ? '\n  • ' + bIds : ''}\n` +
+                    `\n确认删除这些设备？（绑定账号/激活码的设备不在候选中）`;
+                if (!confirm(msg)) return;
+                // 2) 真删
+                btn.textContent = '🧹 清理中...';
+                const real = await sb.rpc('cleanup_ghost_devices', { p_dry_run: false });
+                if (real.error) { toast('清理失败：' + real.error.message); return; }
+                const removed = real.total_removed || 0;
+                toast(`✅ 已清理 ${removed} 个幽灵设备`);
+                // 3) 刷新统计
+                if (window.__adminUsers) delete window.__adminUsers;
+                await loadStats();
+            } catch (e) {
+                console.error(e);
+                toast('清理出错：' + (e.message || e));
+            } finally {
+                btn.disabled = false;
+                btn.textContent = orig;
+            }
+        }
+
     </script>
 </body>
 </html>
