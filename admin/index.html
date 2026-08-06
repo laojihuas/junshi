@@ -616,27 +616,22 @@
             }
         }
 
-        // 生成激活码
+        // 生成激活码（v2：改走 RPC admin_generate_codes，规避 activation_codes 表
+        //   只有 SELECT RLS 策略、直插被拦的问题；函数内自鉴 is_admin）
         async function generateCodes(count) {
             if (!sb) return;
-            const codes = [];
-            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-            for (let i = 0; i < count; i++) {
-                let code = '';
-                for (let j = 0; j < 16; j++) {
-                    code += chars[Math.floor(Math.random() * chars.length)];
-                    if (j % 4 === 3 && j < 15) code += '-';
-                }
-                codes.push({ code });
-            }
-            const { error } = await sb.from('activation_codes').insert(codes);
+            const { data, error } = await sb.rpc('admin_generate_codes', { p_count: count });
             if (error) {
                 toast('生成失败：' + error.message);
-            } else {
-                toast('成功生成 ' + count + ' 个激活码');
-                loadCodes();
-                loadStats();
+                return;
             }
+            if (data && data.error) {
+                toast('生成失败：' + (data.message || data.error));
+                return;
+            }
+            toast('成功生成 ' + (data && data.count != null ? data.count : count) + ' 个激活码');
+            loadCodes();
+            loadStats();
         }
 
         // 导出激活码 CSV
