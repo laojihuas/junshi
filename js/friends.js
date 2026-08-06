@@ -30,7 +30,8 @@ const Friends = {
                 const acc = Auth.account;
                 if (acc.is_vip) {
                     const days = acc.vip_days_left || 0;
-                    headerStatus.textContent = '👑 VIP · 剩余 ' + days + ' 天';
+                    // [v20260805] 浓缩为 VIP+天数（去 👑 图标，避免撑宽顶栏挤压其他按钮；保留金色底色）
+                    headerStatus.textContent = 'VIP' + days + '天';
                     headerStatus.style.background = 'rgba(255, 215, 0, 0.25)';
                     headerStatus.style.display = '';
                 } else if ((acc.invite_bonus || 0) > 0) {
