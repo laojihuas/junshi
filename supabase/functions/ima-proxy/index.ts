@@ -653,6 +653,8 @@ Deno.serve(async (req) => {
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
+        // [v61] 里程碑进度（验证推进引导）
+        milestones: Array.isArray(memoryCard?.milestones) ? memoryCard!.milestones : [],
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
@@ -910,9 +912,13 @@ type MemoryCard = {
   // [v57] 长期事实清单：值得跨天记住的硬事实（约定/日期/偏好/雷点/家庭/工作）
   //   [{text(≤40字), at(首次记录), last_mention(最近提及)}]，上限 FACTS_MAX，按 last_mention 新旧排序
   facts?: { text: string; at: string; last_mention: string }[];
-  // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / ''(未设置)
+  // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / 保持当前关系 / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
+  // [v61 里程碑] 关系推进里程碑：从"未知"一路推到"恋爱"要逐个收集的信息/动作
+  //   ['照片','年龄','住址','喜好','家底信息','恋爱经历','敏感面','加微信','约会']
+  //   已完成项（对方已给出/已发生）由 LLM 在 extractProfile 时判定合并，构建 system 时注入进度
+  milestones?: string[];
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -941,10 +947,32 @@ const GOAL_HINTS: Record<string, { hint: string }> = {
   '保持暧昧': {
     hint: '本轮维持暧昧张力：推拉+留白+神秘感，不急着捅破窗户纸；守住暧昧窗口，适度抛模糊邀约试探但不逼问。',
   },
+  '保持当前关系': {
+    hint: '用户选择保持当前关系阶段，暂停升级推进：本轮正常聊天、稳住现有关系温度即可，不主动试探升级、不收集新的里程碑信息；她主动给信号就自然接住，但不主动发起推进；情绪价值照给，绝不冷场。',
+  },
 };
 
 // [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
 const STAGE_ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
+
+// [v61 里程碑] 关系推进里程碑链（默认一路推到恋爱要逐个拿下的"小目标"）
+//   顺序有讲究：先易后难、先公开后私密、先线上后线下——
+//   照片(可见度) → 年龄(基础信息) → 住址(距离判断) → 喜好(话题弹药) →
+//   家底信息(信任度) → 恋爱经历(私密度) → 敏感面(情绪信任) → 加微信(渠道升级) → 约会(线下落地)
+const MILESTONE_CHAIN = ['照片', '年龄', '住址', '喜好', '家底信息', '恋爱经历', '敏感面', '加微信', '约会'];
+
+// [v61] 各里程碑对应的"本轮推进话术方向"（带台阶可退，军师用来主动引导）
+const MILESTONE_TIPS: Record<string, string> = {
+  '照片': '自然地要一张她的照片（"看看你长啥样，下次别认错人"），或先发自己的一张引导互换；她给了就顺势夸一句并记下。',
+  '年龄': '轻巧地聊到年龄（"你看着不像 xx 岁，是不是改小了两岁"），交换信息时自然带出；别像查户口。',
+  '住址': '聊到她住哪个区/通勤（"你平时在哪个区活动，那边好吃的多吗"），为以后的约地点/接人做铺垫；顺口带出自己住哪。',
+  '喜好': '深挖一个具体喜好（吃的/玩的/歌/电影），问出能当"邀约由头"的细节（如最爱的店、最想看的电影），记住并复用。',
+  '家底信息': '聊家庭/职业/成长背景（"你是本地人吗，家里几个孩子"），自然地交换，拉近"自己人"的感觉，不盘问。',
+  '恋爱经历': '半开玩笑地聊情感史（"像你这样的应该不缺人追吧"），引导她讲上一段/恋爱观；她愿意说 = 信任升级，接住情绪别评判。',
+  '敏感面': '引导她说出脆弱/真实的一面（烦恼、压力、怕什么），先共情接住再推进；她向你展露情绪 = 最重要的信任里程碑。',
+  '加微信': '给出一个自然的由头换微信（"App 老吞消息，加个微信吧，改天发我那家店"），拿到微信 = 渠道升级，之后推进更直接。',
+  '约会': '落到具体见面：用已收集的喜好/住址做模糊邀约（"改天带你去你说的那家店"），她接住就敲定时间地点，不现实就改约。',
+};
 
 // [v60 主动推进] 无目标时的默认推进指令：军师是主动方，不设目标也要"带着推进意图聊"
 //   每个 stage 定义本轮该往哪带一步；带台阶可退（不硬推），优先调用知识库话术当弹药。
@@ -961,16 +989,26 @@ const ESCALATION_HINTS: Record<string, string> = {
 // [v60 主动推进] 按当前 stage 拼装"主动推进"指令块（无目标/目标已达成时注入）
 //   核心：军师是主动方——主动制造窗口（试探/邀约/张力），读反馈再决定下一步；
 //   绝不表白、绝不逼问、绝不纠缠；优先调用知识库话术当弹药；挽回期禁用推进。
-function thisEscalationBlock(stage: string): string {
+// [v61] 里程碑：默认推进路径 = 未完成里程碑逐个拿下（照片→…→约会），
+//   stage 升级与里程碑收集互相印证：里程碑是"战术动作"，stage 是"战略判定"。
+function thisEscalationBlock(stage: string, milestones: string[] = [], nextMs: string = ''): string {
   const hint = ESCALATION_HINTS[stage || '未知'];
   if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
-  return `\n\n【主动推进】(战略方向，严格遵守)\n`
+  let s = `\n\n【主动推进】(战略方向，严格遵守)\n`
     + `- 你是关系的主动推进方，不是等待者。每轮都要带着"往下一阶段带一步"的意图说话，但进攻藏在话术里，绝不暴露目的、绝不显得急。\n`
     + `- 本轮推进动作：${hint}\n`
     + `- 主动开窗：对方没给信号你就自己制造窗口——半玩笑试探、模糊邀约、调侃带钩子，选一个自然的角度发起；不必等她主动。\n`
     + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
     + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/邀约话术来执行推进，不要自己硬编。\n`
     + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
+  // [v61] 里程碑引导：默认路径有"下一目标"就明确给出，让推进有抓手
+  if (nextMs && MILESTONE_TIPS[nextMs]) {
+    s += `\n\n【本轮里程碑目标】下一目标：「${nextMs}」\n`
+      + `- 本轮主动引导，把「${nextMs}」推进/拿下：${MILESTONE_TIPS[nextMs]}\n`
+      + `- 已完成的里程碑（她已给过这些信息，别再重复要）：${milestones.length ? milestones.join('、') : '（无）'}\n`
+      + `- 顺序原则：按里程碑链推进（照片→年龄→住址→喜好→家底→恋爱经历→敏感面→加微信→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。`;
+  }
+  return s;
 }
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
@@ -1110,6 +1148,10 @@ async function updateMemoryCard(ctx: {
       card.profile = profile;
       // [v57] 长期事实合并（去重 + 上限淘汰）
       mergeFacts(card, extracted.facts || []);
+      // [v61] 里程碑合并（LLM 判定 + 已有并集，按链序排序）
+      if (Array.isArray(extracted.milestones)) {
+        card.milestones = extracted.milestones;
+      }
     }
     card.updated_at = new Date().toISOString();
   }
@@ -1127,13 +1169,15 @@ async function updateMemoryCard(ctx: {
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
 // [v57] 返回 {profile, facts}：profile=画像对象；facts=本轮新提取的长期事实（string[]）
+// [v61] profile 新增 milestones：关系推进里程碑已完成项（照片/年龄/住址/喜好/家底信息/恋爱经历/敏感面/加微信/约会）
 async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
+  const curMilestones = JSON.stringify(Array.isArray(card.milestones) ? card.milestones : []);
   const recentDialogue = (Array.isArray(history) ? history : [])
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/住址/喜好/家底信息/恋爱经历/敏感面/加微信/约会"9项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v60 阶段推进] stage 判定注意：你是主动推进方。升级信号包括两类——①对方给密集兴趣信号（她主动追问、发照片、秒回、调侃你、话明显变长、约你）；②用户（你）主动试探成功：用户发出试探/邀约/调侃带钩子/试探暧昧后，她积极接住（应约、回撩、延长话题、发照片、开玩笑接梗）。两类信号任一成立，stage 可按正常顺序"朋友→追求→暧昧→恋爱"升一级（最多升一级，不越级）；\n`
     + `但若用户连续试探她都不接（冷淡/回避/转移话题/争吵），stage 可降级或改为"朋友"；拿不准就保持当前 stage 不变。只输出 JSON 对象，不要任何其他文字。`;
   try {
@@ -1148,6 +1192,16 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       .map((t: any) => (typeof t === 'string' ? t.trim().slice(0, 40) : ''))
       .filter((t: string) => t.length > 0)
       .slice(0, 3);
+    // [v61] 里程碑：取 LLM 判定结果 + 合并已有（LLM 可能漏报历史项，并集兜底）
+    const llmMs = (Array.isArray(p.milestones) ? p.milestones : [])
+      .map((m: any) => (typeof m === 'string' ? m.trim() : ''))
+      .filter((m: string) => MILESTONE_CHAIN.includes(m));
+    const mergedMs = Array.from(new Set([
+      ...(Array.isArray(card.milestones) ? card.milestones : []),
+      ...llmMs,
+    ])).filter((m) => MILESTONE_CHAIN.includes(m));
+    // 按链顺序排，保证进度展示稳定
+    mergedMs.sort((a, b) => MILESTONE_CHAIN.indexOf(a) - MILESTONE_CHAIN.indexOf(b));
     return {
       profile: {
         stage: typeof p.stage === 'string' && p.stage ? p.stage : '未知',
@@ -1158,6 +1212,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
         anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
       },
       facts,
+      milestones: mergedMs,
     };
   } catch (e: any) {
     console.warn('extractProfile failed:', e.message);
@@ -1498,12 +1553,24 @@ function buildSystemContent(opts: {
     }
   }
 
-  // [v58] 关系目标与进度（战略层）：用户在前端设置 goal 后才注入；目标达成则停
-  //   正常顺序 未知→普通→追求→暧昧→恋爱；挽回是特殊路径
+  // [v58/v61] 关系目标 + 里程碑进度（战略层）：用户设了 goal 按目标使劲；
+  //   没设 goal = 默认一路推进到恋爱（未知→朋友→追求→暧昧→恋爱）；
+  //   "保持当前关系" = 用户选择停止升级，只维持现状。
+  //   [v61] 里程碑：推进时按"下一个未完成里程碑"给具体引导；已完成的展示进度。
   const goal = opts.memoryCard?.goal || '';
   const goalHint = GOAL_HINTS[goal];
   const curStage = opts.memoryCard?.profile?.stage || '';
-  if (goalHint) {
+  const milestones = Array.isArray(opts.memoryCard?.milestones) ? (opts.memoryCard!.milestones!) : [];
+  const nextMs = MILESTONE_CHAIN.find((m) => !milestones.includes(m)) || '';
+
+  if (goal === '保持当前关系') {
+    // 停止升级：只显示进度 + 维持现状指令（GOAL_HINTS 已含 hint）
+    s += `\n\n【关系里程碑】(已暂停推进，保持当前关系)\n`
+      + `已完成：${milestones.length ? milestones.map((m) => '✓' + m).join(' ') : '（无）'}\n`
+      + `待完成：${nextMs || '全部完成'}\n`
+      + `- 用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可。\n`
+      + `- 她主动提起或主动给信息时自然接住，但绝不主动发起试探/邀约/收集；情绪价值照给，绝不冷场。`;
+  } else if (goalHint) {
     const curIdx = STAGE_ORDER.indexOf(curStage);
     const goalTarget = goal === '挽回修复' || goal === '推进恋爱'
       ? '恋爱'
@@ -1515,13 +1582,20 @@ function buildSystemContent(opts: {
         + `目标：${goal}\n`
         + `当前阶段：${curStage || '未知'}\n`
         + `本轮动作：${goalHint.hint}`;
+      // 目标推进中：里程碑作为战术弹药（除非目标是挽回——挽回期不收集里程碑）
+      if (goal !== '挽回修复') {
+        s += `\n\n【关系里程碑】(推进进度)\n`
+          + `已完成：${milestones.length ? milestones.map((m) => '✓' + m).join(' ') : '（无）'}\n`
+          + `下一目标：${nextMs ? `「${nextMs}」——${MILESTONE_TIPS[nextMs] || ''}` : '里程碑全部完成，正常升温即可'}\n`
+          + `- 本轮在完成目标的同时，尽量自然地把「${nextMs || ''}」往前推一步，但不强行、不盘问；对方明显抗拒就换一个，过几轮再试。`;
+      }
     } else {
-      // [v60] 目标已达成：不再按目标使劲，改按当前 stage 维持/加固（防"达成后失去方向"）
-      s += thisEscalationBlock(curStage);
+      // [v60] 目标已达成：不再按目标使劲，改按里程碑/当前 stage 继续（恋爱后还差"约会"等）
+      s += thisEscalationBlock(curStage, milestones, nextMs);
     }
   } else {
-    // [v60 主动推进] 没设目标 = 默认主动推进：军师永远是主动方，不躺着等对方给信号
-    s += thisEscalationBlock(curStage);
+    // [v60/v61 默认推进] 没设目标 = 默认从当前阶段一级一级推进到恋爱（用户用军师就是为了谈恋爱）
+    s += thisEscalationBlock(curStage, milestones, nextMs);
   }
 
   // 知识库参考

@@ -162,6 +162,16 @@ const Chat = {
         // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
         const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
+        // [v61] 里程碑进度（追求/暧昧阶段的推进小目标：照片→年龄→住址→喜好→家底→恋爱经历→敏感面→加微信→约会）
+        const MILESTONE_CHAIN = ['照片', '年龄', '住址', '喜好', '家底信息', '恋爱经历', '敏感面', '加微信', '约会'];
+        const doneMs = Array.isArray(mc.milestones) ? mc.milestones.filter(m => MILESTONE_CHAIN.includes(m)) : [];
+        let milestoneHtml = '';
+        if (doneMs.length > 0 || (p.stage && p.stage !== '未知' && p.stage !== '挽回')) {
+            milestoneHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">' + MILESTONE_CHAIN.map(m =>
+                `<span class="chain-node${doneMs.includes(m) ? ' done' : ''}" style="${doneMs.includes(m) ? '' : 'opacity:.45;'}">${doneMs.includes(m) ? '✓' : '○'}${m}</span>`
+            ).join('') + '</div>';
+        }
+
         const factsHtml = facts.length > 0
             ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无长期事实。对方提到生日/约定/偏好等关键信息时，军师会自动记住。</div>';
@@ -176,7 +186,11 @@ const Chat = {
             : '<div class="memory-empty">暂无画像信息</div>';
 
         // [v20260805b] 去掉"她说过的话/我说过的话"：聊天会话里本来就能看到，不重复展示
+        const milestoneSec = milestoneHtml
+            ? sec('推进里程碑', '#BA7517', milestoneHtml + '<div class="memory-empty" style="margin-top:6px;">军师主动引导推进：照片 → 年龄 → 住址 → 喜好 → 家底 → 恋爱经历 → 敏感面 → 加微信 → 约会</div>')
+            : '';
         return stageSec
+            + milestoneSec
             + sec('长期记忆', '#1D9E75', factsHtml)
             + sec('她的画像', '#378ADD', profileHtml);
     },
