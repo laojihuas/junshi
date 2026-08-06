@@ -13,8 +13,9 @@
   - Edge Functions：`ima-proxy`（核心，**vB 本地块级检索**，v62 双身份配额）、**`account-auth`（v4，verify_jwt=false！注册/登录/sync）**、`device-gate`（**游客专用** v4）、`activate-code`（**绑账号** v15）、`prompt-get`、`prompt-update`（旧 `invite-code`/`invite-redeem` **已删除**，邀请注册即兑现）
   - 数据表：`profiles` / `chat_sessions`（note、memory_card text）/ `chat_messages` / `activation_codes`（+used_account_id）/ `app_config`（单行 id=1：统一 system_prompt + llm_params JSON）/ **`accounts`（账号，id=auth user id）/ `devices`（游客指纹）/ `daily_quota`（**identity_type+identity_key** 双轨）/ `ip_usage`（ip+day，含 new_devices）**
   - **kb_blocks**（B 方案，15,107 块）：media_id+block_idx PK，content≤700 字，bigrams GIN 索引，RLS service_role 专用
-  - SQL：`supabase/sql/001~011`（006 kb_docs 旧版、007 kb_blocks、008 配额设备体系、009 admin_stats、**010 设备召回**、**011 账号体系**）
+  - SQL：`supabase/sql/001~015`（006 kb_docs 旧版、007 kb_blocks、008 配额设备体系、009 admin_stats、**010 设备召回**、**011 账号体系**、012 stage 改名、013 幽灵清理、014 feedback、**015 admin_generate_codes 激活码生成**）
   - 配额函数（SECURITY DEFINER，仅 service_role 调）：`register_device`（游客，IP 新设备≤5/天，固定 20/天）、`check_and_consume_quota(identity_type,identity_key,ip)`（双身份原子扣次）、`register_account`（账号唯一+设备唯一+邀请兑现+游客数据迁移）、`login_account`（active_session 单点）、`check_account_session`、`activate_account`（绑账号+30天）、`get_quota_status`、`ensure_profile`
+  - 管理 RPC（SECURITY DEFINER + profiles.is_admin 校验，后台走 RPC 规避 RLS 直查）：`admin_stats` / `admin_feedback_list` / `admin_feedback_mark` / `cleanup_ghost_devices` / **`admin_generate_codes(p_count)`（生成激活码，16 位 XXXX-XXXX-XXXX-XXXX，撞码跳过）**
 - **认证（v20260805 用户机制重构）**：**游客+账号双轨**。游客=Supabase 匿名登录+device 指纹（20/天，用完→注册引导）；注册用户=账号+密码（**Supabase Auth 管理，email 伪装 hex(账号名)@jssl.local**，RLS/会话全复用；账号名存 user_metadata + accounts 表）。一机一号（accounts.device_id unique）；任意设备可登录但**同一时间仅一台在线**（登录生成 session_id 存 active_session，ima-proxy 每次校验，旧设备 401 session_expired→前端登出）。注册时游客 chat_sessions.user_id 自动迁移到账号
 - **设备指纹双持久化（v20260805 方案A）**：`_getDeviceId` 读取顺序 **Cookie → localStorage → FingerprintJS/fallback**，生成后 Cookie+localStorage 双写（Cookie 90 天滚动续期）。**清浏览器缓存不再丢身份**（Cookie 默认不清）；FingerprintJS 走 jsdelivr CDN 时好时坏，fallback 是漂移根源
 - **设备召回（v20260805 方案C 兜底式，010_device_recall.sql）**：fallback 设备天然带 `fp_` 前缀 → register_device 遇 fp_ 新设备按多信号召回 30 天内老设备（同 last_ip + 同 fp_ua(服务端算 UA 哈希) + 同 fp_screen + 同 fp_tz + 同 fp_lang），命中返回 recalled+recalled_device_id **不写新行**，前端换用老 ID 双写持久化；正常指纹路径零影响。**register_device 签名已变（+4 指纹参数，旧签名 DROP）**；device-gate v4 透传指纹特征
@@ -49,6 +50,8 @@
 - **prompt-update 校验坑（v11 修复）**：LLM_PARAM_RANGE 不能 `Array.isArray(range)` 区分枚举/区间（数值区间也是数组）→ 用 `typeof range[0]==='string'`
 - **作用域教训（v31 事故）**：函数内 `let` 声明必须提到 Deno.serve 顶层，_debug 外引用块内 let → ReferenceError 全 500；esbuild 查不到，部署前 tsc/transpileModule 校验
 - **端到端验证**：`GET /v1/projects/{ref}/api-keys` 拿 service_role JWT → `POST /auth/v1/admin/users`（email_confirm:true，**成功返回 200 非 201**）→ `POST /auth/v1/token?grant_type=password`（必须带 apikey）→ 调函数看 _debug → 清理
+- **激活码后台权限坑（015 修复）**：activation_codes 表 RLS 只给了 SELECT 策略，后台直插被 RLS 拦 → 一律走 SECURITY DEFINER RPC（is_admin 校验）；新函数默认 PUBLIC 可 EXECUTE（无需 GRANT anon 也能调），安全靠函数内鉴权兜底
+- **管理 API database/query 成功返回 200 或 201 都可能**（清理/断言脚本须判 `code < 300`，只判 200 会漏判）；api-keys 端点必须带浏览器 UA
 - **令牌位置**：Supabase PAT 存于 `C:\Users\Administrator\Documents\资料.txt`（部署自取；日志只记位置不记内容）
 
 ## 前端其他（简）
