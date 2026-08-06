@@ -272,6 +272,27 @@ const App = {
             Chat.back();
         });
 
+        // [系统返回手势] 手机左边缘右滑 / 系统返回键 = 浏览器后退 → popstate
+        // 聊天页：无论弹出哪条记录都回好友列表（返回后重压哨兵，主页仍可滑两次退出）
+        // 主页：第一次右滑消耗哨兵（无感），第二次右滑历史栈耗尽 → 浏览器退出桌面
+        window.addEventListener('popstate', (e) => {
+            const state = e.state;
+            // 聊天页优先：右滑/返回键统一回好友列表
+            if (App.currentPage === 'chat') {
+                Chat.back();
+                return;
+            }
+            // 前进手势（iOS 右缘左滑，极少出现）：恢复之前打开的聊天会话，不再 push 避免栈膨胀
+            if (state && state.page === 'chat' && state.friendId) {
+                Chat.open(state.friendId, false, true).catch(err => {
+                    console.error('[军师] popstate 恢复会话失败:', err);
+                    Friends.load();
+                    App.navigate('friends');
+                });
+            }
+            // 主页右滑：哨兵被消耗（第一次，无感）或栈耗尽（第二次 → 浏览器退出），均无需处理
+        });
+
         // 聊天发送按钮
         document.getElementById('chat-send-btn').addEventListener('click', () => {
             Chat.send();
