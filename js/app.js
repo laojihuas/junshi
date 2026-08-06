@@ -282,6 +282,11 @@ const App = {
             Chat.paste();
         });
 
+        // [v62 一键换话题] 军师聊偏/答非所问 → 换新话题
+        document.getElementById('chat-switch-btn').addEventListener('click', () => {
+            Chat.switchTopic();
+        });
+
         // 聊天输入框回车发送（Shift+回车换行）
         document.getElementById('chat-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {

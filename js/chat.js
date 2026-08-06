@@ -408,6 +408,59 @@ const Chat = {
         }
     },
 
+    // [v62 一键换话题] 军师聊偏/答非所问时，用户点按钮强制换新话题：
+    //   不发 user 消息、不污染对话，直接让军师抛一句新话题开场（清套路由后端处理）
+    async switchTopic() {
+        if (!this.currentSessionId) {
+            Utils.toast('请先进入一个好友会话');
+            return;
+        }
+        if (!await this._checkCanUse()) {
+            return;
+        }
+        const btn = document.getElementById('chat-switch-btn');
+        if (btn) btn.disabled = true;
+
+        // 显示加载中
+        const container = document.getElementById('chat-messages');
+        const loadingEl = document.createElement('div');
+        loadingEl.className = 'loading-dots';
+        loadingEl.id = 'loading-dots';
+        loadingEl.innerHTML = '<span></span><span></span><span></span> 想个新话题...';
+        container.appendChild(loadingEl);
+        container.scrollTop = container.scrollHeight;
+
+        try {
+            const systemPrompt = await this._getSystemPrompt();
+            const history = WindowSession.getHistory(this.currentSessionId);
+            // query 用 "/换话题" 指令（后端识别 → 清套路 + 注入【切换话题】），不落库为 user 消息
+            const reply = await this._callIMA('/换话题', { history, system_prompt: systemPrompt });
+            if (loadingEl.parentNode) container.removeChild(loadingEl);
+
+            if (reply === '__QUOTA__') {
+                return;
+            }
+            if (reply && reply !== '掉线了') {
+                // 作为 assistant 建议落库 + 渲染（用户复制发给对方）
+                const assistantMsg = await DB.addMessage(this.currentSessionId, 'assistant', reply);
+                if (assistantMsg) {
+                    this.messages.push(assistantMsg);
+                    this.renderMessages();
+                }
+                WindowSession.append(this.currentSessionId, 'assistant', reply);
+                await DB.updateSessionTime(this.currentSessionId);
+            } else {
+                Utils.toast(reply === '掉线了' ? '军师掉线了，稍后再试' : '换话题失败，请重试');
+            }
+        } catch (e) {
+            if (loadingEl.parentNode) container.removeChild(loadingEl);
+            Utils.toast('网络错误，请稍后重试');
+            console.error('[军师] 换话题失败:', e);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
     // 返回好友列表
     // [系统返回手势] 统一走浏览器后退：按钮点击和手机左边缘右滑都触发 popstate，
     // 由 App 的 popstate 监听切回好友列表；历史栈无可退时直接切换

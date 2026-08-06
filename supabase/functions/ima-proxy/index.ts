@@ -388,10 +388,13 @@ Deno.serve(async (req) => {
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
 
     // [v7] 套路打断："/" 开头 = 用户指令（如 /换策略 /停止 /不按套路），清除执行中的套路
-    const strategyClear = typeof query === 'string' && query.trim().startsWith('/');
+    const rawQuery = typeof query === 'string' ? query.trim() : '';
+    const strategyClear = rawQuery.startsWith('/');
     if (strategyClear && memoryCard?.strategy) {
       memoryCard.strategy = null;
     }
+    // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
+    const switchTopic = strategyClear && (rawQuery === '/换话题' || rawQuery.startsWith('/换话题 '));
 
     // [v6 L2] 上下文工程：近详远略压缩
     //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
@@ -434,13 +437,19 @@ Deno.serve(async (req) => {
         };
 
         // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 检索词（语义路）
-        const kw = extractKeywordsFromHistory(history, query);
-        if (llmKey) {
+        // [v62 切换话题] 换话题时 query 是"/换话题"无实义，跳过 LLM 拆词（省 token），
+        //   直接用"新话题/开场白"固定检索词，再叠加记忆卡里的喜好/兴趣当话题弹药
+        const kw = extractKeywordsFromHistory(history, switchTopic ? '' : query);
+        if (switchTopic) {
+          semanticKws = ['新话题', '开场白', '话题', '破冰'];
+          const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
+          sentenceKws = hobbyKws; // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
+        } else if (llmKey) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         mark('semantic');
         // [v12] 1b. LLM 整句压缩（不限词表，贴近原话）→ 整句路检索词
-        if (llmKey) {
+        if (!switchTopic && llmKey) {
           sentenceKws = await extractSentenceKws(llmKey, llmBase, llmModel, query, recentUserMessages);
         }
         mark('sentence');
@@ -532,9 +541,11 @@ Deno.serve(async (req) => {
           kbItems,
           kbFallback,
           // [v14] 对方当前这句话 → 攻击性检测
-          lastUserText: query,
+          lastUserText: switchTopic ? '' : query,
           // [P0-3] llmHistory ≥4 条 → llmHistory 已含近期对话，system 不再重复注入
           hasRecentHistory: llmHistory.length >= 4,
+          // [v62 切换话题] 用户一键换话题：注入【切换话题】指令
+          switchTopic,
         });
         const systemContent = built.systemContent;
         pulseAdvice = built.pulseAdvice;
@@ -542,7 +553,8 @@ Deno.serve(async (req) => {
         const messages: any[] = [
           { role: 'system', content: systemContent },
           ...llmHistory,
-          { role: 'user', content: query.trim() },
+          // [v62 切换话题] 换话题时 user 消息用引导语（不把 "/换话题" 指令本身发给 LLM 当用户话）
+          { role: 'user', content: switchTopic ? '（用户按了"换话题"，请按 system 里的【切换话题】指令直接给一句新话题开场白）' : query.trim() },
         ];
         reply = await llmChat(llmKey, llmBase, llmModel, messages, {
           temperature: llmParams.temperature,
@@ -655,6 +667,8 @@ Deno.serve(async (req) => {
         goal: memoryCard?.goal || null,
         // [v61] 里程碑进度（验证推进引导）
         milestones: Array.isArray(memoryCard?.milestones) ? memoryCard!.milestones : [],
+        // [v62] 切换话题模式（验证【切换话题】注入）
+        switch_topic: switchTopic,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
@@ -1389,6 +1403,8 @@ function buildSystemContent(opts: {
   //   true → 不注入【对方近期话】/【自己发过话】（llmHistory 已含，避免冗余）
   //   false/undefined → 注入（窗口恢复等 llmHistory 缺失场景兜底）
   hasRecentHistory?: boolean;
+  // [v62 切换话题] 用户一键换话题：不延续旧话题，主动抛一个新话题开场（清套路已由外层处理）
+  switchTopic?: boolean;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
   //   （角色定位/关系阶段/简介/语气态度/自洽输出 每轮不变 → 前缀稳定）
@@ -1598,6 +1614,17 @@ function buildSystemContent(opts: {
   } else {
     // [v60/v61 默认推进] 没设目标 = 默认从当前阶段一级一级推进到恋爱（用户用军师就是为了谈恋爱）
     s += thisEscalationBlock(curStage, milestones, nextMs);
+  }
+
+  // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
+  //   放在所有目标/推进指令之后 = 最高优先级；检索词已切到"新话题/开场白"方向
+  if (opts.switchTopic) {
+    s += `\n\n【切换话题】(本轮最高优先级，覆盖上面的所有目标与推进指令)\n`
+      + `- 用户对当前话题不满意，要求换一个新话题继续聊。\n`
+      + `- 本轮任务：给出一句可以直接发给对方的新话题开场白（1 句，≤30 字，带钩子/情绪/好奇心）。\n`
+      + `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`
+      + `- 禁忌：不延续旧话题、不道歉、不解释为什么换话题、不提"换个话题吧"这种元话术；直接自然开场，像想到什么随口问一样。\n`
+      + `- 输出只需这一句话术本体，不要任何附加说明。`;
   }
 
   // 知识库参考
