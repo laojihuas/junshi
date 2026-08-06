@@ -40,7 +40,7 @@
 - **v10 思考模式（version 35）**：四档 off/low/high/max；**仅 app_config.llm_params.thinking_mode 后台默认档**（v10b 起忽略请求体传参）；off → `thinking:{type:'disabled'}`，思考档 → `enabled`+reasoning_effort（无 medium，"中度"=high，不传温度/惩罚，max_tokens≥2000）；内部辅助调用保持 off；前端无切换 UI
 - **v9 记忆自洽（version 32）**：记忆卡补记 recent_self_messages；buildSystemContent 首段硬编码"**你即用户本人**"；输出 1-2 句先正面回应再转折；自洽硬约束；主回复后 `isNearDuplicate`（bigram ≥0.85）→ 带提示重生成一次
 - v8 语义拆解：**TOPIC_VOCAB 80 词（2026-08-06 话术库校准版**——移除 20 个教学理论零命中词如情绪价值/三明治夸奖/二次吸引/展示面，补入互动/游戏/幽默/想你/关心/赞美/撩/套路等实测高频词）+ extractSemanticKeywords（LLM 拆 3-5 个检索词，few-shot 已按话术库场景重写）；STAGE_VOCAB/resolveStrategySearchKws 同步话术库命中校准；首轮顺序 `[...semanticKws, ...kw, searchQuery]`
-- L0-L3：单条 history ≤800 字；知识库 3 条×500 字；近详远略（最近 10 条全文+更早仅对方消息 ≤120 字）；STAGE_HINTS 按 stage 注入；组装：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
+- L0-L3：单条 history ≤800 字；知识库 3 条×**400 字**（v71 启用截断，话术块 p50=651 字核心在前 400；此前常量未用全量注入）；近详远略（**最近 8 条全文**+更早对方消息 ≤60 字×6 条）；STAGE_HINTS 按 stage 注入；组装：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
 - 套路（v7/v18）：extractStrategy 提炼 2-6 步存 memory_card.strategy；`/` 开头输入清除；轮次上限自动终止；**状态感知配额已失效（2026-08-06 教学/实战删库后仅剩话术，hs 吃满参考配额）**；套路走独立惯例检索通道
 
 ## 关键踩坑（务必先读）
