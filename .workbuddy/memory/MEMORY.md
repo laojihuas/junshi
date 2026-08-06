@@ -32,15 +32,15 @@
 ## LLM 生成链路（ima-proxy）
 
 - 前端(query+history+session_id+system_prompt) → ima-proxy → [kb_blocks 块级检索=弹药] + [DeepSeek=生成]；降级：LLM → 知识库拼装(assembleKbReply) → 通用建议
-- **检索（vB）**：语义词(semanticKws×2) + 整句词(sentenceKws×2.5) + bigram + 原句 → kb_blocks_recall RPC → 命中块 ≤700 字原文直入 system（同文档≤2块，总≤5块）；标题兜底 browseBlocksByTitle
+- **检索（vB，2026-08-06 话术库版）**：语义词(semanticKws×2) + 规则词/原句(×1.5) → kb_blocks_recall RPC → 命中块 ≤700 字原文直入 system（同文档≤2块，总≤3块[参考条数 v59 5→3]，候选池 24 块 gem 精排）；**整句压缩(v12) 已移除**——话术库无"问题描述"语域，LLM 整句短语命中 0-37 块 vs 原句 bigram 270-596 块，纯浪费一次 LLM 调用；标题兜底 browseBlocksByTitle（话术块无块标题，靠文档名）
 - LLM secrets：`LLM_API_KEY`、`LLM_BASE_URL=https://api.deepseek.com`、**`LLM_MODEL=deepseek-v4-flash`**（deepseek-chat 已 2026-07-24 弃用）；主回复参数后台可调（app_config.llm_params，默认 0.4/0.5/0/1200 + thinking_mode）
 - **v15 时间/位置（version 58）**：注入【当前时间】+【我的位置】块——`formatCurrentTime()` Asia/Shanghai **小时级稳定**（无分钟，不破坏前缀缓存），时段显式映射；`extractLocation(bio)` 城市词表+正则（命中才注入）。**别加分钟破坏缓存**
 - **v16 套路轮数（version 59）**：max_rounds `Math.max(steps.length+1,3)`；对方抛更有趣话题时优先跟随、套路自然搁置
 - **v11 迷男OS（version 38）**：战略层 STAGE_HINTS 全线上版；战术层 extractStrategy 步骤纯文字可发送+标时机+过滤肢体/眼神/现场类；引擎层 `resolveStageVocab` 91 词按 M3 打标、pulse.delay_count≥2 强制恢复、balance/emotion_tone 调节节奏。**Neg 轻度化保留**：只调侃行为/措辞/情境，3-5 轮≤1 次，情绪低落/挽回期禁用；返回值 `{systemContent, pulseAdvice}`（pulseAdvice 顶层声明，v31 教训）
 - **v10 思考模式（version 35）**：四档 off/low/high/max；**仅 app_config.llm_params.thinking_mode 后台默认档**（v10b 起忽略请求体传参）；off → `thinking:{type:'disabled'}`，思考档 → `enabled`+reasoning_effort（无 medium，"中度"=high，不传温度/惩罚，max_tokens≥2000）；内部辅助调用保持 off；前端无切换 UI
 - **v9 记忆自洽（version 32）**：记忆卡补记 recent_self_messages；buildSystemContent 首段硬编码"**你即用户本人**"；输出 1-2 句先正面回应再转折；自洽硬约束；主回复后 `isNearDuplicate`（bigram ≥0.85）→ 带提示重生成一次
-- v8 语义拆解：TOPIC_VOCAB 91 词 + extractSemanticKeywords（LLM 拆 3-5 个检索词）；首轮顺序 `[...semanticKws, ...kw, searchQuery]`
-- L0-L3：单条 history ≤800 字；知识库 5 条×500 字；近详远略（最近 10 条全文+更早仅对方消息 ≤120 字）；STAGE_HINTS 按 stage 注入；组装：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
+- v8 语义拆解：**TOPIC_VOCAB 80 词（2026-08-06 话术库校准版**——移除 20 个教学理论零命中词如情绪价值/三明治夸奖/二次吸引/展示面，补入互动/游戏/幽默/想你/关心/赞美/撩/套路等实测高频词）+ extractSemanticKeywords（LLM 拆 3-5 个检索词，few-shot 已按话术库场景重写）；STAGE_VOCAB/resolveStrategySearchKws 同步话术库命中校准；首轮顺序 `[...semanticKws, ...kw, searchQuery]`
+- L0-L3：单条 history ≤800 字；知识库 3 条×500 字；近详远略（最近 10 条全文+更早仅对方消息 ≤120 字）；STAGE_HINTS 按 stage 注入；组装：全局提示词>场景指令>简介>记忆卡>更早摘要>参考>格式约束
 - 套路（v7/v18）：extractStrategy 提炼 2-6 步存 memory_card.strategy；`/` 开头输入清除；轮次上限自动终止；**状态感知配额已失效（2026-08-06 教学/实战删库后仅剩话术，hs 吃满参考配额）**；套路走独立惯例检索通道
 
 ## 关键踩坑（务必先读）

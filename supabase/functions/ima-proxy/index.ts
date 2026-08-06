@@ -8,7 +8,10 @@
 //   - 检索：kb_blocks_recall RPC（bigrams GIN 粗筛 + 块内词频加权打分）
 //   - 命中块 ≤700 字直接原文进上下文 → summarizeRef 下线（省 44% token）
 //   - 移除：search_knowledge / get_media_info / get_knowledge_list / kb_docs
-//   - 保留：语义拆解(v8) + 整句压缩(v12) + 套路启动(v7) + 状态配额(v7)
+//   - 保留：语义拆解(v8) + 套路启动(v7) + 状态配额(v7)
+//   - [2026-08-06] 知识库瘦身为恋爱话术 739 块（教学/实战删库）：
+//     整句压缩(v12) 移除（话术库无问题语域，LLM 整句短语命中 0-37 块 vs bigram 270-596），
+//     语义词表按话术库命中校准（20 个教学理论词零命中已移除）
 //   - 环境变量仅需：LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 //
 // [v14 有脾气·真人化]（解决"输出过于礼貌、不像真人"，2026-08-03）
@@ -176,8 +179,10 @@ const STAGE_HINTS: Record<string, string> = {
   '未知': '',
 };
 
-// [v8] 领域词表：知识库主题检索词（本地 4379 篇全文 bigram 高频统计 + LLM 特征段落提炼）
-//   主题词 4 类（情绪/关系阶段/场景需求/对方性格）+ 技巧术语，共 91 词
+// [v8] 领域词表：知识库主题检索词
+// [2026-08-06 话术库版] 恋爱教学/聊天实战已删库，词表按现存 739 块恋爱话术重新校准：
+//   移除 20 个教学理论词（情绪价值/三明治夸奖/二次吸引/展示面/推倒/情感浓度等，话术库零命中），
+//   补入话术库高频类别词（互动/游戏/幽默/想你/关心/赞美/撩/套路等，实测命中数据支持）
 const TOPIC_VOCAB: string[] = [
   // 情绪状态
   '低落', '委屈', '生气', '难过', '伤心', '敷衍', '高冷', '冷淡', '忽冷忽热', '开心',
@@ -185,30 +190,26 @@ const TOPIC_VOCAB: string[] = [
   '追求', '暧昧', '恋爱', '挽回', '异地', '吵架', '冷战', '分手', '复合', '暗恋', '相亲',
   // 场景需求
   '安慰', '哄', '道歉', '解释', '试探', '邀约', '表白', '约会', '见面', '聊天', '回复', '追问',
+  '关心', '赞美', '撩', '幽默', '情话', '晚安', '想你', '游戏', '互动', '故事', '共鸣',
   // 对方性格
-  '慢热', '内向', '外向', '强势', '粘人', '傲娇', '独立', '海王',
-  // 技巧术语
-  '框架', '惯例', '服从性测试', '推拉', '欲擒故纵', '情绪价值', '冷读', '废物测试',
-  '三明治夸奖', '进挪', '角色扮演', '开场白', '打压', '搭讪', '展示面', '二次吸引',
-  '模糊邀约', '预选', '需求感', '跪舔', '冷冻', '兴趣指标', '推倒', '暧昧',
-  '查户口', '试探', '引导', '高价值', '调戏', '侧面展示', '假性分手', '长期吸引',
-  '短期吸引', '建立吸引', '升级关系', '关系推进', '主导权', '服从命令', '筛选话术',
-  '暴露需求感', '第三方话题', '逗比话题', '男神框架', '设置陷阱', '表情包开场',
-  '情感浓度', '心理锚定', '一推一拉', '冷读术', '吸引阶段',
+  '慢热', '内向', '外向', '强势', '粘人', '傲娇', '独立',
+  // 惯例术语（话术库高频分类标签）
+  '框架', '惯例', '推拉', '冷读', '废物测试', '服从性测试', '进挪', '角色扮演',
+  '开场白', '打压', '搭讪', '调戏', '引导', '高价值', '需求感', '冷冻', '兴趣指标',
+  '查户口', '预选', '模糊邀约', '欲擒故纵', '冷读术', '建立吸引', '升级关系', '主导权', '展示面', '套路',
 ];
 
-// [v11 迷男OS] M3 战术阶段 → 词表子集映射（91 词按阶段打标）
+// [v11 迷男OS] M3 战术阶段 → 词表子集映射（词表按话术库命中校准）
 //   语义拆解与套路启动检索按"当前目标"加权：
 //   有套路 → strategy.goal 推断；无套路 → profile.stage 推断；都没有 → 全词表
 const STAGE_VOCAB: Record<string, string[]> = {
-  'meet': ['开场白', '表情包开场', '搭讪', '惯例', '逗比话题', '聊天', '邀约'],
-  'attract': ['推拉', '框架', '冷读', '冷读术', '废物测试', '打压', '欲擒故纵', '预选', '展示面',
-    '高价值', '调戏', '侧面展示', '设置陷阱', '男神框架', '服从性测试', '模糊邀约', '一推一拉',
-    '筛选话术', '服从命令', '主导权', '需求感', '暴露需求感', '查户口', '角色扮演', '二次吸引',
-    '建立吸引', '短期吸引', '长期吸引', '吸引阶段'],
-  'comfort': ['情绪价值', '三明治夸奖', '第三方话题', '情感浓度', '心理锚定', '引导',
-    '安慰', '哄', '解释', '试探', '约会', '见面', '暧昧'],
-  'seduction': ['进挪', '兴趣指标', '关系推进', '升级关系', '推倒', '暧昧'],
+  'meet': ['开场白', '搭讪', '惯例', '聊天', '邀约', '约会', '见面', '幽默', '游戏', '互动'],
+  'attract': ['推拉', '框架', '冷读', '冷读术', '废物测试', '打压', '欲擒故纵', '调戏',
+    '高价值', '服从性测试', '进挪', '角色扮演', '需求感', '查户口', '暧昧', '模糊邀约',
+    '建立吸引', '升级关系', '主导权', '展示面'],
+  'comfort': ['安慰', '哄', '解释', '试探', '约会', '见面', '暧昧', '关心', '共鸣',
+    '故事', '互动', '赞美', '幽默'],
+  'seduction': ['进挪', '兴趣指标', '升级关系', '暧昧', '撩', '角色扮演', '调戏'],
 };
 
 // [v11] 根据记忆卡解析当前 M3 战术阶段词表（目标驱动）
@@ -226,17 +227,17 @@ function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
   return STAGE_VOCAB[phase] || [];
 }
 
-// [v11] 套路启动检索词：按当前目标动态取（替代固定四连词）
+// [v11] 套路启动检索词：按当前目标动态取（话术库命中词校准版）
 function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
   const goal = memoryCard?.strategy?.goal || '';
   const stage = memoryCard?.profile?.stage || '';
-  if (/邀约|约会|见面/.test(goal)) return ['邀约', '约会', '见面', '模糊邀约', '开场白'];
-  if (/暧昧|升级|推进|表白|升温/.test(goal)) return ['暧昧', '升级关系', '关系推进', '进挪', '兴趣指标'];
-  if (/挽回|安抚|共情|信任/.test(goal)) return ['挽回', '安慰', '哄', '情绪价值', '共情'];
-  if (stage === '暧昧') return ['推拉', '暧昧', '冷读', '模糊邀约', '升级关系'];
-  if (stage === '挽回') return ['挽回', '安慰', '情绪价值', '冷冻', '重建信任'];
-  if (stage === '恋爱') return ['推拉', '三明治夸奖', '情绪价值', '情感浓度'];
-  return ['惯例', '推拉', '冷读', '开场白', '步骤'];
+  if (/邀约|约会|见面/.test(goal)) return ['邀约', '约会', '见面', '搭讪', '开场白'];
+  if (/暧昧|升级|推进|表白/.test(goal)) return ['暧昧', '升级关系', '进挪', '兴趣指标', '撩'];
+  if (/挽回|安抚|共情|信任/.test(goal)) return ['挽回', '安慰', '哄', '关心', '道歉'];
+  if (stage === '暧昧') return ['推拉', '暧昧', '冷读', '进挪', '撩'];
+  if (stage === '挽回') return ['挽回', '安慰', '哄', '冷冻', '道歉'];
+  if (stage === '恋爱') return ['推拉', '角色扮演', '关心', '互动', '幽默'];
+  return ['惯例', '冷读', '开场白', '搭讪', '互动'];
 }
 
 // [v6 L0] 知识库参考条数与原文截断长度
@@ -415,8 +416,6 @@ Deno.serve(async (req) => {
     let kbFolders: { hs: string | null; jx: string | null } = { hs: null, jx: null };
     // [v8] 语义拆解词（if 块外声明：_debug 在块外引用，块内 let 会 ReferenceError → 500）
     let semanticKws: string[] = [];
-    // [v12] 整句压缩词（整句路）：同样提到顶层防作用域事故
-    let sentenceKws: string[] = [];
     // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
     // [v57] 长期记忆本轮注入条数（_debug 用；同样提到顶层防作用域事故）
@@ -443,33 +442,31 @@ Deno.serve(async (req) => {
         if (switchTopic) {
           semanticKws = ['新话题', '开场白', '话题', '破冰'];
           const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
-          sentenceKws = hobbyKws; // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
+          kw.push(...hobbyKws); // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
         } else if (llmKey) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         mark('semantic');
-        // [v12] 1b. LLM 整句压缩（不限词表，贴近原话）→ 整句路检索词
-        if (!switchTopic && llmKey) {
-          sentenceKws = await extractSentenceKws(llmKey, llmBase, llmModel, query, recentUserMessages);
-        }
-        mark('sentence');
-        // [v8] 2. 条件 query rewrite 降级：仅当两路词全空 且 规则词不足时触发
+        // [2026-08-06] 整句压缩（v12）已移除：话术库无"问题描述"语域，LLM 整句短语命中
+        //   实测 0-37 块（怎么安慰0/怎么哄0/不回消息1），原句 bigram 直接命中 270-596 块
+        //   → 整句路纯浪费一次 LLM 调用，检索词序列收敛为 语义词 > 规则词 > 原句垫底
+        // [v8] 2. 条件 query rewrite 降级：仅当语义词全空 且 规则词不足时触发
         let searchQuery = query.trim();
-        if (semanticKws.length === 0 && sentenceKws.length === 0 && kw.length < 2 && llmKey) {
+        if (semanticKws.length === 0 && kw.length < 2 && llmKey) {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
-        // [B] 3. 检索词序列：语义词(语义路) > 整句压缩词(整句路) > bigram > 原句垫底
-        //   统一走本地 kb_blocks_recall 块级召回（语义/整句同一 RPC，块内词频加权）
+        // [B] 3. 检索词序列：语义词(语义路) > bigram/规则词 > 原句垫底
+        //   统一走本地 kb_blocks_recall 块级召回（块内词频加权）
         const semanticSet = new Set<string>(semanticKws);
-        const searchQueries = [...semanticKws, ...sentenceKws, ...kw, searchQuery];
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, sentenceKws, searchQueries, quotaOpts);
+        const searchQueries = [...semanticKws, ...kw, searchQuery];
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, quotaOpts);
         mark('kb1');
         // 4. 第二轮：不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, sentenceKws, kw2, quotaOpts);
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, quotaOpts);
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_REF_COUNT);
             if (merged.length > kbItems.length) kbItems = merged;
           }
@@ -493,7 +490,7 @@ Deno.serve(async (req) => {
           try {
             const convItems = await recallBlocks(
               supabaseUrl, serviceRoleKey,
-              resolveStrategySearchKws(memoryCard), [], resolveStrategySearchKws(memoryCard),
+              resolveStrategySearchKws(memoryCard), resolveStrategySearchKws(memoryCard),
               { ...quotaOpts, pickCount: 5 }
             );
             const usable = (Array.isArray(convItems) ? convItems : [])
@@ -636,10 +633,9 @@ Deno.serve(async (req) => {
         kb_items: kbItems.length,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
-        // [v12] 双路混合检索验证：整句压缩词 + 两路命中拆分
-        sentence_kws: sentenceKws,
+        // [2026-08-06] 整句路已移除，仅剩语义路命中统计
         semantic_route_hits: kbItems.filter((it: any) => (it._semanticHits || 0) > 0).length,
-        sentence_route_hits: kbItems.filter((it: any) => (it._hits || 0) > (it._semanticHits || 0)).length,
+        rule_route_hits: kbItems.filter((it: any) => (it._hits || 0) > (it._semanticHits || 0)).length,
         // [B方案] 本地块级检索命中统计
         fulltext_hits: kbItems.filter((it: any) => it._fulltext).length,
         // [B方案] 正文来源：全部为本地块（block_idx 标记块级命中）
@@ -796,7 +792,7 @@ async function extractSemanticKeywords(
   query: string, recentUserMsgs: string[], stageVocab?: string[]
 ): Promise<string[]> {
   try {
-    const prompt = '你是恋爱话术检索助手，负责把"对方说的话"拆解成适合检索恋爱资料库的短关键词。\n'
+    const prompt = '你是恋爱话术检索助手，负责把"对方说的话"拆解成适合检索恋爱话术库的短关键词。\n'
       + `对方的话：「${truncateText(query, 80)}」\n`
       + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
       + (stageVocab && stageVocab.length > 0
@@ -804,8 +800,9 @@ async function extractSemanticKeywords(
         : '')
       + `知识库领域词表（检索词应优先从中选择，可少量自创补充）：\n${TOPIC_VOCAB.join('、')}\n`
       + '示例：\n'
-      + '输入："她说今天被领导骂了很难受"\n输出：["被骂","委屈","哄","工作压力","情绪低落"]\n'
-      + '输入："她两天没回我消息了"\n输出：["不回消息","高冷","试探","冷落","追问"]\n'
+      + '输入："她说今天被领导骂了很难受"\n输出：["委屈","安慰","哄","难过","关心"]\n'
+      + '输入："她两天没回我消息了，是不是不喜欢我了"\n输出：["冷淡","高冷","忽冷忽热","追问","试探"]\n'
+      + '输入："她生气了不理我，我该怎么哄"\n输出：["生气","哄","道歉","解释","冷战"]\n'
       + `要求：只输出 JSON 数组（如 ["推拉","试探"]），${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个词 2-${KW_LEN_MAX} 字；`
       + '优先使用词表中的词，可加 1-2 个贴近原话的字面词；不要任何解释文字。';
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -832,55 +829,12 @@ async function extractSemanticKeywords(
 }
 
 // ============================================================
-// [v12] LLM 整句压缩：把"对方说的话"压缩成 IMA 能命中的 2-4 字核心短语（整句路）
-//   实测结论（2026-08-03）：IMA search_knowledge 对 ≥6 字整句 100% 返回空，
-//   2-4 字短语是命中甜区（怎么回=47命中 / 怎么安慰=3 / 忽冷忽热=5 / 怎么哄她=2）
-//   与语义拆解互补：语义路管"词表概念"，整句路管"文档高频口语短语"（不限词表），
-//   bigram 字面切词切出"领导/难受"这类库外词，整句压缩能产出"怎么安慰"这类库内高频短语
-//   输出 2-4 个 2-4 字中文短语；失败返回 []，不影响主链路
+// [2026-08-06] LLM 整句压缩（v12）已移除：
+//   话术库（739 块，均为话术本体）与"用户的问题"语域不同，LLM 整句短语命中实测极差
+//   （怎么安慰=0 / 怎么哄=0 / 不回消息=1 / 忽冷忽热=1），原句 bigram 直接命中 270-596 块；
+//   原设计是为教学库"问题+方法"结构服务，教学删库后整句路失去甜区，纯浪费一次 LLM 调用。
+//   检索词序列收敛为：语义词（词表）> 规则词 > 原句 bigram 垫底
 // ============================================================
-const SENTENCE_KW_MIN = 2;
-const SENTENCE_KW_MAX = 4;
-const SENTENCE_LEN_MIN = 2;
-const SENTENCE_LEN_MAX = 4;
-
-async function extractSentenceKws(
-  llmKey: string, llmBase: string, llmModel: string,
-  query: string, recentUserMsgs: string[]
-): Promise<string[]> {
-  try {
-    const prompt = '你是恋爱话术检索助手，负责把"对方说的话"压缩成适合检索恋爱资料库的短短语。\n'
-      + `对方的话：「${truncateText(query, 80)}」\n`
-      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
-      + '要点：短语必须贴近原话语气/场景，不要抽象概念；优先选择资料库里常见的问题短语'
-      + '（如"怎么回""怎么安慰""忽冷忽热""怎么哄她""不回消息""冷战""分手"这类 2-4 字短语）。\n'
-      + '示例：\n'
-      + '输入："她说今天被领导骂了很难受，不知道怎么办"\n输出：["怎么安慰","难过","低落"]\n'
-      + '输入："她两天没回我消息了，是不是不喜欢我了"\n输出：["不回消息","冷淡","忽冷忽热"]\n'
-      + `要求：只输出 JSON 数组（如 ["怎么安慰","难过"]），${SENTENCE_KW_MIN}-${SENTENCE_KW_MAX} 个短语，每个 ${SENTENCE_LEN_MIN}-${SENTENCE_LEN_MAX} 字；`
-      + '不要解释文字。';
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 150, _stage: 'sentence_kws',
-    });
-    const start = content.indexOf('[');
-    const end = content.lastIndexOf(']');
-    if (start === -1 || end === -1) return [];
-    const arr = JSON.parse(content.slice(start, end + 1));
-    const kws: string[] = [];
-    for (const w of arr) {
-      if (typeof w !== 'string') continue;
-      const t = w.trim();
-      if (t.length < SENTENCE_LEN_MIN || t.length > SENTENCE_LEN_MAX) continue;
-      if (!/[\u4e00-\u9fa5]/.test(t)) continue; // 只收中文短语（IMA 中文检索）
-      if (STOP_WORDS.has(t)) continue;
-      kws.push(t);
-    }
-    return [...new Set(kws)].slice(0, SENTENCE_KW_MAX);
-  } catch (e: any) {
-    console.warn('extractSentenceKws failed:', e.message);
-    return [];
-  }
-}
 
 // ============================================================
 // [v6] 记忆卡类型与读写
@@ -1783,21 +1737,20 @@ function calcGemScore(content: string, blockTitle: string): number {
 
 // ============================================================
 // [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
-//   kb_blocks 表（15,107 块）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
-//   权重：整句词×2.5 / 语义词×2（与旧 kb_recall 一致，行为可预期）
+//   kb_blocks 表（739 块，仅恋爱话术）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
+//   [2026-08-06] 权重：语义词×2 / 规则词与原文×1.5（整句路已移除）
 //   块内容 ≤700 字直接原文进上下文——无需下载全文、无需 summarizeRef
 //   返回 items 带 _fulltext 标记与 _ft_score；同文档最多 2 块（RPC 内去重）
 //   失败/空缓存 → 返回 []，不影响主链路
 // ============================================================
 async function recallBlocks(
   supabaseUrl: string, serviceRoleKey: string,
-  semanticKws: string[], sentenceKws: string[],
-  extraQueries: string[],
+  semanticKws: string[], extraQueries: string[],
   opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean }
 ): Promise<any[]> {
   try {
-    // 查询词集：语义词 + 整句词 + 额外词（bigram/原句垫底）
-    const queries = [...semanticKws, ...sentenceKws, ...extraQueries]
+    // 查询词集：语义词 + 额外词（规则词/原句 bigram 垫底）
+    const queries = [...semanticKws, ...extraQueries]
       .filter((q) => q && typeof q === 'string' && q.trim().length >= 2);
     if (queries.length === 0) return [];
 
@@ -1816,14 +1769,9 @@ async function recallBlocks(
     for (const q of queries) addGrams(q);
     if (grams.size === 0) return [];
 
-    // 2. 权重数组（与 queries 同序：整句词 2.5 / 语义词 2 / 其他 1.5）
-    const sentenceSet = new Set(sentenceKws);
+    // 2. 权重数组（与 queries 同序：语义词 2 / 其他 1.5）
     const semanticSet = new Set(semanticKws);
-    const weights = queries.map((q) => {
-      if (sentenceSet.has(q)) return 2.5;
-      if (semanticSet.has(q)) return 2;
-      return 1.5;
-    });
+    const weights = queries.map((q) => (semanticSet.has(q) ? 2 : 1.5));
 
     // 3. 调数据库 RPC：粗筛+块内词频打分+同文档去重+limit 一次完成
     // [v53] p_limit 12→24：多捞候选池给 gem 精排（候选只做重排，最终仍取 target 进 LLM，token 不变）
