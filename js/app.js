@@ -231,6 +231,11 @@ const App = {
             Friends.showBioModal();
         });
 
+        // [使用指导] 打开指导页（同源跳转，PWA 全屏内打开）
+        document.getElementById('guide-btn').addEventListener('click', () => {
+            location.href = 'guide.html';
+        });
+
         // [我的简介] 保存 / 取消 / 字数实时计数 / 点击遮罩关闭
         document.getElementById('bio-save').addEventListener('click', () => {
             Friends.saveBio();

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>军师使用指导</title>
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<style>
+:root {
+    --bg: #000000;
+    --surface: #111111;
+    --elevated: #1C1C1E;
+    --divider: #1E1E1E;
+    --border: #2C2C2E;
+    --text: #F2F2F7;
+    --text2: #AEAEB2;
+    --text3: #6E6E73;
+    --green: #07C160;
+    --blue: #378ADD;
+    --amber: #FAC775;
+    --pink: #D4537E;
+    --red: #E24B4A;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+    min-height: 100vh;
+    padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+}
+.header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(0,0,0,0.92);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--divider);
+}
+.header h1 { font-size: 20px; font-weight: 600; letter-spacing: 1px; }
+.header .sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
+.header .back {
+    width: 34px; height: 34px; border-radius: 50%;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text2); font-size: 16px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.header .back:active { transform: scale(0.94); }
+.hero {
+    padding: 36px 24px 28px;
+    text-align: center;
+    border-bottom: 1px solid var(--divider);
+}
+.hero .badge {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    background: rgba(7,193,96,0.12); color: var(--green);
+    font-size: 12px; margin-bottom: 14px; letter-spacing: 2px;
+}
+.hero h2 { font-size: 26px; font-weight: 700; line-height: 1.4; }
+.hero p { color: var(--text2); margin-top: 12px; font-size: 14px; }
+.sec {
+    padding: 28px 24px;
+    border-bottom: 1px solid var(--divider);
+}
+.sec-tag {
+    display: inline-block; font-size: 11px; padding: 2px 10px;
+    border-radius: 12px; margin-bottom: 10px; letter-spacing: 1px;
+}
+.sec h3 { font-size: 19px; font-weight: 600; margin-bottom: 14px; }
+.sec h4 { font-size: 15px; font-weight: 600; margin: 16px 0 8px; color: var(--text); }
+.sec p { color: var(--text2); margin-bottom: 10px; }
+.sec p strong { color: var(--text); font-weight: 600; }
+.sec ul { padding-left: 18px; margin: 8px 0 12px; }
+.sec li { color: var(--text2); margin-bottom: 8px; }
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    margin: 14px 0;
+}
+.card.green { border-color: rgba(7,193,96,0.35); }
+.card.blue { border-color: rgba(55,138,221,0.35); }
+.card.amber { border-color: rgba(250,199,117,0.35); }
+.steps { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+.step { display: flex; gap: 14px; align-items: flex-start; }
+.step .num {
+    width: 26px; height: 26px; border-radius: 50%;
+    background: var(--green); color: #000; font-weight: 700;
+    font-size: 14px; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; margin-top: 2px;
+}
+.step .body { flex: 1; padding-bottom: 18px; }
+.step .body b { color: var(--text); display: block; font-size: 15px; margin-bottom: 3px; }
+.step .body span { color: var(--text2); font-size: 14px; }
+.demo {
+    background: var(--elevated);
+    border-radius: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    margin: 10px 0;
+}
+.demo .in { color: var(--text2); margin-bottom: 8px; }
+.demo .in b { color: var(--text); font-weight: 600; }
+.demo .out {
+    color: var(--green);
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+}
+.demo .out b { color: var(--green); font-weight: 600; }
+.demo .label { color: var(--text3); font-size: 11.5px; letter-spacing: 1px; margin-bottom: 4px; }
+.chip { display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 12.5px; margin: 3px 4px 3px 0; }
+.chip.b { background: rgba(55,138,221,0.14); color: var(--blue); }
+.chip.p { background: rgba(212,83,126,0.14); color: var(--pink); }
+.chip.r { background: rgba(226,75,74,0.14); color: var(--red); }
+.chip.a { background: rgba(250,199,117,0.14); color: var(--amber); }
+.chip.g { background: rgba(7,193,96,0.14); color: var(--green); }
+.note {
+    background: rgba(250,199,117,0.06);
+    border-left: 3px solid var(--amber);
+    padding: 12px 14px;
+    border-radius: 0 10px 10px 0;
+    font-size: 13px;
+    color: var(--text2);
+    margin: 14px 0;
+}
+.note b { color: var(--amber); font-weight: 600; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13.5px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--divider); }
+th { color: var(--text3); font-weight: 500; font-size: 12px; letter-spacing: 1px; }
+td { color: var(--text2); }
+td b { color: var(--text); font-weight: 600; }
+.faq details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+}
+.faq summary {
+    cursor: pointer; color: var(--text); font-weight: 600; font-size: 14.5px;
+    list-style: none; display: flex; justify-content: space-between; align-items: center;
+}
+.faq summary::after { content: '+'; color: var(--text3); font-size: 18px; }
+.faq details[open] summary::after { content: '−'; }
+.faq details p { margin-top: 10px; font-size: 13.5px; color: var(--text2); }
+.footer {
+    padding: 40px 24px 20px;
+    text-align: center;
+}
+.cta {
+    display: block; width: 100%; max-width: 320px; margin: 0 auto;
+    background: var(--green); color: #000; font-weight: 700; font-size: 16px;
+    border: none; border-radius: 24px; padding: 14px 0;
+    cursor: pointer; text-decoration: none;
+}
+.cta:active { transform: scale(0.98); }
+.footer .tip { color: var(--text3); font-size: 12px; margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+    <button class="back" onclick="history.back()" aria-label="返回">‹</button>
+    <div>
+        <h1>军师使用指导</h1>
+        <div class="sub">3 分钟上手 · 把恋爱聊明白</div>
+    </div>
+</div>
+
+<div class="hero">
+    <span class="badge">AI 恋爱军师</span>
+    <h2>替你把恋爱<br>聊明白</h2>
+    <p>不知道回什么？粘贴对方的话，军师给你一句<br>能直接复制发出去的话，像真人一样聊。</p>
+</div>
+
+<!-- ① 军师是谁 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(55,138,221,0.12);color:var(--blue);">底蕴</span>
+    <h3>军师是谁</h3>
+    <p>军师不是普通聊天机器人——它<strong>假装就是你本人</strong>在跟对方聊。</p>
+    <p>背后是完整的<strong>恋爱方法论</strong>（吸引 → 舒适 → 升级的经典路线）+ 上千篇<strong>话术与实战知识库</strong>。它每句话都替你算好：什么时候该推、什么时候该拉、怎么自然地靠近一步。</p>
+    <div class="card blue">
+        <b>核心玩法</b>
+        <p style="margin:8px 0 0;">把对方刚说的话发过来 → 军师给你一句直接能发的话 → 你复制发出去。你负责发，军师负责想。</p>
+    </div>
+</div>
+
+<!-- ② 三步用法 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(7,193,96,0.12);color:var(--green);">上手</span>
+    <h3>三步开始用</h3>
+    <div class="steps">
+        <div class="step">
+            <div class="num">1</div>
+            <div class="body"><b>新建好友</b><span>在好友列表点右下角「+」，给她起个名字（真名或备注都行）。</span></div>
+        </div>
+        <div class="step">
+            <div class="num">2</div>
+            <div class="body"><b>粘贴对方的话</b><span>把她刚发来的消息复制，粘贴进聊天框（粘贴按钮一键搞定），发送。</span></div>
+        </div>
+        <div class="step">
+            <div class="num">3</div>
+            <div class="body"><b>复制军师的回复</b><span>军师给出 1 句可以直接发的话，点「复制」发给她。</span></div>
+        </div>
+    </div>
+    <div class="note"><b>提示：</b>军师每轮只给 1 句、像真人发微信。别把它的回复当"标准答案"，要融入你自己的语气。</div>
+</div>
+
+<!-- ③ 第一句话怎么说 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(55,138,221,0.12);color:var(--blue);">开场</span>
+    <h3>第一句话怎么说</h3>
+    <p>刚加上好友，<strong>第一句话永远是你开话题</strong>——这个最难，也最关键。</p>
+    <p>把<strong>你的网名 + 关于她的已知信息</strong>直接发给军师，它会帮你想一句自然、不尬、带钩子的开场白：</p>
+    <div class="demo">
+        <div class="label">发送给军师</div>
+        <div class="in">我的网名叫<b>追梦人</b>，她网名叫<b>小月亮</b>，看她朋友圈爱发<b>猫</b>，帮我开第一句</div>
+        <div class="label">军师给出</div>
+        <div class="out">"小月亮这个网名，是晚上话多的人吗？我猜你家的猫也这么想"</div>
+    </div>
+    <div class="demo">
+        <div class="label">发送给军师</div>
+        <div class="in">我网名<b>老林</b>，她网名<b>吃遍天下</b>，我只知道她爱吃，怎么开场</div>
+        <div class="label">军师给出</div>
+        <div class="out">"吃遍天下？那请问这位美食博主，有没有踩雷的店，我避个雷"</div>
+    </div>
+    <div class="note"><b>技巧：</b>网名 + 已知信息喂得越具体，开场越准。她的网名、朋友圈、头像、共同朋友，全都能当钩子。</div>
+</div>
+
+<!-- ④ 个人简介的使用说明 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(7,193,96,0.12);color:var(--green);">设置</span>
+    <h3>先填好「我的简介」</h3>
+    <p>好友列表右上角<strong>「✏️」按钮 → 我的简介</strong>，把你的情况写进去（最多 300 字）：</p>
+    <ul>
+        <li><strong>名字/网名</strong> —— 军师开口就带着"你是谁"</li>
+        <li><strong>年龄、职业</strong> —— 聊天不露怯，被问到能自然接住</li>
+        <li><strong>爱好、经历</strong> —— 军师会用它们当话题、当邀约由头</li>
+        <li><strong>所在城市</strong> —— 涉及约见面时，它才知道"顺不顺路、现不现实"</li>
+    </ul>
+    <div class="demo">
+        <div class="label">参考写法</div>
+        <div class="in" style="margin-bottom:0;">我叫阿豪，27 岁，在深圳做程序员，喜欢健身和摄影，周末常去爬山。</div>
+    </div>
+    <div class="note"><b>为什么重要：</b>简介是军师"扮演你"的底稿——填得越真实，它说的话越像你自己，对方越不会觉得你在背台词。</div>
+</div>
+
+<!-- ⑤ 关系看得见（保密版：只讲结果） -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(250,199,117,0.12);color:var(--amber);">进度</span>
+    <h3>关系看得见</h3>
+    <p>好友列表的头像<strong>颜色会随你们的关系阶段变化</strong>：</p>
+    <p>
+        <span class="chip b">蓝 = 追求</span>
+        <span class="chip p">粉 = 暧昧</span>
+        <span class="chip r">红 = 恋爱</span>
+        <span class="chip a">琥珀 = 挽回</span>
+        <span class="chip g">蓝 = 朋友</span>
+    </p>
+    <p>长按好友可以<strong>手动设置关系</strong>和<strong>目标</strong>——比如"推进恋爱"或"保持当前关系"，军师会按你的选择来使力。不设置也没关系，它会根据你们聊天的进展，主动帮你把关系往前带。</p>
+</div>
+
+<!-- ⑥ 功能锦囊 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(55,138,221,0.12);color:var(--blue);">锦囊</span>
+    <h3>藏得深的小功能</h3>
+    <h4>🔄 一键换话题</h4>
+    <p>军师聊偏了、没话接的时候，点输入框左边<strong>「换话题」按钮</strong>，它立刻给你一句新话题开场。</p>
+    <h4>✏️ 长按好友</h4>
+    <p>改备注、手动设关系阶段、设关系目标——都在长按菜单里。</p>
+    <h4>🔐 右上角「登入」</h4>
+    <p>注册账号后额度提升，换手机、换浏览器，好友和记忆都跟着账号走。</p>
+</div>
+
+<!-- ⑦ 添加到桌面 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(250,199,117,0.12);color:var(--amber);">安装</span>
+    <h3>添加到桌面，像 App 一样用</h3>
+    <p>把军师加到手机桌面，打开就是全屏，不占聊天软件的位置：</p>
+    <div class="card amber">
+        <h4 style="margin-top:0;">📱 iPhone</h4>
+        <p style="margin:0;">用 <b>Safari 浏览器</b>打开本页 → 点底部<b>「分享」按钮</b> → 选择<b>「添加到主屏幕」</b> → 右上角「添加」。</p>
+    </div>
+    <div class="card amber">
+        <h4 style="margin-top:0;">🤖 安卓</h4>
+        <p style="margin:0;">用 <b>Chrome/浏览器</b>打开本页 → 点右上角<b>「⋮」菜单</b> → 选择<b>「添加到主屏幕」/「安装应用」</b>。</p>
+    </div>
+</div>
+
+<!-- ⑧ 额度和升级 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(250,199,117,0.12);color:var(--amber);">权益</span>
+    <h3>额度与升级</h3>
+    <table>
+        <tr><th>方式</th><th>说明</th></tr>
+        <tr><td><b>免费使用</b></td><td>打开就能聊，有每日免费次数</td></tr>
+        <tr><td><b>注册账号</b></td><td>免费额度提升，多设备同步</td></tr>
+        <tr><td><b>邀请好友</b></td><td>每邀一位好友，双方都赠送额外次数</td></tr>
+        <tr><td><b>激活码</b></td><td>更大额度和更高单日上限（每月一码）</td></tr>
+    </table>
+    <div class="note"><b>提示：</b>额度用完时会引导你升级；具体价格和档位看页面内提示。</div>
+</div>
+
+<!-- ⑨ 安全与隐私 -->
+<div class="sec">
+    <span class="sec-tag" style="background:rgba(7,193,96,0.12);color:var(--green);">隐私</span>
+    <h3>安全与隐私</h3>
+    <ul>
+        <li>你的聊天记录、好友和记忆，<strong>只存在你自己的账号下</strong></li>
+        <li>军师<strong>只产出文字建议</strong>——发不发、发什么，永远由你决定，它不会替你发任何消息</li>
+        <li>数据不对外展示、不用于任何其他用途</li>
+    </ul>
+</div>
+
+<!-- ⑩ FAQ -->
+<div class="sec faq">
+    <span class="sec-tag" style="background:rgba(110,110,115,0.2);color:var(--text2);">FAQ</span>
+    <h3>常见问题</h3>
+    <details>
+        <summary>军师回复太短 / 太长，能改吗？</summary>
+        <p>军师默认每轮只给 1 句（像真人发微信）。如果对方在认真聊长话题，你可以多粘贴几句上下文，它会自然调整。</p>
+    </details>
+    <details>
+        <summary>她一直不回消息怎么办？</summary>
+        <p>把"她没回"告诉军师（比如：她 2 小时没回了），它会帮你判断是缓一缓、换个话题、还是找个由头自然跟进——不会让你干等或硬催。</p>
+    </details>
+    <details>
+        <summary>换了手机，数据还在吗？</summary>
+        <p>注册账号后，好友和记忆都跟着账号走，换设备登录即可找回。游客模式的数据在本机浏览器里。</p>
+    </details>
+    <details>
+        <summary>军师会替我把消息发出去吗？</summary>
+        <p>不会。它只生成文字建议，所有发送动作都在你手里。</p>
+    </details>
+</div>
+
+<div class="footer">
+    <a class="cta" href="index.html">开始使用 →</a>
+    <div class="tip">有问题反馈：长按好友 → 设置里联系</div>
+</div>
+
+</body>
+</html>
