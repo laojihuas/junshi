@@ -167,6 +167,43 @@ td b { color: var(--text); font-weight: 600; }
 }
 .cta:active { transform: scale(0.98); }
 .footer .tip { color: var(--text3); font-size: 12px; margin-top: 16px; }
+.contact-btn {
+    display: block; width: 100%; max-width: 320px; margin: 14px auto 0;
+    background: var(--surface); color: var(--text2);
+    border: 1px solid var(--border); border-radius: 24px;
+    padding: 12px 0; font-size: 15px; cursor: pointer;
+}
+.contact-btn:active { transform: scale(0.98); background: var(--elevated); }
+.mask {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,0.7);
+    display: none; align-items: flex-end; justify-content: center;
+}
+.mask.show { display: flex; }
+.contact-box {
+    width: 100%; max-width: 480px;
+    background: var(--elevated);
+    border-radius: 18px 18px 0 0;
+    padding: 24px 20px calc(20px + env(safe-area-inset-bottom, 0px));
+}
+.contact-title { font-size: 18px; font-weight: 700; }
+.contact-sub { color: var(--text3); font-size: 13px; margin: 6px 0 14px; }
+.contact-input {
+    width: 100%; padding: 12px 14px;
+    background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    font-size: 14px; font-family: inherit; outline: none;
+    box-sizing: border-box; resize: none;
+}
+.contact-input:focus { border-color: var(--green); }
+.contact-actions { display: flex; gap: 10px; margin-top: 14px; }
+.contact-actions button {
+    flex: 1; padding: 12px 0; border-radius: 22px;
+    font-size: 15px; font-weight: 600; cursor: pointer; border: none;
+}
+.contact-cancel { background: var(--surface); color: var(--text2); border: 1px solid var(--border); }
+.contact-send { background: var(--green); color: #000; }
+.contact-send:disabled { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -215,7 +252,7 @@ td b { color: var(--text); font-weight: 600; }
             <div class="body"><b>复制军师的回复</b><span>军师给出 1 句可以直接发的话，点「复制」发给她。</span></div>
         </div>
     </div>
-    <div class="note"><b>提示：</b>军师每轮只给 1 句、像真人发微信。别把它的回复当"标准答案"，要融入你自己的语气。</div>
+    <div class="note"><b>提示：</b>军师每轮只给 1 句、像真人发微信。你也可以把句子拆分一截一截发送出去。</div>
 </div>
 
 <!-- ③ 第一句话怎么说 -->
@@ -226,17 +263,17 @@ td b { color: var(--text); font-weight: 600; }
     <p>把<strong>你的网名 + 关于她的已知信息</strong>直接发给军师，它会帮你想一句自然、不尬、带钩子的开场白：</p>
     <div class="demo">
         <div class="label">发送给军师</div>
-        <div class="in">我的网名叫<b>追梦人</b>，她网名叫<b>小月亮</b>，看她朋友圈爱发<b>猫</b>，帮我开第一句</div>
+        <div class="in">我的网名叫<b>小月亮</b>，我朋友圈爱发<b>猫</b></div>
         <div class="label">军师给出</div>
-        <div class="out">"小月亮这个网名，是晚上话多的人吗？我猜你家的猫也这么想"</div>
+        <div class="out">"叫小月亮，你是晚上话多的人吗？我猜你家的猫也这么想"</div>
     </div>
     <div class="demo">
         <div class="label">发送给军师</div>
-        <div class="in">我网名<b>老林</b>，她网名<b>吃遍天下</b>，我只知道她爱吃，怎么开场</div>
+        <div class="in">我网名叫<b>吃遍天下</b></div>
         <div class="label">军师给出</div>
         <div class="out">"吃遍天下？那请问这位美食博主，有没有踩雷的店，我避个雷"</div>
     </div>
-    <div class="note"><b>技巧：</b>网名 + 已知信息喂得越具体，开场越准。她的网名、朋友圈、头像、共同朋友，全都能当钩子。</div>
+    <div class="note"><b>技巧：</b>网名 + 已知信息喂得越具体，开场越准。她的网名、朋友圈、头像、共同朋友，全都能当话题。</div>
 </div>
 
 <!-- ④ 个人简介的使用说明 -->
@@ -308,7 +345,7 @@ td b { color: var(--text); font-weight: 600; }
         <tr><td><b>免费使用</b></td><td>打开就能聊，有每日免费次数</td></tr>
         <tr><td><b>注册账号</b></td><td>免费额度提升，多设备同步</td></tr>
         <tr><td><b>邀请好友</b></td><td>每邀一位好友，双方都赠送额外次数</td></tr>
-        <tr><td><b>激活码</b></td><td>更大额度和更高单日上限（每月一码）</td></tr>
+        <tr><td><b>激活码</b></td><td>包月使用，全功能VIP</td></tr>
     </table>
     <div class="note"><b>提示：</b>额度用完时会引导你升级；具体价格和档位看页面内提示。</div>
 </div>
@@ -334,7 +371,7 @@ td b { color: var(--text); font-weight: 600; }
     </details>
     <details>
         <summary>她一直不回消息怎么办？</summary>
-        <p>把"她没回"告诉军师（比如：她 2 小时没回了），它会帮你判断是缓一缓、换个话题、还是找个由头自然跟进——不会让你干等或硬催。</p>
+        <p>把"她没回"告诉军师（比如：/提示：她 2 小时没回了），它会帮你判断是缓一缓、换个话题、还是找个由头自然跟进——不会让你干等或硬催。</p>
     </details>
     <details>
         <summary>换了手机，数据还在吗？</summary>
@@ -348,8 +385,78 @@ td b { color: var(--text); font-weight: 600; }
 
 <div class="footer">
     <a class="cta" href="index.html">开始使用 →</a>
-    <div class="tip">有问题反馈：长按好友 → 设置里联系</div>
+    <button class="contact-btn" onclick="openContact()">📮 联系我们</button>
+    <div class="tip">使用中遇到问题、想提建议，随时联系我们</div>
 </div>
+
+<!-- 联系我们弹窗 -->
+<div id="contact-mask" class="mask" onclick="if(event.target===this)closeContact()">
+    <div class="contact-box">
+        <div class="contact-title">联系我们</div>
+        <p class="contact-sub">反馈使用问题或建议，我们会尽快回复</p>
+        <textarea id="contact-content" class="contact-input" rows="4" maxlength="2000" placeholder="说说你遇到的问题或想法..."></textarea>
+        <input id="contact-way" class="contact-input" style="margin-top:10px;" maxlength="100" placeholder="联系方式（选填：微信 / 邮箱 / 手机号）">
+        <div class="contact-actions">
+            <button class="contact-cancel" onclick="closeContact()">取消</button>
+            <button class="contact-send" onclick="sendContact()">提交</button>
+        </div>
+    </div>
+</div>
+
+<script>
+var APP_CONFIG = null;
+try {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', 'config.js', false);
+    xhr.send();
+    if (xhr.status === 200) {
+        (0, eval)(xhr.responseText);
+        APP_CONFIG = window.APP_CONFIG;
+    }
+} catch (e) { console.error('config 加载失败', e); }
+
+function openContact() {
+    document.getElementById('contact-mask').classList.add('show');
+    document.getElementById('contact-content').focus();
+}
+function closeContact() {
+    document.getElementById('contact-mask').classList.remove('show');
+}
+function sendContact() {
+    var content = (document.getElementById('contact-content').value || '').trim();
+    var way = (document.getElementById('contact-way').value || '').trim();
+    if (!content) { alert('请先填写反馈内容'); return; }
+    var btn = document.querySelector('.contact-send');
+    btn.disabled = true;
+    var old = btn.textContent;
+    btn.textContent = '提交中...';
+    var cfg = APP_CONFIG && APP_CONFIG.supabase;
+    var url = cfg ? cfg.url.replace(/\/$/, '') + '/rest/v1/rpc/submit_feedback' : '';
+    if (!url) {
+        btn.disabled = false; btn.textContent = old;
+        alert('反馈服务未配置，请稍后再试');
+        return;
+    }
+    fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'apikey': cfg.anonKey },
+        body: JSON.stringify({ p_content: content, p_contact: way })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+        btn.disabled = false; btn.textContent = old;
+        if (d && d.success) {
+            closeContact();
+            document.getElementById('contact-content').value = '';
+            document.getElementById('contact-way').value = '';
+            alert(d.message || '已收到，感谢反馈！');
+        } else {
+            alert((d && d.message) || '提交失败，请重试');
+        }
+    }).catch(function () {
+        btn.disabled = false; btn.textContent = old;
+        alert('网络错误，请稍后再试');
+    });
+}
+</script>
 
 </body>
 </html>
