@@ -75,8 +75,20 @@ const App = {
             target.classList.add('active');
             this.currentPage = page;
         }
+        // [v20260806 防误触] 进入首页（好友列表）时确保历史栈顶有哨兵记录：
+        // 系统左缘右滑/返回键第一次只消耗哨兵（页面不动），第二次才退出 PWA
+        if (page === 'friends') this._ensureExitSentinel();
         // 诊断日志：记录每次页面切换（排查"秒切回好友列表"问题）
         try { Utils.dlog('nav', (from || '?') + ' -> ' + page); } catch (e) {}
+    },
+
+    // [v20260806 防误触] 哨兵记录去重压栈：栈顶已是哨兵则不重复 push（避免栈膨胀）
+    _ensureExitSentinel() {
+        try {
+            if (!history.state || history.state._jssl !== 'sentinel') {
+                history.pushState({ _jssl: 'sentinel' }, '');
+            }
+        } catch (e) { /* 极个别环境 history 受限时静默降级为原行为 */ }
     },
 
     // [v20260805 账号体系] 登录 / 注册弹窗
