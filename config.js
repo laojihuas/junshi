@@ -46,9 +46,9 @@ window.APP_CONFIG = {
         rewardTries: 50
     },
 
-    // 发卡平台商品页链接
+    // 发卡平台商品页链接（酷发卡：军师包月卡，自动发货=卡密）
     store: {
-        purchaseUrl: 'https://your-card-platform.com/product/junshi'
+        purchaseUrl: 'https://www.kufaka.com/item/fv0pn0'
     },
 
     // 产品信息
