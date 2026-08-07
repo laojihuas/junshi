@@ -859,10 +859,12 @@ async function extractSemanticKeywords(
 // ============================================================
 // [v7] strategy：执行中的聊天惯例（跨轮次"方向盘"）
 //   从检索到的惯例/魔术/玩法类资料提炼步骤序列，逐轮注入执行
+// [v17] essence：核心原理/节奏/分寸（提炼时 LLM 总结，注入 system 供临场发挥，防"只剩骨架"）
 type StrategyState = {
   name: string;         // 惯例名称
   goal: string;         // 套路目标
-  steps: string[];      // 步骤序列（2-6 步，每步一句话）
+  essence?: string;     // [v17] 核心原理（≤60字）：节奏/分寸/判断口诀，执行时按此临场发挥
+  steps: string[];      // 步骤序列（2-6 步，每步 = 话术思路 + 直接可发的例句 + 时机提示）
   rounds_used: number;  // 已使用轮次（每次回复后 +1）
   max_rounds: number;   // 轮次上限（自动终止，防止无限跑）
   started_at: string;
@@ -1226,6 +1228,8 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 // [v7] 套路提炼：从检索到的惯例/魔术/玩法类资料中解析可执行步骤
 //   特征预检（含惯例/魔术/玩法/步骤等词）→ LLM 输出 JSON {name,goal,steps}
 //   steps < 2 或未命中特征 → 返回 null（不启动套路）
+// [v17] 灵魂保留：新增 essence（核心原理/节奏/分寸）+ 每步强制带原文例句 + maxTokens 800
+//   目标：从"操作手册翻译"升级为"精髓提炼"，防 4:1 压缩把节奏/分寸/例句全丢光
 // ============================================================
 const STRATEGY_HINT_RE = /惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读/;
 const STRATEGY_MAX_STEPS = 6;
@@ -1242,17 +1246,17 @@ async function extractStrategy(
   const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己用交友APP（纯文字聊天）回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
     + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
     + `要求：如果资料中存在"分步骤、可执行"的聊天惯例/魔术/玩法（例如推拉、冷读、惯例开场、邀约流程等），提炼成步骤序列。\n`
-    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","steps":["第1步...","第2步..."]}，steps 2-6 步。\n`
-    + `线上适配（必须遵守）：\n`
-    + `- 所有步骤必须是"可直接发送给对方"的文字话术/话术思路（纯文字聊天场景）；\n`
+    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","essence":"核心原理(≤60字)","steps":["第1步...","第2步..."]}，steps 2-6 步。\n`
+    + `提炼要求（必须遵守）：\n`
+    + `- essence：用一句话总结这个惯例的"灵魂"——核心机制/节奏/分寸/判断口诀（例如"先给预期再打破，转要突然但不出格""先共情再转，急不得"）。这是执行时最重要的部分，要具体、有画面感，不要写成官方总结。\n`
+    + `- 每一步必须包含至少一个"可直接发送给对方"的具体例句，用引号标注原样话术；尽量直接引用资料原文例句、保留原文的韵味和语气，禁止改写成官方腔/翻译腔/书面语。\n`
+    + `- 每步格式：一句话话术思路 + 例句（引号内原样话术）+ 时机提示写在该步末尾括号内（如"对方回复后隔20-40分钟再发""对方主动追问时用"）。每步可写到50-80字，不必追求简短。\n`
     + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
-    + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低；\n`
-    + `- 每步可附带发送时机提示（如"对方回复后隔20-40分钟再发""对方主动追问时用"），写在该步末尾括号内；\n`
-    + `- 每步一句话、具体可操作、面向"替用户给对方发消息"的执行视角。\n`
+    + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低。\n`
     + `如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 400, _stage: 'extract_strategy',
+      temperature: 0.2, maxTokens: 800, _stage: 'extract_strategy',
     });
     const start = content.indexOf('{');
     const end = content.lastIndexOf('}');
@@ -1264,9 +1268,12 @@ async function extractStrategy(
       .slice(0, STRATEGY_MAX_STEPS);
     const name = typeof p.name === 'string' ? p.name.slice(0, 10) : '';
     const goal = typeof p.goal === 'string' ? p.goal.slice(0, 30) : '';
+    const essence = typeof p.essence === 'string' ? p.essence.slice(0, 60) : '';
     if (!name || steps.length < 2) return null;
     return {
       name, goal, steps,
+      // [v17] essence 可空：兼容旧提炼结果（无 essence 时注入跳过该行即可）
+      ...(essence ? { essence } : {}),
       rounds_used: 0,
       // [v16] 轮数收紧：一个惯例通常一答一问两三步就完成，不再挂 6 轮下限
       //   （原 Math.max(steps.length*2,6) 导致套路对象迟迟不清空、压制其他话题）
@@ -1666,13 +1673,18 @@ function buildSystemContent(opts: {
   }
 
   // [v7] 套路执行指令：方向盘优先，检索为弹药，输出不提步骤/进度
+  // [v17] 注入 essence（核心原理/节奏/分寸）+ 例句按语境微调，防"只剩骨架"
   const strategy = opts.memoryCard?.strategy;
   if (strategy && Array.isArray(strategy.steps) && strategy.steps.length > 0) {
     const stepText = strategy.steps.map((st, i) => `${i + 1}. ${st}`).join('\n');
     s += `\n\n【当前执行套路】你正在执行「${strategy.name}」惯例，目标：${strategy.goal}\n`
+      + (strategy.essence
+        ? `核心原理：${strategy.essence}（这是本套路的灵魂：按此原则临场发挥节奏和分寸，不要机械照搬步骤）\n`
+        : '')
       + `执行步骤：\n${stepText}\n`
       + `执行规则（严格遵守）：\n`
       + `- 套路决定对话方向；但对方抛出明显更有趣/更投入/更感兴趣的新话题时，优先跟随对方，套路自然搁置、不强拉回。\n`
+      + `- 步骤中的例句是参考话术：优先采用，但可按当前语境微调语气措辞，保留其韵味和节奏，禁止改写成官方腔/翻译腔。\n`
       + `- 参考资料与套路冲突时以对话连续性为准；方向一致才采用参考素材。\n`
       + `- 根据对方最新反应自然推进：先顺应对方，再判断要不要往套路方向带，绝不生硬。\n`
       + `- 严禁向对方提及套路、步骤、进度、惯例、第几步等任何元信息，输出必须是可直接发送的自然消息。\n`
