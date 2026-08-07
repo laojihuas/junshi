@@ -902,7 +902,7 @@ type MemoryCard = {
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
   // [v61 里程碑] 关系推进里程碑：从"未知"一路推到"恋爱"要逐个收集的信息/动作
-  //   ['照片','年龄','喜好','住哪','家庭','恋爱经历','敏感面','加微信','约会']
+  //   ['照片','年龄','喜好','住哪','家庭','恋爱经历','敏感面','约会']
   //   已完成项（对方已给出/已发生）由 LLM 在 extractProfile 时判定合并，构建 system 时注入进度
   milestones?: string[];
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
@@ -944,10 +944,11 @@ const STAGE_ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
 // [v61 里程碑] 关系推进里程碑链（默认一路推到恋爱要逐个拿下的"小目标"）
 //   顺序有讲究：先易后难、先公开后私密、先线上后线下——
 //   照片(吸引力确认) → 年龄(基础信息) → 喜好(邀约弹药) → 住哪(距离判断) →
-//   家庭(信任表态) → 恋爱经历(私密升级) → 敏感面(情绪信任) → 加微信(渠道升级) → 约会(线下落地)
+//   家庭(信任表态) → 恋爱经历(私密升级) → 敏感面(情绪信任) → 约会(线下落地)
+//   [v74b] 移除"加微信"：部分用户本就在微信聊天，引导加微信显尴尬
 //   [v61b] 排序修正：喜好提前到住哪前（聊天初期即可收集，作邀约弹药）；
 //   里程碑不阻塞关系升级——stage 推进只看兴趣信号，里程碑只是每轮的"战术抓手"。
-const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '加微信', '约会'];
+const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
 
 // [v61] 各里程碑对应的"本轮推进话术方向"（带台阶可退，军师用来主动引导）
 const MILESTONE_TIPS: Record<string, string> = {
@@ -958,7 +959,6 @@ const MILESTONE_TIPS: Record<string, string> = {
   '家庭': '聊家庭/家乡/成长背景（"你是本地人吗，家里几个孩子"），自然地交换，拉近"自己人"的感觉，不盘问。',
   '恋爱经历': '半开玩笑地聊情感史（"像你这样的应该不缺人追吧"），引导她讲上一段/恋爱观；她愿意说 = 信任升级，接住情绪别评判。',
   '敏感面': '引导她说出脆弱/真实的一面（烦恼、压力、怕什么），先共情接住再推进；她向你展露情绪 = 最重要的信任里程碑。',
-  '加微信': '给出一个自然的由头换微信（"App 老吞消息，加个微信吧，改天发我那家店"），拿到微信 = 渠道升级，之后推进更直接。',
   '约会': '落到具体见面：用已收集的喜好/住哪做模糊邀约（"改天带你去你说的那家店"），她接住就敲定时间地点，不现实就改约。',
 };
 
@@ -989,12 +989,42 @@ function thisEscalationBlock(stage: string, milestones: string[] = [], nextMs: s
     + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
     + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/邀约话术来执行推进，不要自己硬编。\n`
     + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
-  // [v61] 里程碑引导：默认路径有"下一目标"就明确给出，让推进有抓手
-  if (nextMs && MILESTONE_TIPS[nextMs]) {
-    s += `\n\n【本轮里程碑目标】下一目标：「${nextMs}」——${MILESTONE_TIPS[nextMs]}。`
-      + `已完成（她给过这些，别再重复要）：${milestones.length ? milestones.join('、') : '（无）'}。`
-      + `按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→加微信→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。`;
+  // [v74 里程碑×目标联动] 统一里程碑块：暧昧前轻引导（单一 nextMs），暧昧后加重（不分先后、情景带）
+  s += buildMilestoneBlock({
+    heavy: STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('暧昧'),
+    meetGate: true,
+    milestones,
+    nextMs,
+  });
+  return s;
+}
+
+// [v74 里程碑×目标联动] 统一里程碑引导块（替代旧的"下一目标"单行弱引导）
+//   heavy=false（暧昧前）：保持现状——按链序单一 nextMs 弱引导
+//   heavy=true（暧昧/恋爱）：加重权重——列出全部未完成项，不分先后，情景顺势带
+//   meetGate=true（全局门槛，除"保持当前关系/挽回修复"路径）：约见面前至少完成 2 项小目标
+//   "站在旁边看窗口"：方向由【本轮动作】/【主动推进】给，里程碑块负责看到口子就顺势带一步
+function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; milestones: string[]; nextMs: string }): string {
+  const { heavy, meetGate, milestones, nextMs } = opts;
+  const done = milestones.length ? milestones.join('、') : '（无）';
+  const gateLine = '\n- 邀约门槛：至少完成 2 项小目标后才能把对话往"见面"带；未达标前本轮以收集为主，不抛邀约、不敲时间，达标后邀约照常（见【本轮动作】）。';
+  if (!heavy) {
+    // 暧昧前：保持现状（单一 nextMs 顺序引导）
+    if (!nextMs || !MILESTONE_TIPS[nextMs]) return '';
+    let s = `\n\n【关系里程碑】下一目标：「${nextMs}」——${MILESTONE_TIPS[nextMs]}。`
+      + `已完成（她给过这些，别重复要）：${done}。按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。`;
+    if (meetGate) s += gateLine;
+    return s;
   }
+  // 暧昧及之后：加重权重——全部未完成项列出，不分先后，情景顺势带
+  const pending = MILESTONE_CHAIN.filter((m) => !milestones.includes(m));
+  const pendingText = pending.length ? pending.join('、') : '（全部完成，正常升温即可）';
+  let s = `\n\n【关系里程碑】(暧昧期推进重点，本轮务必带一步)\n`
+    + `- 已完成（给过就别重复要）：${done}。\n`
+    + `- 未完成（不分先后，任选其一）：${pendingText}。\n`
+    + `- 本轮从"未完成"里挑 1 个最贴合当前情景的顺势带出，优先用下方知识库素材当话术；像站在旁边盯窗口一样：她开了话题口子就顺势带进去，绝不生硬转折、绝不盘问查户口。\n`
+    + `- 一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要；照片/喜好这类素材型可随话题自然重复，以自然为准，由你判断。`;
+  if (meetGate) s += gateLine;
   return s;
 }
 
@@ -1156,7 +1186,7 @@ async function updateMemoryCard(ctx: {
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
 // [v57] 返回 {profile, facts}：profile=画像对象；facts=本轮新提取的长期事实（string[]）
-// [v61] profile 新增 milestones：关系推进里程碑已完成项（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/加微信/约会）
+// [v61] profile 新增 milestones：关系推进里程碑已完成项（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会）
 async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
   const curMilestones = JSON.stringify(Array.isArray(card.milestones) ? card.milestones : []);
@@ -1164,7 +1194,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/加微信/约会"9项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1254,7 +1284,7 @@ async function extractStrategy(
     if (pending.length > 0) {
       const tipLines = pending.map((m) => `  · ${m}：${MILESTONE_TIPS[m] || ''}`).join('\n');
       milestoneBlock = `\n### 可选：自然推进收集项（不影响套路节奏就不带）\n`
-        + `本会话还在推进一些"收集项"（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/加微信/约会）。\n`
+        + `本会话还在推进一些"收集项"（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会）。\n`
         + `不强制本套路带出——但如果当前对话场景恰好能自然融合某个，可以选一个融入到某一步骤里（让氛围+推进一步到位）。\n`
         + `- 未完成（这些还没收集到）：${pending.join('、')}\n`
         + `- 已完成（这些已有，别再问）：${done.join('、') || '（无）'}\n`
@@ -1656,8 +1686,14 @@ function buildSystemContent(opts: {
         + `当前阶段：${curStage || '未知'}\n`
         + `本轮动作：${goalHint.hint}`;
       // 目标推进中：里程碑作为战术弹药（除非目标是挽回——挽回期不收集里程碑）
+      // [v74 里程碑×目标联动] 暧昧后加重引导权重；约见面前至少完成 2 项小目标（全局门槛）
       if (goal !== '挽回修复') {
-        s += `\n\n【关系里程碑】下一目标：${nextMs ? `「${nextMs}」——${MILESTONE_TIPS[nextMs] || ''}` : '里程碑全部完成，正常升温即可'}。已完成（她给过这些，别重复要）：${milestones.length ? milestones.join('、') : '（无）'}。本轮在完成目标的同时尽量自然地把「${nextMs || ''}」往前推一步，但不强行、不盘问；对方明显抗拒就换一个，过几轮再试。`;
+        s += buildMilestoneBlock({
+          heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'),
+          meetGate: true,
+          milestones,
+          nextMs,
+        });
       }
     } else {
       // [v60] 目标已达成：不再按目标使劲，改按里程碑/当前 stage 继续（恋爱后还差"约会"等）

@@ -162,8 +162,9 @@ const Chat = {
         // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
         const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
-        // [v61] 里程碑进度（追求/暧昧阶段的推进小目标：照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→加微信→约会）
-        const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '加微信', '约会'];
+        // [v61] 里程碑进度（追求/暧昧阶段的推进小目标：照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会）
+        // [v74b] 移除"加微信"：部分用户本就在微信聊天，引导加微信显尴尬
+        const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
         const doneMs = Array.isArray(mc.milestones) ? mc.milestones.filter(m => MILESTONE_CHAIN.includes(m)) : [];
         let milestoneHtml = '';
         if (doneMs.length > 0 || (p.stage && p.stage !== '未知' && p.stage !== '挽回')) {
