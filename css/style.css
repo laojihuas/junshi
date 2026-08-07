@@ -680,6 +680,21 @@ textarea.input {
 .modal-memory-content {
     max-width: 480px;
     width: 92%;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+}
+.modal-memory-content .modal-title {
+    flex-shrink: 0;
+}
+.modal-memory-content .modal-body {
+    overflow-y: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+}
+.modal-memory-content .modal-footer {
+    flex-shrink: 0;
 }
 .memory-section {
     margin-bottom: 14px;
