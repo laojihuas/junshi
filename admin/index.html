@@ -539,23 +539,25 @@
             }
         }
 
-        // 加载激活码
+        // 加载激活码（[2026-08-07 安全加固] activation_codes 已对 anon/authenticated
+        // 关闭直查，改走 admin_list_codes RPC，函数内 is_admin 校验）
         async function loadCodes() {
             if (!sb) return;
-            const { data, error } = await sb.from('activation_codes').select('*').order('created_at', { ascending: false });
-            if (error || !data) {
+            const { data, error } = await sb.rpc('admin_list_codes');
+            if (error || !data || data.error || !Array.isArray(data.codes)) {
                 document.getElementById('codes-tbody').innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted);">加载失败</td></tr>';
                 return;
             }
-            document.getElementById('codes-count').textContent = '共 ' + data.length + ' 个';
-            document.getElementById('codes-tbody').innerHTML = data.map(c => {
+            const codes = data.codes;
+            document.getElementById('codes-count').textContent = '共 ' + codes.length + ' 个';
+            document.getElementById('codes-tbody').innerHTML = codes.map(c => {
                 const badge = c.used
                     ? '<span class="badge badge-expired">已使用</span>'
                     : '<span class="badge badge-free">未使用</span>';
                 return `<tr>
                     <td class="code-display">${c.code}</td>
                     <td>${badge}</td>
-                    <td>${c.used_by ? c.used_by.slice(0,8) + '...' : '-'}</td>
+                    <td>${c.used_account_id ? c.used_account_id.slice(0,8) + '...' : '-'}</td>
                     <td>${c.used_at ? new Date(c.used_at).toLocaleString() : '-'}</td>
                     <td>${new Date(c.created_at).toLocaleString()}</td>
                 </tr>`;

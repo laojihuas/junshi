@@ -31,3 +31,6 @@ secret*.json
 # 其中仅含 Supabase anon key（公开发布 key，数据安全靠 RLS）
 # 与 IMA knowledgeBaseId / 函数 URL，不含任何密码级凭证。
 # 若未来 config.js 需要加入敏感配置，请改为从云端/环境变量读取。
+
+# 安全加固(2026-08-07):记忆日志含内部架构情报,不再推送到公开仓库
+.workbuddy/memory/

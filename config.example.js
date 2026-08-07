@@ -10,14 +10,6 @@ window.APP_CONFIG = {
         anonKey: 'your-anon-key-here'
     },
 
-    // IMA 知识库配置
-    ima: {
-        // IMA API 代理的 Supabase Edge Function URL（部署后获取）
-        proxyUrl: 'https://your-project-id.functions.supabase.co/ima-proxy',
-        // 知识库 ID（在 IMA 开放平台创建知识库后获取）
-        knowledgeBaseId: 'your-knowledge-base-id'
-    },
-
     // [统一提示词管理] 后台提示词接口（Edge Function）
     // 前端用户不可见提示词内容，仅在发送消息时实时获取并随请求发送
     prompt: {
@@ -38,13 +30,9 @@ window.APP_CONFIG = {
         gateUrl: 'https://your-project-id.functions.supabase.co/device-gate'
     },
 
-    // [邀请功能] 邀请好友得次数
+    // [邀请功能] 邀请好友得次数（注册时填邀请码自动兑现）
     invite: {
-        // 获取/生成我的邀请码（登录用户）
-        getUrl: 'https://your-project-id.functions.supabase.co/invite-code',
-        // 兑现邀请（注册成功后调用，给邀请人 +50 次）
-        redeemUrl: 'https://your-project-id.functions.supabase.co/invite-redeem',
-        // 站点地址：邀请链接前缀（如 https://junshi-3nnr22y.maozi.io；留空自动使用当前域名）
+        // 站点地址：邀请链接前缀（如 https://your-site.com；留空自动使用当前域名）
         siteUrl: '',
         // 单次邀请赠送次数
         rewardTries: 50

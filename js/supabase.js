@@ -196,16 +196,7 @@ const DB = {
             .eq('id', sessionId);
     },
 
-    // ---- 激活码 ----
-    async verifyActivationCode(code) {
-        const sb = getSupabaseClient();
-        if (!sb) return null;
-        const { data, error } = await sb
-            .from('activation_codes')
-            .select('*')
-            .eq('code', code.trim().toUpperCase())
-            .single();
-        if (error) return null;
-        return data;
-    }
+    // 注：激活码校验已改走 Edge Function（activate-code，绑账号），
+    // 前端不再直查 activation_codes 表（该表已对 anon/authenticated 关闭，
+    // 仅 service_role 可访问，见 016_security_hardening.sql）。
 };

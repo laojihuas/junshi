@@ -1,0 +1,9 @@
+# 军师 - 爬虫协议
+# 管理后台等路径禁止收录(合规爬虫遵守;恶意爬虫需依赖后端鉴权防护)
+
+User-agent: *
+Disallow: /admin/
+Disallow: /supabase/
+Disallow: /config.js
+Disallow: /.workbuddy/
+Disallow: /sw.js
