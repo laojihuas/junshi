@@ -186,8 +186,9 @@ const Chat = {
             : '<div class="memory-empty">暂无画像信息</div>';
 
         // [v20260805b] 去掉"她说过的话/我说过的话"：聊天会话里本来就能看到，不重复展示
+        // [v20260807] 删除"军师主动引导推进：照片→年龄→…→约会"提示行（用户反馈没必要显示，节点本身保留）
         const milestoneSec = milestoneHtml
-            ? sec('推进里程碑', '#BA7517', milestoneHtml + '<div class="memory-empty" style="margin-top:6px;">军师主动引导推进：照片 → 年龄 → 喜好 → 住哪 → 家庭 → 恋爱经历 → 敏感面 → 加微信 → 约会</div>')
+            ? sec('推进里程碑', '#BA7517', milestoneHtml)
             : '';
         return stageSec
             + milestoneSec

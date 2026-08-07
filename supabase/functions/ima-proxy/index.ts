@@ -501,7 +501,8 @@ Deno.serve(async (req) => {
             const usable = (Array.isArray(convItems) ? convItems : [])
               .filter((i) => i && (i.title || '') && (i.content || '')).length;
             if (usable >= 2) {
-              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query);
+              // [v18] 传入 memoryCard → extractStrategy 在 prompt 里注入里程碑可选融合段
+              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query, memoryCard);
               if (st) {
                 memoryCard = { ...(memoryCard || {}), strategy: st };
                 quotaOpts.strategyActive = true; // 本轮起按执行期配额
@@ -1236,12 +1237,31 @@ const STRATEGY_MAX_STEPS = 6;
 
 async function extractStrategy(
   llmKey: string, llmBase: string, llmModel: string,
-  kbItems: any[], query: string
+  kbItems: any[], query: string,
+  memCard: MemoryCard | null = null
 ): Promise<StrategyState | null> {
   const texts = (Array.isArray(kbItems) ? kbItems : [])
     .map((i) => `${i.title || ''}\n${i.content || ''}`)
     .join('\n');
   if (!texts || !STRATEGY_HINT_RE.test(texts)) return null;
+
+  // [v18] 可选化目标融合：把 milestones 集合 + MILESTONE_TIPS 话术方向塞进 prompt，
+  //   措辞强调"套路节奏优先/不生硬就不带"，让 LLM 看场景自选融合而非硬塞
+  let milestoneBlock = '';
+  if (Array.isArray(memCard?.milestones)) {
+    const pending = MILESTONE_CHAIN.filter((m) => !memCard!.milestones!.includes(m));
+    const done = MILESTONE_CHAIN.filter((m) => memCard!.milestones!.includes(m));
+    if (pending.length > 0) {
+      const tipLines = pending.map((m) => `  · ${m}：${MILESTONE_TIPS[m] || ''}`).join('\n');
+      milestoneBlock = `\n### 可选：自然推进收集项（不影响套路节奏就不带）\n`
+        + `本会话还在推进一些"收集项"（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/加微信/约会）。\n`
+        + `不强制本套路带出——但如果当前对话场景恰好能自然融合某个，可以选一个融入到某一步骤里（让氛围+推进一步到位）。\n`
+        + `- 未完成（这些还没收集到）：${pending.join('、')}\n`
+        + `- 已完成（这些已有，别再问）：${done.join('、') || '（无）'}\n`
+        + `- 融入参考话术方向（与执行期同一套提示）：\n${tipLines}\n`
+        + `铁律：① 套路节奏与完整性永远优先；② 只有当前场景自然（不生硬、不查户口、不破坏推拉/冷读/互动节奏）才能融入；③ 没有合适时机就不带，宁缺毋滥；④ 已完成的不要重复要；⑤ 不要为了塞目标而强行多走一步步骤。`;
+    }
+  }
 
   const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己用交友APP（纯文字聊天）回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
     + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
@@ -1253,7 +1273,8 @@ async function extractStrategy(
     + `- 每步格式：一句话话术思路 + 例句（引号内原样话术）+ 时机提示写在该步末尾括号内（如"对方回复后隔20-40分钟再发""对方主动追问时用"）。每步可写到50-80字，不必追求简短。\n`
     + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
     + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低。\n`
-    + `如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
+    + milestoneBlock
+    + `\n如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.2, maxTokens: 800, _stage: 'extract_strategy',
