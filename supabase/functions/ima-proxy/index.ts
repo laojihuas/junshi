@@ -405,6 +405,26 @@ Deno.serve(async (req) => {
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
     const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
 
+    // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
+    //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
+    let lastGapText = '';
+    if (serviceRoleKey && supabaseUrl && session_id) {
+      try {
+        const lastResp = await fetch(
+          `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(session_id)}&select=created_at&role=eq.assistant&order=created_at.desc&limit=1`,
+          { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+        );
+        if (lastResp.ok) {
+          const rows = await lastResp.json();
+          if (Array.isArray(rows) && rows[0] && rows[0].created_at) {
+            lastGapText = formatGapSince(new Date(rows[0].created_at));
+          }
+        }
+      } catch (e: any) {
+        console.warn('会话间隔查询失败:', e.message);
+      }
+    }
+
     // 最近对方说过的话（供 query rewrite 与记忆卡使用）
     const recentUserMessages = (Array.isArray(history) ? history : [])
       .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
@@ -425,6 +445,8 @@ Deno.serve(async (req) => {
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
     // [v57] 长期记忆本轮注入条数（_debug 用；同样提到顶层防作用域事故）
     let factsInjected = 0;
+    // [v76] 输出后时间校验命中词（_debug 用；null=未触发）
+    let lastTimeConflict: string | null = null;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -553,6 +575,8 @@ Deno.serve(async (req) => {
           switchTopic,
           // [v73] 战术指令（全局原则+阶段卡+命中类别卡组）
           tactic,
+          // [v76] 距上次聊天间隔（变化区注入，不动前缀缓存）
+          lastGapText,
         });
         const systemContent = built.systemContent;
         pulseAdvice = built.pulseAdvice;
@@ -573,10 +597,18 @@ Deno.serve(async (req) => {
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
         // [v70 降本] 只与最近 5 条比较（全量 ≤20 条命中率高，误触发=多花一整轮重发成本）
+        // [v76] 时间一致性兜底：回复出现与【当前时间】冲突的时段词（早安/晚安/这么晚等）→ 同上重生成
+        //   （两触发源合并成一次重试，避免同一轮双重重生成）
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.slice(-5) : [];
-        if (reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs)) {
+        const dupHit = !!(reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs));
+        const timeHit = timeConflict(reply);
+        lastTimeConflict = timeHit;
+        if ((dupHit || timeHit) && llmKey) {
+          const notes: string[] = [];
+          if (dupHit) notes.push('你刚才生成的那句话与【你之前发过的话】重复了。严禁重复，必须换一句全新的、意思不重复的说法。');
+          if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           const retry = await llmChat(llmKey, llmBase, llmModel, [
-            { role: 'system', content: systemContent + '\n\n注意：你刚才生成的那句话与【你之前发过的话】重复了。严禁重复，必须换一句全新的、意思不重复的说法。直接输出新的话术本体。' },
+            { role: 'system', content: systemContent + '\n\n注意：' + notes.join('') + ' 直接输出新的话术本体，不要解释。' },
             ...llmHistory,
             { role: 'user', content: query.trim() },
           ], {
@@ -676,6 +708,10 @@ Deno.serve(async (req) => {
         milestones: Array.isArray(memoryCard?.milestones) ? memoryCard!.milestones : [],
         // [v62] 切换话题模式（验证【切换话题】注入）
         switch_topic: switchTopic,
+        // [v76] 会话间隔注入文本（验证时间流逝感知；''=未注入）
+        last_gap: lastGapText,
+        // [v76] 输出后时间校验命中词（验证时间一致性；null=未触发）
+        time_conflict: lastTimeConflict,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
@@ -756,6 +792,42 @@ function isNearDuplicate(text: string, prev: string[]): boolean {
     if (hit / Math.max(pg.length, 1) >= 0.85 || hit / tset.size >= 0.85) return true;
   }
   return false;
+}
+
+// ============================================================
+// [v76] 输出后时间一致性校验（方案6）
+//   只判"描述当下状态"的硬词（早安/晚安/这么晚/这么早/大中午等）：
+//   邀约/未来计划类（晚上见/明天/改天/周末）不判——那是合理约时间，不是幻觉。
+//   命中 → 返回命中词标签（供重生成提示）；未命中 → null
+//   小时取 Asia/Shanghai（与 formatCurrentTime 同源），hourCycle h23 防 0 点报 "24"
+// ============================================================
+const TIME_STATE_WORDS: Array<{ re: RegExp; hours: number[]; label: string }> = [
+  { re: /早安|早上好|早晨好/, hours: [5, 6, 7, 8, 9, 10, 11], label: '早安' },
+  { re: /晚安|睡吧|该睡了|要睡了/, hours: [20, 21, 22, 23, 0, 1, 2, 3], label: '晚安' },
+  { re: /这么晚|这么晚了|还没睡|这么晚还/, hours: [21, 22, 23, 0, 1, 2, 3, 4], label: '这么晚' },
+  { re: /这么早|这么早就|起这么早/, hours: [4, 5, 6, 7, 8, 9, 10], label: '这么早' },
+  { re: /大中午|中午了|该吃午饭/, hours: [11, 12, 13, 14], label: '中午' },
+  { re: /大清早|一大早/, hours: [5, 6, 7, 8], label: '大清早' },
+];
+
+function shHour(): number {
+  try {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', hour: 'numeric', hourCycle: 'h23',
+    }).formatToParts(new Date());
+    return parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10);
+  } catch {
+    return new Date().getHours();
+  }
+}
+
+function timeConflict(text: string): string | null {
+  if (!text || !text.trim()) return null;
+  const h = shHour();
+  for (const w of TIME_STATE_WORDS) {
+    if (w.re.test(text) && !w.hours.includes(h)) return w.label;
+  }
+  return null;
 }
 
 // ============================================================
@@ -1384,6 +1456,23 @@ function formatCurrentTime(): string {
   return `现在是${y}年${mo}月${d}日 ${wd}（${isWeekend ? '周末' : '工作日'}），${period}${h}点多（北京时间）。`;
 }
 
+// [v76] 距上次聊天的人类可读间隔（≤24h 精确到小时，>24h 到天）
+//   间隔 <1min（连续对话中）或时间无效 → 返回 ''（不注入，避免噪音）
+function formatGapSince(last: Date): string {
+  const ms = Date.now() - last.getTime();
+  if (isNaN(ms) || ms < 60000) return '';
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${mins}分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) {
+    const m = mins % 60;
+    return m > 0 ? `${hours}小时${m}分钟前` : `${hours}小时前`;
+  }
+  const days = Math.floor(hours / 24);
+  const h = hours % 24;
+  return h > 0 ? `${days}天${h}小时前` : `${days}天前`;
+}
+
 // 城市/地区词表（一线/新一线/省会 + 常见地级市 + 省级名；规则提取够用，不追求穷尽）
 const CITY_HINTS = [
   '北京', '上海', '广州', '深圳', '杭州', '成都', '重庆', '武汉', '西安', '苏州', '南京',
@@ -1523,6 +1612,8 @@ function buildSystemContent(opts: {
   switchTopic?: boolean;
   // [v73 迷男精髓] 本轮战术：类别（防守/进攻/救场）+ 阶段（吸引/舒适/诱惑），主流程 resolveTacticCategory 产出
   tactic?: { category: 'defense' | 'attack' | 'rescue'; phase: 'attract' | 'comfort' | 'seduce' };
+  // [v76] 距上次聊天的人类可读间隔（如"2天3小时前"），空=不注入；放后缀变化区
+  lastGapText?: string;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
   //   （角色定位/当前时间/自洽输出 每轮不变 → 前缀稳定）
@@ -1582,6 +1673,13 @@ function buildSystemContent(opts: {
     s += `\n\n【我的位置】（涉及见面、约人、距离、异地等表述以此为准）\n我所在城市：${myLoc}。\n`
       + `- 不知道对方在哪时不得假设对方离我很近；\n`
       + `- "过来找你/见面/顺路/接送"等邀约，必须同时结合【当前时间】与【我的位置】判断是否现实，不现实就委婉拒绝或改约。`;
+  }
+
+  // [v76] 上次聊天间隔（时间相关、每轮可能变，放后缀变化区；间隔 <1min 或查询失败不注入）
+  if (opts.lastGapText) {
+    s += `\n\n【上次聊天】（时间流逝感知，涉及"上次/之前/多久没聊"表述以此为准）\n你和对方上一次聊天在${opts.lastGapText}。\n`
+      + `- 间隔超过 1 天：先自然接一句"好久没聊"再进正题，别当刚聊过一样直接续；\n`
+      + `- 间隔超过 3 天：语气带点想念/调侃，别用"上次说到哪了"这种记录式追问，别反复问已知信息。`;
   }
 
   // [v75 缓存②] 【话题锚点】（记忆卡 profile.anchor，跨轮次变化）
