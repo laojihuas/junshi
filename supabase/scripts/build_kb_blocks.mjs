@@ -57,9 +57,16 @@ function parseChunkFile(filePath) {
     const type = m[1];
     const content = m[2].trim();
     if (!content) continue;
-    // 块标题：从内容首行【X】提取（无则留空）
-    const t = content.match(/^【([^】]{1,20})】/);
-    blocks.push({ type, title: t ? t[1] : '', content });
+    // 块标题：优先取内容首行【X】（变体块标题"场景·变体N"可能较长，限 60 字；容错前置引号/空白）
+    // 其次取内容首行前 20 字作为可读标题；再无则留空（入库时补"未命名"）
+    let title = '';
+    const tm = content.match(/^["“]?\s*【([^】]{1,60})】/);
+    if (tm) title = tm[1];
+    else {
+      const firstLine = content.split('\n').map(l => l.trim()).find(Boolean) || '';
+      if (firstLine && !firstLine.startsWith('---')) title = firstLine.replace(/^["“]?\s*/, '').slice(0, 20);
+    }
+    blocks.push({ type, title, content });
   }
   return blocks;
 }
