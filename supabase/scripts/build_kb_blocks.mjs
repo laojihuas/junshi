@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // ============================================================
-// 军师 - kb_blocks 灌库脚本 [B 方案]
-// 读取 C:\迷男\恋爱话术\*.md（切块文件）
-// 解析块注释 <!-- 块 i/N | X 字 | 标题 -->，算 bigrams，分批 upsert
-// [2026-08-06] 恋爱教学/聊天实战 已从库删除（干扰检索），不再灌入；
-//   如未来要恢复，把目录加回 ROOTS 并重跑本脚本即可
+// 军师 - kb_blocks 灌库脚本 [v79]
+// 读取 C:\迷男\恋爱话术_切块\*.md（语义切块产物）
+// 格式：<!-- 块 i/N | X 字 | 类型 -->\n内容\n---\n...
+// 类型（话术/套路）写入 block_title 前缀 [话术]/[套路]，供检索双档过滤
+// 灌库前清空 kb_blocks 旧数据（旧 739 块硬切块，防新旧混杂）
 // 用法: SBP_PAT=xxx node build_kb_blocks.mjs
 // ============================================================
 import fs from 'fs';
@@ -17,9 +17,7 @@ const REF = 'opzvvgixlfbfpdlsorbi';
 const SUPABASE = `https://${REF}.supabase.co`;
 const API = `https://api.supabase.com/v1/projects/${REF}`;
 const ROOTS = {
-  '恋爱话术': 'C:/迷男/恋爱话术',
-  // '恋爱教学': 'C:/迷男/恋爱教学',   // 2026-08-06 已删库，不再上传
-  // '聊天实战': 'C:/迷男/聊天实战',   // 2026-08-06 已删库，不再上传
+  '恋爱话术': 'C:/迷男/恋爱话术_切块',   // [v79] 语义切块产物目录
 };
 
 // ---- 1. 拿 service_role ----
@@ -47,21 +45,21 @@ function calcBigrams(text, max = 800) {
   return [...set];
 }
 
-// ---- 2. 解析切块文件 ----
-// 格式：<!-- 块 i/N | X 字 [| 标题] -->\n内容\n\n---\n\n...
+// ---- 2. 解析语义切块文件 ----
+// 格式：<!-- 块 i/N | X 字 | 类型 -->\n内容\n---\n...
 function parseChunkFile(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
-  // 按块注释拆分
-  const parts = raw.split(/<!-- 块 (\d+)\/(\d+) \| (\d+) 字(?: \| (.*?))? -->\n/);
+  const chunks = raw.split(/\n---\n/);
   const blocks = [];
-  // parts[0]=前置空, 然后每4组: [idx, total, len, title, content...]
-  for (let i = 1; i < parts.length; i += 5) {
-    if (i + 3 >= parts.length) break;
-    const idx = parseInt(parts[i]);
-    const title = (parts[i + 3] || '').trim();
-    const content = (parts[i + 4] || '').replace(/\n---\s*$/, '').trim();
+  for (const c of chunks) {
+    const m = c.match(/^<!-- 块 \d+\/\d+ \| \d+ 字 \| ([^\s]+) -->\n([\s\S]*)$/);
+    if (!m) continue;
+    const type = m[1];
+    const content = m[2].trim();
     if (!content) continue;
-    blocks.push({ idx, title, content });
+    // 块标题：从内容首行【X】提取（无则留空）
+    const t = content.match(/^【([^】]{1,20})】/);
+    blocks.push({ type, title: t ? t[1] : '', content });
   }
   return blocks;
 }
@@ -69,20 +67,21 @@ function parseChunkFile(filePath) {
 // ---- 3. 收集所有块 ----
 const rows = [];
 for (const [folder, dir] of Object.entries(ROOTS)) {
-  if (!fs.existsSync(dir)) { console.warn(`目录不存在: ${dir}`); continue; }
+  if (!fs.existsSync(dir)) { console.error(`目录不存在: ${dir}`); process.exit(1); }
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'));
   console.log(`[${folder}] 文件数: ${files.length}`);
   for (const f of files) {
     const full = path.join(dir, f);
-    const docTitle = f;  // 文档标题 = 文件名（含 .md）
+    const docTitle = f;
     const mediaId = 'local_' + crypto.createHash('sha1').update(folder + '/' + f).digest('hex').slice(0, 24);
     const blocks = parseChunkFile(full);
+    let idx = 0;
     for (const b of blocks) {
       rows.push({
         media_id: mediaId,
-        block_idx: b.idx - 1,
+        block_idx: idx++,                              // 从 0 递增
         title: docTitle,
-        block_title: b.title,
+        block_title: `[${b.type}]${b.title || '未命名'}`, // [v79] 类型前缀，检索双档过滤用
         folder_id: folder,
         content: b.content,
         bigrams: calcBigrams(b.content),
@@ -93,7 +92,16 @@ for (const [folder, dir] of Object.entries(ROOTS)) {
 }
 console.log(`解析完成: ${rows.length} 块`);
 
-// ---- 4. 分批 upsert ----
+// ---- 4. 清空旧数据（防新旧混杂）----
+console.log('清空旧 kb_blocks...');
+const del = await fetch(`${SUPABASE}/rest/v1/kb_blocks?limit=0`, {
+  method: 'DELETE',
+  headers: { 'Authorization': `Bearer ${SERVICE_ROLE}`, 'apikey': SERVICE_ROLE, 'Prefer': 'count=exact' },
+});
+const delCount = del.headers.get('content-range') || (await del.text()).slice(0, 80);
+console.log(`清空完成: ${del.status} ${delCount}`);
+
+// ---- 5. 分批 upsert ----
 const BATCH = 100;
 let ok = 0, fail = 0;
 for (let i = 0; i < rows.length; i += BATCH) {
