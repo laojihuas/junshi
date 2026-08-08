@@ -92,13 +92,14 @@ for (const [folder, dir] of Object.entries(ROOTS)) {
 }
 console.log(`解析完成: ${rows.length} 块`);
 
-// ---- 4. 清空旧数据（防新旧混杂）----
+// ---- 4. 清空旧数据（防新旧混杂；PostgREST 禁止无 WHERE 的 DELETE，
+//      kb_blocks 无 id 列，用 media_id=neq 哨兵值删全表）----
 console.log('清空旧 kb_blocks...');
-const del = await fetch(`${SUPABASE}/rest/v1/kb_blocks?limit=0`, {
+const del = await fetch(`${SUPABASE}/rest/v1/kb_blocks?media_id=neq.__none__`, {
   method: 'DELETE',
   headers: { 'Authorization': `Bearer ${SERVICE_ROLE}`, 'apikey': SERVICE_ROLE, 'Prefer': 'count=exact' },
 });
-const delCount = del.headers.get('content-range') || (await del.text()).slice(0, 80);
+const delCount = del.headers.get('content-range') || `status=${del.status}`;
 console.log(`清空完成: ${del.status} ${delCount}`);
 
 // ---- 5. 分批 upsert ----
