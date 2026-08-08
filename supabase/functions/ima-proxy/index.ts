@@ -589,7 +589,7 @@ Deno.serve(async (req) => {
           tactic,
           // [v76] 距上次聊天间隔（变化区注入，不动前缀缓存）
           lastGapText,
-          // [v78] 思考档（思考档时注入【思考预算】压缩思考链）
+          // [v81 回退 v78] 思考档（v78 曾注入【思考预算】，已删除；档位由 llmChat 控制）
           thinking: effectiveThinkingMode,
         });
         const systemContent = built.systemContent;
@@ -1641,7 +1641,8 @@ function buildSystemContent(opts: {
   tactic?: { category: 'defense' | 'attack' | 'rescue'; phase: 'attract' | 'comfort' | 'seduce' };
   // [v76] 距上次聊天的人类可读间隔（如"2天3小时前"），空=不注入；放后缀变化区
   lastGapText?: string;
-  // [v78] 本轮思考档（off/low/high/max）：思考档时注入【思考预算】指令压缩思考链
+  // [v78→v81 回退] 本轮思考档（off/low/high/max）：v78 曾用于注入【思考预算】压缩思考链，
+  //   已删除（用户实测变笨）；档位机制本身由 llmChat 的 thinking 参数控制，此处保留签名兼容
   thinking?: ThinkingMode;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
@@ -1702,12 +1703,8 @@ function buildSystemContent(opts: {
 
   // [v80 缓存优化] 【上次聊天】块已后置到变化区尾部（每轮变，放前面会打断后续稳定块缓存）
 
-  // [v78] 思考预算指令：仅思考档注入（off 不注入，省 token 防误导）
-  //   软约束压缩思考链：V4 对"克制思考"类指令响应良好，可再压 30-50%；
-  //   放后缀变化区（同档位下文本固定，不影响前缀缓存）
-  if (opts.thinking && opts.thinking !== 'off') {
-    s += `\n\n【思考预算】（思考档生效，最高优先）\n最终回复只有 ≤20 字，思考也必须克制：只做必要推理（潜台词/意图/策略判断），最多 3 步直接给结论，禁止长篇分析、禁止复述对话内容、禁止罗列选项。`;
-  }
+  // [v81 回退 v78] 【思考预算】块已删除：用户实测该指令压制模型思考（"变笨"），
+  //   恢复正常思考模式；思考档位机制（v10）保留，档位下模型自然思考不再被裁剪
 
   // [v75 缓存②] 【话题锚点】（记忆卡 profile.anchor，跨轮次变化）
   const anchor = opts.memoryCard?.profile?.anchor || '';
