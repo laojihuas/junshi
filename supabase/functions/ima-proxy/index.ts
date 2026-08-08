@@ -1837,12 +1837,13 @@ function buildSystemContent(opts: {
   // [v82 里程碑延迟注入] 先记参数，战术块之后统一注入（实测中段注入被战术指令压过，
   //   LLM 不执行收集；靠后注入紧跟"本轮最高优先"战术指令，执行权重更高）
   let msOpts: { heavy: boolean; milestones: string[]; nextMs: string } | null = null;
+  // [v82-fix] curIdx 提到分支外：默认推进分支（无 goal）也使用，避免 ReferenceError
+  const curIdx = STAGE_ORDER.indexOf(curStage);
 
   if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令（GOAL_HINTS 已含 hint）
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可，她主动给信息自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
   } else if (goalHint) {
-    const curIdx = STAGE_ORDER.indexOf(curStage);
     const goalTarget = goal === '挽回修复' || goal === '推进恋爱'
       ? '恋爱'
       : goal === '约见面' ? '' : '暧昧';
