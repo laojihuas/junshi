@@ -245,12 +245,12 @@ function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
 // [v59 降本] KB 参考块 5→3（主回复 system 未命中部分 ≈15%↓，检索质量影响小）
 // [2026-08-06 降本] 话术块普遍 650+ 字（p50=651），核心话术在前 400 字（后段为提示/来源/铺垫）：
 //   KB_CONTENT_MAX 500→400 且真正启用截断（此前常量未被使用，3 条 ≈2000 字全量注入）
-// [v79 语义切块] 知识库已重切为 4551 小块（话术 30-100 字/套路整块），检索双档：
-//   套路外 = 4 弹药块 + 1 套路块；套路内 = 5 弹药块。小块/套路全量完整注入，不截断。
+// [v79 语义切块] 知识库已重切为 4551 小块（话术 30-100 字/套路整块）
+// [v79.4 简化] 主回复统一纯弹药：套路外/套路内都是 5 块话术弹药。
+//   套路块不再注入主回复——套路启动/执行由独立通道（extract_strategy + 记忆卡 strategy）负责，
+//   主回复里的"碰运气 top1 套路块"要么场景不匹配白占 token、要么与启动通道重复，纯冗余。
 const KB_REF_COUNT = 3;                       // 兜底默认（旧逻辑兼容）
-const KB_AMMO_COUNT = 4;                      // [v79] 套路外：弹药（话术）块数
-const KB_STRAT_COUNT = 1;                     // [v79] 套路外：套路块数
-const KB_AMMO_IN_STRATEGY = 5;                // [v79] 套路内：弹药（话术）块数
+const KB_AMMO_COUNT = 5;                      // [v79.4] 主回复统一弹药块数（套路外/套路内一致）
 const KB_CONTENT_MAX = 2000;                  // [v79] 完整注入兜底（最长套路 1812 字，实际不触发截断）
 const HISTORY_ITEM_MAX = 800;   // 单条历史上限
 const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本）
@@ -454,6 +454,8 @@ Deno.serve(async (req) => {
     let lastTimeConflict: string | null = null;
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
+    // [v79.4] 套路启动通道素材块数（_debug 用；0=未探测）
+    let lastStratMaterialCount: number | null = null;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -492,31 +494,18 @@ Deno.serve(async (req) => {
         }
         // [B] 3. 检索词序列：语义词(语义路) > bigram/规则词 > 原句垫底
         //   统一走本地 kb_blocks_recall 块级召回（块内词频加权）
-        // [v79] 检索双档（语义切块后 4551 块）：
-        //   套路内（strategy 激活）→ 5 块弹药（话术）；套路外 → 4 块弹药 + 1 块完整套路
-        const semanticSet = new Set<string>(semanticKws);
+        // [v79 语义切块] 主回复统一纯弹药检索（v79.4）：套路外/套路内都是 5 块话术弹药。
+        //   套路块由独立启动通道（下方 extract_strategy）负责，不再混入主回复参考。
         const searchQueries = [...semanticKws, ...kw, searchQuery];
-        const inStrategy = !!memoryCard?.strategy;
-        const ammoCount = inStrategy ? KB_AMMO_IN_STRATEGY : KB_AMMO_COUNT;
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: ammoCount, type: '话术' });
-        // 套路外：补 1 块完整套路（惯例/流程，供参考 + 套路启动素材）
-        if (!inStrategy) {
-          const stratKws = resolveStrategySearchKws(memoryCard);
-          const stratItems = await recallBlocks(supabaseUrl, serviceRoleKey, stratKws, stratKws, { ...quotaOpts, pickCount: KB_STRAT_COUNT, type: '套路' });
-          kbItems = mergeDedup([...kbItems, ...stratItems]).slice(0, ammoCount + KB_STRAT_COUNT);
-        }
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术' });
         mark('kb1');
-        // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜（只补话术块，保留已有套路块）
-        const ammoInItems = kbItems.filter((it) => !isStratBlock(it));
-        if (ammoInItems.length < 2) {
+        // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
+        if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: ammoCount, type: '话术' });
-            const merged = mergeDedup([...ammoInItems, ...items2]).slice(0, ammoCount);
-            if (merged.length > ammoInItems.length) {
-              const strats = kbItems.filter((it) => isStratBlock(it));
-              kbItems = mergeDedup([...merged, ...strats]).slice(0, ammoCount + KB_STRAT_COUNT);
-            }
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术' });
+            const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_AMMO_COUNT);
+            if (merged.length > kbItems.length) kbItems = merged;
           }
         }
         // 5. 标题兜底：块级召回空时按关键词过滤标题（本地 REST 查询）
@@ -535,13 +524,15 @@ Deno.serve(async (req) => {
         //   [v11] 检索词按当前目标动态取（resolveStrategySearchKws）
         //   [v13] 降频：套路检索词 <3 个有实义内容（title/content 非空）不触发 LLM 提炼（LLM 4s 大头）
         //   [v79] 只取套路块（语义切块类型标记），不再混入话术块
+        //   [v79.4 降本] 素材 5→3：提炼只需 1 个匹配惯例，3 块 top 套路已够，prompt 省 ~400-800 tokens
         if (llmKey && !strategyClear && !memoryCard?.strategy) {
           try {
             const convItems = await recallBlocks(
               supabaseUrl, serviceRoleKey,
               resolveStrategySearchKws(memoryCard), resolveStrategySearchKws(memoryCard),
-              { ...quotaOpts, pickCount: 5, type: '套路' }
+              { ...quotaOpts, pickCount: 3, type: '套路' }
             );
+            lastStratMaterialCount = (Array.isArray(convItems) ? convItems : []).length;
             const usable = (Array.isArray(convItems) ? convItems : [])
               .filter((i) => i && (i.title || '') && (i.content || '')).length;
             if (usable >= 2) {
@@ -700,8 +691,10 @@ Deno.serve(async (req) => {
         llm_history_len: llmHistory.length,
         kb_hits: hitKnowledge,
         kb_items: kbItems.length,
-        // [v79] 套路块数（检索双档验证：套路外=1 块套路，套路内=0）
+        // [v79.4] 主回复已统一纯弹药（套路块不再注入），该字段恒为 0，保留兼容
         kb_strat_blocks: kbItems.filter((it: any) => isStratBlock(it)).length,
+        // [v79.4] 套路启动通道素材（本轮启动探测取了几块套路，0=未探测）
+        kb_strat_material: typeof lastStratMaterialCount === 'number' ? lastStratMaterialCount : null,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         // [2026-08-06] 整句路已移除，仅剩语义路命中统计
