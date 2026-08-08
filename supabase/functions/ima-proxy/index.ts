@@ -522,20 +522,19 @@ Deno.serve(async (req) => {
         // [v7] 套路启动（独立惯例检索通道）：当前无套路 + 用户未打断 → 专门检索惯例/魔术/玩法类内容，
         //   LLM 提炼步骤启动套路；结果仅用于启动，不混入主回复参考（话术加权不影响套路启动素材）
         //   [v11] 检索词按当前目标动态取（resolveStrategySearchKws）
-        //   [v13] 降频：套路检索词 <3 个有实义内容（title/content 非空）不触发 LLM 提炼（LLM 4s 大头）
         //   [v79] 只取套路块（语义切块类型标记），不再混入话术块
         //   [v79.4 降本] 素材 5→3：提炼只需 1 个匹配惯例，3 块 top 套路已够，prompt 省 ~400-800 tokens
+        //   [v79.5] 素材 3→2 + 删除 usable≥2 门槛：套路块已按 calcStratScore 精品精排，
+        //     前 2 块即精品；素材≥1 即尝试提炼（STRATEGY_HINT_RE + LLM 判断兜底，无用素材自然返回空）
         if (llmKey && !strategyClear && !memoryCard?.strategy) {
           try {
             const convItems = await recallBlocks(
               supabaseUrl, serviceRoleKey,
               resolveStrategySearchKws(memoryCard), resolveStrategySearchKws(memoryCard),
-              { ...quotaOpts, pickCount: 3, type: '套路' }
+              { ...quotaOpts, pickCount: 2, type: '套路' }
             );
             lastStratMaterialCount = (Array.isArray(convItems) ? convItems : []).length;
-            const usable = (Array.isArray(convItems) ? convItems : [])
-              .filter((i) => i && (i.title || '') && (i.content || '')).length;
-            if (usable >= 2) {
+            if ((Array.isArray(convItems) ? convItems : []).length > 0) {
               // [v18] 传入 memoryCard → extractStrategy 在 prompt 里注入里程碑可选融合段
               const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query, memoryCard);
               if (st) {
@@ -2018,6 +2017,54 @@ function calcGemScore(content: string, blockTitle: string): number {
 }
 
 // ============================================================
+// [v79.5] 套路块专属打分（零 LLM，规则驱动）——替代 gem 用于套路启动通道
+//   背景：gem 按"话术弹药"设计（短句/金句/引号），套路块是几百上千字的完整流程，
+//   长句/连接词天然多会被 gem 误伤（好套路被压到后面）。套路精品化需要专属规则：
+//   加分 = 惯例结构信号（标题惯例词/编号步骤/对话例句/目的情景提示/长度适中完整套路）
+//   减分 = 碎片化（像话术误标）/超长注水（提示废话多）/无结构散句堆
+// ============================================================
+const STRAT_WEIGHT = 0.8;                    // 套路分合并权重（相关分仍为主序）
+const STRAT_MIN = 0;                         // 低于此分 = 非精品套路，剔出候选池
+const STRAT_TITLE_RE = /惯例|玩法|魔术|流程|套路|开场|收尾|推拉|冷读|测试|游戏|模型/; // 标题惯例词
+const STRAT_STEP_RE = /(^|\n)\s*([0-9０-９]{1,2}|[一二三四五六七八九十]+|[①②③④⑤⑥⑦⑧⑨⑩])([\.、．。）)])|第一步|第二步|步骤|环节|流程|目的|情景|提示|其他答案|变体/; // 步骤/结构信号
+const STRAT_DIALOG_RE = /[男女他她]：|【[男女]|你说|你就|女说|男说/;                 // 对话例句信号
+const STRAT_META_RE = /目的|情景|提示|适合|注意|慎用|非原创|玩法|说明/;             // 结构元信息
+const STRAT_FLUFF_RE = /我觉得|其实呢|我们要知道|废话|以下|总结|综上/;               // 注水信号
+
+function calcStratScore(content: string, blockTitle: string): number {
+  const c = content || '';
+  if (!c) return 0;
+  let s = 0;
+  const len = c.replace(/\s/g, '').length;
+  const hasSteps = STRAT_STEP_RE.test(c);
+  const hasDialog = STRAT_DIALOG_RE.test(c);
+  const fluffCount = (c.match(STRAT_FLUFF_RE) || []).length;
+  // 加分：标题含惯例/玩法/流程词（最强信号：命名即套路）
+  if (blockTitle && STRAT_TITLE_RE.test(blockTitle)) s += 1.5;
+  // 加分：内容有编号步骤/结构信号（1. 2. 3. / 第一步 / 目的 / 提示 / 其他答案）
+  if (hasSteps) s += 1.0;
+  // 加分：含对话例句（可执行的完整对白回合）
+  if (hasDialog) s += 0.8;
+  // [v79.5 补强] 纯对话式惯例（有对话回合但无编号步骤）——"女生不听话/合约恋人"类
+  //   本身就是完整对话脚本，是强套路信号，额外补强
+  if (hasDialog && !hasSteps) s += 0.7;
+  // 加分：含"目的/情景/提示/适合"等套路元信息（说明是完整编排过的惯例）
+  if (STRAT_META_RE.test(c)) s += 0.5;
+  // 长度分：150-1200 字 = 完整长套路；60-150 字 = 对话式惯例正常区间（不扣分）
+  //   无对话的纯短块（碎片）才扣分
+  if (len >= 150 && len <= 1200) s += 0.6;
+  else if (len > 1500) s -= 1.0;
+  else if (len < 60 && !hasDialog) s -= 1.0;
+  // 减分：注水信号（说教连接词堆砌 = 教学口水）
+  if (fluffCount >= 3) s -= 1.0;
+  // [v79.5 强罚] 纯口水教学文：连接词堆砌 + 无步骤无对话 = 说教文不是可执行套路，重罚
+  if (fluffCount >= 3 && !hasSteps && !hasDialog) s -= 0.8;
+  // 减分：完全无结构的长散句（无编号、无对话、无元信息 = 教学口水文）
+  if (!hasSteps && !hasDialog && len > 300) s -= 0.5;
+  return Math.max(-2, Math.min(3, s));
+}
+
+// ============================================================
 // [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
 //   kb_blocks 表（[v79] 4551 块，语义切块）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
 //   [2026-08-06] 权重：语义词×2 / 规则词与原文×1.5（整句路已移除）
@@ -2096,12 +2143,18 @@ async function recallBlocks(
     }
     if (items.length === 0) return [];
 
-    // [v53] 内存 gem 精排：算精华分 → 剔口水块(< GEM_MIN) → 按 相关分+gem×权重 重排
+    // [v53] 内存精排：算质量分 → 剔低质块 → 按 相关分+质量分×权重 重排
+    //   [v79.5] 按类型分流打分：套路通道用 calcStratScore（套路块专属规则，
+    //   长句/连接词不再被话术 gem 规则误伤）；话术/其他走 calcGemScore
     //   全被剔光时退回原始列表（保证有弹药可用）；排序后 applyQuota 从精排池里挑
+    const isStratRoute = opts?.type === '套路';
     const scored = items
-      .map((it) => ({ ...it, _gem: calcGemScore(it.content || '', it.block_title || '') }))
-      .filter((it) => it._gem >= GEM_MIN)
-      .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * GEM_WEIGHT) - ((a._ft_score || 0) + (a._gem || 0) * GEM_WEIGHT));
+      .map((it) => {
+        const q = isStratRoute ? calcStratScore(it.content || '', it.block_title || '') : calcGemScore(it.content || '', it.block_title || '');
+        return { ...it, _gem: q };
+      })
+      .filter((it) => (isStratRoute ? it._gem >= STRAT_MIN : it._gem >= GEM_MIN))
+      .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)) - ((a._ft_score || 0) + (a._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)));
     if (scored.length > 0) items = scored;
 
     // 4. 状态感知配额（仅剩恋爱话术一类；jx 空时 hs 吃满，见 applyQuota）
