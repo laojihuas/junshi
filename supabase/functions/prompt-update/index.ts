@@ -10,16 +10,13 @@
 //
 // 请求：POST  body: { system_prompt?: string, llm_params?: object }
 //   system_prompt 与 llm_params 至少提供一个（llm_params 为 LLM 生成参数：
-//   temperature / frequency_penalty / presence_penalty / max_tokens / thinking_mode）
+//   [v77] 仅支持 thinking_mode——temperature/惩罚系数/max_tokens 已由 ima-proxy 六阶段联动表接管）
 // 返回：{ success: true, system_prompt?: string, llm_params?: object }
 // ============================================================
 
 // [v10] 数值区间 或 字符串枚举（thinking_mode：off/low/high/max）
+// [v77] 采样参数（temperature/惩罚系数/max_tokens）已由 ima-proxy 六阶段联动表接管，后台不再接收
 const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
-  temperature: [0, 2],
-  frequency_penalty: [0, 2],
-  presence_penalty: [0, 2],
-  max_tokens: [100, 8000],
   thinking_mode: ['off', 'low', 'high', 'max'],
 };
 

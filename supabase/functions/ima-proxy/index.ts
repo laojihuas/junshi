@@ -447,6 +447,8 @@ Deno.serve(async (req) => {
     let factsInjected = 0;
     // [v76] 输出后时间校验命中词（_debug 用；null=未触发）
     let lastTimeConflict: string | null = null;
+    // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
+    let usedStageLlm = DEFAULT_STAGE_LLM;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -587,11 +589,13 @@ Deno.serve(async (req) => {
           // [v62 切换话题] 换话题时 user 消息用引导语（不把 "/换话题" 指令本身发给 LLM 当用户话）
           { role: 'user', content: switchTopic ? '（用户按了"换话题"，请按 system 里的【切换话题】指令直接给一句新话题开场白）' : query.trim() },
         ];
+        // [v77] 六阶段三参数联动：按记忆卡阶段取采样档（temperature/presence/frequency）
+        usedStageLlm = resolveStageLlmParams(memoryCard?.profile?.stage);
         reply = await llmChat(llmKey, llmBase, llmModel, messages, {
-          temperature: llmParams.temperature,
-          maxTokens: llmParams.max_tokens,
-          frequencyPenalty: llmParams.frequency_penalty,
-          presencePenalty: llmParams.presence_penalty,
+          temperature: usedStageLlm.temperature,
+          maxTokens: MAIN_MAX_TOKENS,
+          frequencyPenalty: usedStageLlm.frequency_penalty,
+          presencePenalty: usedStageLlm.presence_penalty,
           thinking: effectiveThinkingMode,
           _stage: 'main_reply',
         });
@@ -612,10 +616,10 @@ Deno.serve(async (req) => {
             ...llmHistory,
             { role: 'user', content: query.trim() },
           ], {
-            temperature: llmParams.temperature,
-            maxTokens: llmParams.max_tokens,
-            frequencyPenalty: llmParams.frequency_penalty,
-            presencePenalty: llmParams.presence_penalty,
+            temperature: usedStageLlm.temperature,
+            maxTokens: MAIN_MAX_TOKENS,
+            frequencyPenalty: usedStageLlm.frequency_penalty,
+            presencePenalty: usedStageLlm.presence_penalty,
             thinking: effectiveThinkingMode,
           });
           if (retry) reply = retry;
@@ -712,6 +716,10 @@ Deno.serve(async (req) => {
         last_gap: lastGapText,
         // [v76] 输出后时间校验命中词（验证时间一致性；null=未触发）
         time_conflict: lastTimeConflict,
+        // [v77] 六阶段采样参数档（验证阶段联动；stage 在 memory_stage 字段）
+        stage_temp: usedStageLlm.temperature,
+        stage_presence: usedStageLlm.presence_penalty,
+        stage_freq: usedStageLlm.frequency_penalty,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
         // [v14] 攻击检测是否命中（验证反击指令注入）
         attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
@@ -2210,17 +2218,37 @@ function mergeDedup(items: any[]): any[] {
 
 // ============================================================
 // [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
-//   llm_params 存 JSON 字符串：{"temperature":0.6,"frequency_penalty":0.7,"presence_penalty":0,"max_tokens":1200,"thinking_mode":"off"}
+//   [v77] 后台仅保留思考模式默认档；采样参数（temperature/惩罚系数/max_tokens）
+//   已由下方六阶段联动表接管，不再从后台读取。
+//   llm_params 存 JSON 字符串：{"thinking_mode":"off"}
 // ============================================================
 type LlmParams = {
-  temperature: number;
-  frequency_penalty: number;
-  presence_penalty: number;
-  max_tokens: number;
   thinking_mode: ThinkingMode;
 };
-// [v14] temperature 0.4→0.6、frequency_penalty 0.5→0.7：输出更有性格方差、更少模板腔
-const DEFAULT_LLM_PARAMS: LlmParams = { temperature: 0.6, frequency_penalty: 0.7, presence_penalty: 0, max_tokens: 1200, thinking_mode: 'off' };
+const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off' };
+
+// [v77] 六阶段 × 三采样参数联动（主回复/重生成按 memoryCard.profile.stage 取档）
+//   设计依据：temperature=采样随机性（性格/冒险），presence=话题/词汇翻新，
+//   frequency=高频重复压制。三参数同向但幅度不同：
+//     暧昧三高（活跃多样、钩子不断）；挽回三低（稳定可预测、安全感）；
+//     中段差异：朋友期轮次密→frequency 给高压口头禅；追求期靠锚点重复拉近距离→frequency 不封顶
+//   frequency 峰值 0.85 封顶：给【话题锚点】复用留空间，且与 presence 叠加避免过度换词
+const STAGE_LLM_PARAMS: Record<string, { temperature: number; presence_penalty: number; frequency_penalty: number }> = {
+  '未知': { temperature: 0.55, presence_penalty: 0.40, frequency_penalty: 0.70 },
+  '朋友': { temperature: 0.60, presence_penalty: 0.30, frequency_penalty: 0.80 },
+  '追求': { temperature: 0.65, presence_penalty: 0.50, frequency_penalty: 0.75 },
+  '暧昧': { temperature: 0.75, presence_penalty: 0.65, frequency_penalty: 0.85 },
+  '恋爱': { temperature: 0.60, presence_penalty: 0.30, frequency_penalty: 0.60 },
+  '挽回': { temperature: 0.40, presence_penalty: 0.15, frequency_penalty: 0.50 },
+};
+// 无阶段/未识别阶段 → 朋友档（安全中间值，兼容旧记忆卡与窗口恢复场景）
+const DEFAULT_STAGE_LLM = { temperature: 0.6, presence_penalty: 0.3, frequency_penalty: 0.7 };
+// [v77] 主回复输出上限（原后台 max_tokens 默认值，固定；思考档由 llmChat 内部自动放宽到 2000+）
+const MAIN_MAX_TOKENS = 1200;
+function resolveStageLlmParams(stage?: string | null): { temperature: number; presence_penalty: number; frequency_penalty: number } {
+  if (stage && STAGE_LLM_PARAMS[stage]) return STAGE_LLM_PARAMS[stage];
+  return DEFAULT_STAGE_LLM;
+}
 
 async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams }> {
   try {
@@ -2234,20 +2262,14 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     if (row.llm_params) {
       try { raw = JSON.parse(row.llm_params); } catch (e) { raw = {}; }
     }
-    const num = (v: any, d: number) => (typeof v === 'number' && isFinite(v)) ? v : d;
     // [v10] thinking_mode：后台默认档（枚举校验，非法回退 off）
+    // [v77] 其余字段（temperature/惩罚系数/max_tokens）不再读取，由 STAGE_LLM_PARAMS 接管
     const tm = (typeof raw.thinking_mode === 'string' && THINKING_MODES.has(raw.thinking_mode))
       ? raw.thinking_mode as ThinkingMode
       : DEFAULT_LLM_PARAMS.thinking_mode;
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
-      llm_params: {
-        temperature: Math.max(0, Math.min(2, num(raw.temperature, DEFAULT_LLM_PARAMS.temperature))),
-        frequency_penalty: Math.max(0, Math.min(2, num(raw.frequency_penalty, DEFAULT_LLM_PARAMS.frequency_penalty))),
-        presence_penalty: Math.max(0, Math.min(2, num(raw.presence_penalty, DEFAULT_LLM_PARAMS.presence_penalty))),
-        max_tokens: Math.max(100, Math.min(8000, num(raw.max_tokens, DEFAULT_LLM_PARAMS.max_tokens))),
-        thinking_mode: tm,
-      },
+      llm_params: { thinking_mode: tm },
     };
   } catch (e: any) {
     console.warn('fetchAppConfig failed:', e.message);
