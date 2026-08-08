@@ -410,6 +410,10 @@ Deno.serve(async (req) => {
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
     const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
 
+    // [v82 主动开窗] 话题停滞检测（纯规则）：当前话题连续轮数 + 对方退缩信号
+    //   供 ①里程碑主动开窗（话题聊死 → 小目标当新话题切入）②检索换话题弹药叠加
+    const topicState = detectTopicStagnation(switchTopic ? '' : query, history);
+
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
     let lastGapText = '';
@@ -456,6 +460,8 @@ Deno.serve(async (req) => {
     let usedStageLlm = DEFAULT_STAGE_LLM;
     // [v79.4] 套路启动通道素材块数（_debug 用；0=未探测）
     let lastStratMaterialCount: number | null = null;
+    // [v82] 里程碑块注入验证（_debug 用；0=未注入 1=轻引导 2=重引导；顶层声明防作用域事故）
+    let msBlock = 0;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -491,6 +497,14 @@ Deno.serve(async (req) => {
         if (semanticKws.length === 0 && kw.length < 2 && llmKey) {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
+        }
+        // [v82 检索配合] 话题聊死（同一话题 ≥3 轮）→ 自动叠加"新话题"弹药方向
+        //   复用 /换话题 的机制（固定新话题词 + 记忆卡喜好词），自动触发：
+        //   新话题词进 semanticKws（×2 高权重）→ 弹药从"清一色老话题"变成"老话题回应 + 新话题切入"并存
+        if (!switchTopic && topicState.staleRounds >= 3) {
+          semanticKws = [...semanticKws, '新话题', '开场白', '话题', '破冰'];
+          const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
+          kw.push(...hobbyKws); // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
         }
         // [B] 3. 检索词序列：语义词(语义路) > bigram/规则词 > 原句垫底
         //   统一走本地 kb_blocks_recall 块级召回（块内词频加权）
@@ -591,8 +605,13 @@ Deno.serve(async (req) => {
           lastGapText,
           // [v81 回退 v78] 思考档（v78 曾注入【思考预算】，已删除；档位由 llmChat 控制）
           thinking: effectiveThinkingMode,
+          // [v82 主动开窗] 话题停滞状态（里程碑主动开窗判定）
+          topicState,
         });
         const systemContent = built.systemContent;
+        // [v82] 里程碑块注入验证：0=未注入 1=轻引导 2=重引导（排查"收集不生效"用）
+        msBlock = systemContent.includes('【关系里程碑】(暧昧期推进重点') ? 2
+          : (systemContent.includes('【关系里程碑】') ? 1 : 0);
         pulseAdvice = built.pulseAdvice;
         factsInjected = built.factsInjected;
         const messages: any[] = [
@@ -726,6 +745,11 @@ Deno.serve(async (req) => {
         goal: memoryCard?.goal || null,
         // [v61] 里程碑进度（验证推进引导）
         milestones: Array.isArray(memoryCard?.milestones) ? memoryCard!.milestones : [],
+        // [v82] 话题停滞状态（验证主动开窗/换话题弹药）：stale_rounds=当前话题已聊轮数, retreating=对方退缩信号
+        stale_rounds: topicState.staleRounds,
+        retreating: topicState.retreating,
+        // [v82] 里程碑块注入验证：0=未注入 1=轻引导 2=重引导（排查"收集不生效"用）
+        ms_block: msBlock,
         // [v62] 切换话题模式（验证【切换话题】注入）
         switch_topic: switchTopic,
         // [v76] 会话间隔注入文本（验证时间流逝感知；''=未注入）
@@ -1070,12 +1094,45 @@ const ESCALATION_HINTS: Record<string, string> = {
   '挽回': '',
 };
 
+// [v82 主动开窗] 话题停滞检测（纯规则零 LLM）：
+//   staleRounds = 当前话题已连续聊的轮数（历史对方消息与 query 共享关键词的连续条数）
+//   retreating  = 当前 query 或最近对方消息短/敷衍（退缩信号：≤4 字或纯敷衍词）
+//   用途：里程碑"主动开窗"判定（话题聊死 → 用小目标当新话题切入）+ 检索换话题弹药
+function detectTopicStagnation(query: string, history: any[]): { staleRounds: number; retreating: boolean } {
+  const curKws = new Set(extractKeywords(String(query || '')));
+  const userMsgs = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .map((h) => String(h.content).trim())
+    .filter((t) => t.length > 0)
+    .slice(-6);
+  // 同一话题连续轮数：从最近往回数，与 query 共享 ≥1 个关键词（extractKeywords 已滤停用字）
+  // 算同一话题；短回复（≤4 字）视为延续当前话题不中断（防止"嗯嗯"被误判为新话题）
+  let staleRounds = 0;
+  if (curKws.size > 0) {
+    for (let i = userMsgs.length - 1; i >= 0; i--) {
+      const t = userMsgs[i];
+      if (t.length < 4) { staleRounds++; continue; }
+      const kws = extractKeywords(t);
+      if (kws.some((k) => curKws.has(k))) staleRounds++;
+      else break;
+    }
+  }
+  // 退缩信号：当前 query 或最近 2 条对方消息里 ≥1 条 ≤4 字 或 纯敷衍词
+  const recent = [...userMsgs, String(query || '').trim()].filter((t) => t.length > 0).slice(-2);
+  const isShort = (t: string) => t.length <= 4;
+  const isFob = (t: string) => /^(嗯|哦|额|哈|啊|好吧|随便|不知道|没有|行吧|嗯嗯|哦哦|哈哈|呵呵|是嘛|对呀|算了吧|都行|先忙|再说|睡觉了|累了)[。！!~～…]*$/.test(t);
+  const retreating = recent.some((t) => isShort(t) || isFob(t));
+  return { staleRounds, retreating };
+}
+
 // [v60 主动推进] 按当前 stage 拼装"主动推进"指令块（无目标/目标已达成时注入）
 //   核心：军师是主动方——主动制造窗口（试探/邀约/张力），读反馈再决定下一步；
 //   绝不表白、绝不逼问、绝不纠缠；优先调用知识库话术当弹药；挽回期禁用推进。
 // [v61] 里程碑：默认推进路径 = 未完成里程碑逐个拿下（照片→…→约会），
 //   stage 升级与里程碑收集互相印证：里程碑是"战术动作"，stage 是"战略判定"。
-function thisEscalationBlock(stage: string, milestones: string[] = [], nextMs: string = ''): string {
+// [v82] 里程碑块不再在此内嵌：由 buildSystemContent 统一延迟到战术块之后注入
+//   （实测中段注入被战术指令压过，LLM 不执行收集；靠后注入权重更高）
+function thisEscalationBlock(stage: string): string {
   const hint = ESCALATION_HINTS[stage || '未知'];
   if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
   let s = `\n\n【主动推进】(战略方向，严格遵守)\n`
@@ -1085,13 +1142,6 @@ function thisEscalationBlock(stage: string, milestones: string[] = [], nextMs: s
     + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
     + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/邀约话术来执行推进，不要自己硬编。\n`
     + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
-  // [v74 里程碑×目标联动] 统一里程碑块：暧昧前轻引导（单一 nextMs），暧昧后加重（不分先后、情景带）
-  s += buildMilestoneBlock({
-    heavy: STAGE_ORDER.indexOf(stage) >= STAGE_ORDER.indexOf('暧昧'),
-    meetGate: true,
-    milestones,
-    nextMs,
-  });
   return s;
 }
 
@@ -1099,16 +1149,25 @@ function thisEscalationBlock(stage: string, milestones: string[] = [], nextMs: s
 //   heavy=false（暧昧前）：保持现状——按链序单一 nextMs 弱引导
 //   heavy=true（暧昧/恋爱）：加重权重——列出全部未完成项，不分先后，情景顺势带
 //   meetGate=true（全局门槛，除"保持当前关系/挽回修复"路径）：约见面前至少完成 2 项小目标
-//   "站在旁边看窗口"：方向由【本轮动作】/【主动推进】给，里程碑块负责看到口子就顺势带一步
-function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; milestones: string[]; nextMs: string }): string {
+//   [v82 主动开窗] 新增 staleRounds/retreating（话题停滞检测）：从"等她开口子"改为
+//   "主动开窗义务"——每轮判定能否带，话题聊到第 4 轮/对方退缩时，必须用小目标当新话题切入
+//   （不再被动等窗口：里程碑小目标本身就是现成的新话题弹药）
+function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; milestones: string[]; nextMs: string; staleRounds?: number; retreating?: boolean }): string {
   const { heavy, meetGate, milestones, nextMs } = opts;
+  const staleRounds = opts.staleRounds ?? 0;
+  const retreating = opts.retreating ?? false;
   const done = milestones.length ? milestones.join('、') : '（无）';
   const gateLine = '\n- 邀约门槛：至少完成 2 项小目标后才能把对话往"见面"带；未达标前本轮以收集为主，不抛邀约、不敲时间，达标后邀约照常（见【本轮动作】）。';
+  // [v82] 话题聊死信号：已连续聊 ≥3 轮 或 对方退缩 → 本轮强制用小目标切入（主动开窗）
+  const topicDead = staleRounds >= 3 || retreating;
   if (!heavy) {
-    // 暧昧前：保持现状（单一 nextMs 顺序引导）
+    // 暧昧前：单一 nextMs 顺序引导（链序推进，不跳级）
     if (!nextMs || !MILESTONE_TIPS[nextMs]) return '';
     let s = `\n\n【关系里程碑】下一目标：「${nextMs}」——${MILESTONE_TIPS[nextMs]}。`
-      + `已完成（她给过这些，别重复要）：${done}。按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。`;
+      + `已完成（她给过这些，别重复要）：${done}。按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。\n`
+      + (topicDead
+        ? `【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 停止死磕老话题，本轮就把「${nextMs}」当新话题自然切入（按上面的话术方向），不许把话题聊到她失去兴趣。`
+        : `【主动开窗】每轮先判定能否自然带出「${nextMs}」（顺口提一句也算）；话题聊到第 4 轮还没带出 → 本轮必须带。`);
     if (meetGate) s += gateLine;
     return s;
   }
@@ -1118,8 +1177,11 @@ function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; mileston
   let s = `\n\n【关系里程碑】(暧昧期推进重点，本轮务必带一步)\n`
     + `- 已完成（给过就别重复要）：${done}。\n`
     + `- 未完成（不分先后，任选其一）：${pendingText}。\n`
-    + `- 本轮从"未完成"里挑 1 个最贴合当前情景的顺势带出，优先用下方知识库素材当话术；像站在旁边盯窗口一样：她开了话题口子就顺势带进去，绝不生硬转折、绝不盘问查户口。\n`
-    + `- 一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要；照片/喜好这类素材型可随话题自然重复，以自然为准，由你判断。`;
+    + `- 每轮先判定：能否从"未完成"里挑 1 个最贴合当前情景的自然带出？能则带（优先用下方知识库素材当话术）。\n`
+    + (topicDead
+      ? `- 【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 立即停止死磕老话题，本轮就用其中一个小目标当新话题切入，绝不把话题聊到她失去兴趣。\n`
+      : `- 话题聊到第 4 轮还没带出任何小目标 → 本轮必须从"未完成"里挑 1 个当新话题切入。\n`)
+    + `- 边界：绝不生硬转折、绝不盘问查户口；一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要，照片/喜好可随话题自然重复，以自然为准，由你判断。`;
   if (meetGate) s += gateLine;
   return s;
 }
@@ -1644,6 +1706,8 @@ function buildSystemContent(opts: {
   // [v78→v81 回退] 本轮思考档（off/low/high/max）：v78 曾用于注入【思考预算】压缩思考链，
   //   已删除（用户实测变笨）；档位机制本身由 llmChat 的 thinking 参数控制，此处保留签名兼容
   thinking?: ThinkingMode;
+  // [v82 主动开窗] 话题停滞状态（主流程 detectTopicStagnation 计算）：里程碑主动开窗判定用
+  topicState?: { staleRounds: number; retreating: boolean };
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
   //   （角色定位/当前时间/自洽输出 每轮不变 → 前缀稳定）
@@ -1651,7 +1715,7 @@ function buildSystemContent(opts: {
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）
   // [v73] 删除旧"有脾气/敢调情"硬编码（已被战术卡组+全局原则覆盖），后台提示词可大幅精简
   let s = '【角色定位】(最高优先级)\n'
-    + '你正在扮演「用户本人」用交友app跟对方聊天，你就是那个说话的人，不是顾问、不是助手；有血有肉的真人，有自己的脾气和态度，不讨好、不卑微、不油腻。\n'
+    + '你正在扮演「用户本人」用交友app跟对方聊天，你就是那个说话的人，不是顾问、不是助手；有血有肉的真人，有自己的脾气和态度，说话带点痞气，爱擦边的人。\n'
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
     + (opts.systemPrompt || '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。');
 
@@ -1768,6 +1832,11 @@ function buildSystemContent(opts: {
   const curStage = opts.memoryCard?.profile?.stage || '';
   const milestones = Array.isArray(opts.memoryCard?.milestones) ? (opts.memoryCard!.milestones!) : [];
   const nextMs = MILESTONE_CHAIN.find((m) => !milestones.includes(m)) || '';
+  // [v82 主动开窗] 话题停滞状态（主流程 detectTopicStagnation 计算）
+  const ts = opts.topicState || { staleRounds: 0, retreating: false };
+  // [v82 里程碑延迟注入] 先记参数，战术块之后统一注入（实测中段注入被战术指令压过，
+  //   LLM 不执行收集；靠后注入紧跟"本轮最高优先"战术指令，执行权重更高）
+  let msOpts: { heavy: boolean; milestones: string[]; nextMs: string } | null = null;
 
   if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令（GOAL_HINTS 已含 hint）
@@ -1787,20 +1856,17 @@ function buildSystemContent(opts: {
       // 目标推进中：里程碑作为战术弹药（除非目标是挽回——挽回期不收集里程碑）
       // [v74 里程碑×目标联动] 暧昧后加重引导权重；约见面前至少完成 2 项小目标（全局门槛）
       if (goal !== '挽回修复') {
-        s += buildMilestoneBlock({
-          heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'),
-          meetGate: true,
-          milestones,
-          nextMs,
-        });
+        msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
       }
     } else {
       // [v60] 目标已达成：不再按目标使劲，改按里程碑/当前 stage 继续（恋爱后还差"约会"等）
-      s += thisEscalationBlock(curStage, milestones, nextMs);
+      s += thisEscalationBlock(curStage);
+      msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
     }
   } else {
     // [v60/v61 默认推进] 没设目标 = 默认从当前阶段一级一级推进到恋爱（用户用军师就是为了谈恋爱）
-    s += thisEscalationBlock(curStage, milestones, nextMs);
+    s += thisEscalationBlock(curStage);
+    msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
   }
 
   // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
@@ -1822,6 +1888,19 @@ function buildSystemContent(opts: {
   //   战术切换不再打断稳定块的前缀缓存
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
   s += buildTacticBlock(tactic.category, tactic.phase);
+
+  // [v82 里程碑延迟注入] 紧跟战术指令（本轮行动层，权重最高区域）：
+  //   话题聊死 → 小目标当新话题切入；每轮尽量织入一个收集动作
+  if (msOpts) {
+    s += buildMilestoneBlock({
+      heavy: msOpts.heavy,
+      meetGate: true,
+      milestones: msOpts.milestones,
+      nextMs: msOpts.nextMs,
+      staleRounds: ts.staleRounds,
+      retreating: ts.retreating,
+    });
+  }
 
   // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
   //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
