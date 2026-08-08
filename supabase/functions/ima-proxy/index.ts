@@ -1684,15 +1684,11 @@ function buildSystemContent(opts: {
 
   // [v73] 【兴趣信号与升级】已删除：被进攻类战术卡（升高关系/推拉/筛选）覆盖
 
-  // ===== 以下为每轮变化块（后缀，不影响缓存前缀）=====
-  // [v75 缓存②] 所有用户相关/会变的块（位置/锚点/阶段/简介）一律放后缀，
-  //   前缀只保留：角色定位+先解读+时间+自洽+战术前导（字节级稳定 → TTL 内可缓存命中）
-
-  // [v73 迷男精髓] 战术变化部分：当前阶段卡 + 命中类别卡组
-  //   防守（敷衍/打压/废物测试/ASD/服从度低/消失/提前男友/海王）→ 防守卡
-  //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
-  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
-  s += buildTacticBlock(tactic.category, tactic.phase);
+  // ===== 以下为变化块（后缀；按变化频率排序：稳定块靠前、战术/query 相关块靠尾）=====
+  // [v75 缓存②] 前缀固定区只保留：角色定位+先解读+时间+自洽+战术前导（字节级稳定）
+  // [v80 缓存优化] 战术块/长期事实/上次聊天已后置到"切换话题"之后（变化区尾部）：
+  //   战术切换（attract→comfort）或 query 变化只影响尾部，不再打断
+  //   位置/锚点/阶段/简介/画像/目标等稳定块的 DeepSeek 前缀缓存
 
   // [v73] 【对方正在攻击/挑衅】独立块已删除：防守类战术卡覆盖（挽回期由全局原则兜底）
 
@@ -1704,12 +1700,7 @@ function buildSystemContent(opts: {
       + `- "过来找你/见面/顺路/接送"等邀约，必须同时结合【当前时间】与【我的位置】判断是否现实，不现实就委婉拒绝或改约。`;
   }
 
-  // [v76] 上次聊天间隔（时间相关、每轮可能变，放后缀变化区；间隔 <1min 或查询失败不注入）
-  if (opts.lastGapText) {
-    s += `\n\n【上次聊天】（时间流逝感知，涉及"上次/之前/多久没聊"表述以此为准）\n你和对方上一次聊天在${opts.lastGapText}。\n`
-      + `- 间隔超过 1 天：先自然接一句"好久没聊"再进正题，别当刚聊过一样直接续；\n`
-      + `- 间隔超过 3 天：语气带点想念/调侃，别用"上次说到哪了"这种记录式追问，别反复问已知信息。`;
-  }
+  // [v80 缓存优化] 【上次聊天】块已后置到变化区尾部（每轮变，放前面会打断后续稳定块缓存）
 
   // [v78] 思考预算指令：仅思考档注入（off 不注入，省 token 防误导）
   //   软约束压缩思考链：V4 对"克制思考"类指令响应良好，可再压 30-50%；
@@ -1769,32 +1760,7 @@ function buildSystemContent(opts: {
     s += `\n\n${opts.olderSummary}`;
   }
 
-  // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
-  //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
-  let factsInjected = 0;
-  const factsList = opts.memoryCard?.facts || [];
-  const qText = opts.lastUserText || '';
-  if (factsList.length > 0 && qText.trim()) {
-    const qs = qText.replace(/\s/g, '');
-    const scoredFacts = factsList
-      .map((f) => {
-        const ft = (f.text || '').replace(/\s/g, '');
-        let hit = 0;
-        for (let i = 0; i + 2 <= ft.length; i++) {
-          if (qs.includes(ft.slice(i, i + 2))) hit++;
-        }
-        return { f, hit };
-      })
-      .filter((x) => x.hit > 0)
-      .sort((a, b) => b.hit - a.hit)
-      .slice(0, FACTS_INJECT_MAX);
-    if (scoredFacts.length > 0) {
-      factsInjected = scoredFacts.length;
-      s += `\n\n【我记得这些】(长期记忆，按当前话题想起的)\n`
-        + scoredFacts.map((x) => `- ${x.f.text}`).join('\n')
-        + `\n- 结合它们自然回应：对方提到相关的事时，要自然带出"我记得"的感觉，别生硬背诵、别每条都提。`;
-    }
-  }
+  // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
   // [v58/v61] 关系目标 + 里程碑进度（战略层）：用户设了 goal 按目标使劲；
   //   没设 goal = 默认一路推进到恋爱（未知→朋友→追求→暧昧→恋爱）；
@@ -1849,6 +1815,51 @@ function buildSystemContent(opts: {
       + `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`
       + `- 禁忌：不延续旧话题、不道歉、不解释为什么换话题、不提"换个话题吧"这种元话术；直接自然开场，像想到什么随口问一样。\n`
       + `- 输出只需这一句话术本体，不要任何附加说明。`;
+  }
+
+  // ===== 变化区尾部（战术/query 相关，放最后最小化对前缀缓存的破坏）=====
+  // [v73 迷男精髓] 战术变化部分：当前阶段卡 + 命中类别卡组
+  //   防守（敷衍/打压/废物测试/ASD/服从度低/消失/提前男友/海王）→ 防守卡
+  //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
+  // [v80 缓存优化] 后置到稳定块（位置/锚点/阶段/简介/画像/目标）之后：
+  //   战术切换不再打断稳定块的前缀缓存
+  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
+  s += buildTacticBlock(tactic.category, tactic.phase);
+
+  // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
+  //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
+  // [v80 缓存优化] 后置到变化区尾部（按 query 选 → 每轮变，不打断前面稳定块缓存）
+  let factsInjected = 0;
+  const factsList = opts.memoryCard?.facts || [];
+  const qText = opts.lastUserText || '';
+  if (factsList.length > 0 && qText.trim()) {
+    const qs = qText.replace(/\s/g, '');
+    const scoredFacts = factsList
+      .map((f) => {
+        const ft = (f.text || '').replace(/\s/g, '');
+        let hit = 0;
+        for (let i = 0; i + 2 <= ft.length; i++) {
+          if (qs.includes(ft.slice(i, i + 2))) hit++;
+        }
+        return { f, hit };
+      })
+      .filter((x) => x.hit > 0)
+      .sort((a, b) => b.hit - a.hit)
+      .slice(0, FACTS_INJECT_MAX);
+    if (scoredFacts.length > 0) {
+      factsInjected = scoredFacts.length;
+      s += `\n\n【我记得这些】(长期记忆，按当前话题想起的)\n`
+        + scoredFacts.map((x) => `- ${x.f.text}`).join('\n')
+        + `\n- 结合它们自然回应：对方提到相关的事时，要自然带出"我记得"的感觉，别生硬背诵、别每条都提。`;
+    }
+  }
+
+  // [v76] 上次聊天间隔（时间相关、每轮可能变；间隔 <1min 或查询失败不注入）
+  // [v80 缓存优化] 后置到变化区尾部：每轮变，放前面会打断后续稳定块缓存
+  if (opts.lastGapText) {
+    s += `\n\n【上次聊天】（时间流逝感知，涉及"上次/之前/多久没聊"表述以此为准）\n你和对方上一次聊天在${opts.lastGapText}。\n`
+      + `- 间隔超过 1 天：先自然接一句"好久没聊"再进正题，别当刚聊过一样直接续；\n`
+      + `- 间隔超过 3 天：语气带点想念/调侃，别用"上次说到哪了"这种记录式追问，别反复问已知信息。`;
   }
 
   // 知识库参考
