@@ -709,22 +709,12 @@ Deno.serve(async (req) => {
     // 统一剥掉：只删行首归属标签，保留话术本体；主回复与重试分支都已写入 reply，此处一次覆盖
     if (reply) reply = stripRoleTags(reply);
 
-    // ---- 降级：知识库拼装（LLM 不可用/失败） ----
-    if (!reply && kbItems.length > 0) {
-      reply = assembleKbReply(kbItems, kbFallback);
-    }
-
-    // ---- 降级：通用建议 ----
+    // ---- [v126→v127 掉线直连] LLM 不可用/失败：不再本地拼装糊弄，直接掉线提示 ----
+    //   背景：用户反馈"一直以为降级是 LLM 安全机制触发"，实际是 LLM 调用失败/超时/未配置
+    //   后走了本地拼装（assembleKbReply / 通用建议模板）——那不是军师水平，且误导用户。
+    //   决定：LLM 没产出 → reply='掉线了'，前端统一提示"军师掉线了，稍后再试"，不落库不渲染。
     if (!reply) {
-      const fallbacks = [
-        `关于"${query}"，建议你：\n1️⃣ 先认可对方的感受\n2️⃣ 表达你的真实想法\n3️⃣ 用开放性问题引导对话`,
-        `针对"${query}"，可以这样回：\n"嗯嗯，我明白你的意思。有空可以多聊聊~"`,
-        `回应"${query}"的思路：先表示理解 → 表达看法 → 反问对方。三步法最自然。`,
-      ];
-      const reason = !llmKey
-        ? '（知识库服务未配置，以下为通用建议）'
-        : '（未检索到知识库相关内容，以下为通用建议）';
-      reply = reason + '\n\n' + fallbacks[Math.floor(Math.random() * fallbacks.length)];
+      reply = '掉线了';
     }
 
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
@@ -735,7 +725,8 @@ Deno.serve(async (req) => {
           history, llmKey, llmBase, llmModel, existingCard: memoryCard,
           pulseAdvice,
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
-          currentReply: reply,
+          // [v127] 掉线信号不入库：避免"掉线了"污染 recent_self_messages 防重复窗口
+          currentReply: (reply && reply !== '掉线了') ? reply : null,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -754,6 +745,8 @@ Deno.serve(async (req) => {
         bonus: quotaInfo.bonus ?? null,
       } : null,
       _debug: {
+        // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
+        offline: reply === '掉线了',
         system_prompt_len: (effectivePrompt || '').length,
         history_len: Array.isArray(history) ? history.length : 0,
         llm_history_len: llmHistory.length,
@@ -2658,25 +2651,8 @@ function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: s
 }
 
 // ============================================================
-// 知识库内容拼装回复（无 LLM 时的降级路径）
-// ============================================================
-function assembleKbReply(items: any[], usedFallbackBrowse: boolean): string {
-  const lines: string[] = [usedFallbackBrowse
-    ? '（检索服务异常，已按标题匹配到知识库相关资料，给你参考：）'
-    : '根据知识库的资料，给你参考：', ''];
-  items.forEach((item, i) => {
-    lines.push(`【建议 ${i + 1}】${item.title}`);
-    const summary = item.content || '';
-    if (summary) {
-      lines.push(summary);
-    } else {
-      lines.push('（可在 IMA 知识库中查看该文档全文）');
-    }
-    lines.push('');
-  });
-  lines.push('结合实际情况灵活回应。');
-  return lines.join('\n');
-}
+// 知识库内容拼装回复（无 LLM 时的降级路径）已移除：
+// [v127] 用户明确要求 LLM 失败直接掉线提示，不做本地拼装糊弄（assembleKbReply 删除）
 
 // ============================================================
 // 关键词提取：bigram（2字窗口）切词 → 双实义字优先 → top 5

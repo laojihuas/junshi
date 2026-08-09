@@ -366,6 +366,14 @@ const Chat = {
                 return;
             }
 
+            // [v20260810 掉线直连] LLM 服务不可用：后端不再本地拼装糊弄，
+            // 统一返回"掉线了"——不落库不渲染为消息，只提示稍后再试
+            if (reply === '掉线了') {
+                Utils.toast('军师掉线了，稍后再试');
+                this._setInputBusy(false);
+                return;
+            }
+
             if (reply) {
                 // [收到回复振动提醒] 模式振动，区别于 friends.js 长按的 15ms 短震
                 if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
