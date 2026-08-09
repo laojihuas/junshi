@@ -540,13 +540,27 @@ Deno.serve(async (req) => {
         //   [v79.4 降本] 素材 5→3：提炼只需 1 个匹配惯例，3 块 top 套路已够，prompt 省 ~400-800 tokens
         //   [v79.5] 素材 3→2 + 删除 usable≥2 门槛：套路块已按 calcStratScore 精品精排，
         //     前 2 块即精品；素材≥1 即尝试提炼（STRATEGY_HINT_RE + LLM 判断兜底，无用素材自然返回空）
+        //   [v20260809] ① 检索词 = 语义词(query 相关，×2) + 固定套路词(保底，×1.5)，防止固定词表
+        //     与当前话题脱节（对方发网名也能命中是因为纯固定词，现在语义相关性优先）
+        //   [v20260809] ② 历史不足 2 条（第一句话/刚加上好友）不启动套路：先正常聊，聊开再给套路
         if (llmKey && !strategyClear && !memoryCard?.strategy) {
           try {
-            const convItems = await recallBlocks(
-              supabaseUrl, serviceRoleKey,
-              resolveStrategySearchKws(memoryCard), resolveStrategySearchKws(memoryCard),
-              { ...quotaOpts, pickCount: 2, type: '套路' }
-            );
+            // [v20260809] 历史条数门槛：至少 1 个完整对话回合（对方+己方 ≥2 条）才允许启动套路，
+            //   第一句话（对方刚发网名/寒暄）先正常聊，聊开再给套路
+            const histCount = (Array.isArray(history) ? history : [])
+              .filter((h: any) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string' && String(h.content).trim().length > 0)
+              .length;
+            // [v20260809] 检索词 = query 语义词（×2，相关性主导）+ 固定套路词（×1.5，保底）；
+            //   语义词为空（LLM 拆词失败）时退回固定词表，不阻断套路通道
+            const stratKws = resolveStrategySearchKws(memoryCard);
+            const stratSemantic = semanticKws.length > 0 ? semanticKws : stratKws;
+            const convItems = histCount < 2
+              ? [] // 历史不足：跳过套路启动，先正常聊
+              : await recallBlocks(
+                  supabaseUrl, serviceRoleKey,
+                  stratSemantic, stratKws,
+                  { ...quotaOpts, pickCount: 2, type: '套路' }
+                );
             lastStratMaterialCount = (Array.isArray(convItems) ? convItems : []).length;
             if ((Array.isArray(convItems) ? convItems : []).length > 0) {
               // [v18] 传入 memoryCard → extractStrategy 在 prompt 里注入里程碑可选融合段
@@ -1472,6 +1486,7 @@ async function extractStrategy(
     + `- 每步格式：一句话话术思路 + 例句（引号内原样话术）+ 时机提示写在该步末尾括号内（如"对方回复后隔20-40分钟再发""对方主动追问时用"）。每步可写到50-80字，不必追求简短。\n`
     + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
     + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低。\n`
+    + `- [v20260809 场景契合] 提炼前先判断：该惯例必须与"当前对方的话"和对话场景契合（她刚发网名/寒暄/闲聊时，推拉/冷读/打压类惯例就明显不适用，应返回空）。只提炼当下真正用得上的，宁缺毋滥。\n`
     + milestoneBlock
     + `\n如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
@@ -2128,7 +2143,10 @@ function calcGemScore(content: string, blockTitle: string): number {
 //   减分 = 碎片化（像话术误标）/超长注水（提示废话多）/无结构散句堆
 // ============================================================
 const STRAT_WEIGHT = 0.8;                    // 套路分合并权重（相关分仍为主序）
-const STRAT_MIN = 0;                         // 低于此分 = 非精品套路，剔出候选池
+// [v20260809] STRAT_MIN 0→1.0：过滤"只有标题像套路、内容无步骤无对话"的低质块
+//   计算参考：标题含惯例词 +1.5 / 有步骤 +1.0 / 有对话 +0.8 / 长度 150-1200 +0.6
+//   → ≥1.0 意味着必须有"标题像套路 + 至少一个结构信号"或"步骤+对话双信号"，纯标题党被挡
+const STRAT_MIN = 1.0;
 const STRAT_TITLE_RE = /惯例|玩法|魔术|流程|套路|开场|收尾|推拉|冷读|测试|游戏|模型/; // 标题惯例词
 const STRAT_STEP_RE = /(^|\n)\s*([0-9０-９]{1,2}|[一二三四五六七八九十]+|[①②③④⑤⑥⑦⑧⑨⑩])([\.、．。）)])|第一步|第二步|步骤|环节|流程|目的|情景|提示|其他答案|变体/; // 步骤/结构信号
 const STRAT_DIALOG_RE = /[男女他她]：|【[男女]|你说|你就|女说|男说/;                 // 对话例句信号
@@ -2251,13 +2269,20 @@ async function recallBlocks(
     //   [v79.5] 按类型分流打分：套路通道用 calcStratScore（套路块专属规则，
     //   长句/连接词不再被话术 gem 规则误伤）；话术/其他走 calcGemScore
     //   全被剔光时退回原始列表（保证有弹药可用）；排序后 applyQuota 从精排池里挑
+    //   [v20260809] 套路通道叠加结构信号门槛：STRAT_MIN≥1.0 之外，内容必须含
+    //   步骤/对话/元信息之一——纯"标题像套路、内容无结构"的标题党直接挡掉
     const isStratRoute = opts?.type === '套路';
     const scored = items
       .map((it) => {
         const q = isStratRoute ? calcStratScore(it.content || '', it.block_title || '') : calcGemScore(it.content || '', it.block_title || '');
         return { ...it, _gem: q };
       })
-      .filter((it) => (isStratRoute ? it._gem >= STRAT_MIN : it._gem >= GEM_MIN))
+      .filter((it) => {
+        if (!isStratRoute) return it._gem >= GEM_MIN;
+        if (it._gem < STRAT_MIN) return false;
+        const c = it.content || '';
+        return STRAT_STEP_RE.test(c) || STRAT_DIALOG_RE.test(c) || STRAT_META_RE.test(c);
+      })
       .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)) - ((a._ft_score || 0) + (a._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)));
     if (scored.length > 0) items = scored;
 
