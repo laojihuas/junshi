@@ -532,7 +532,15 @@ const Chat = {
 
             if (reply && reply !== '掉线了') {
                 // 1) 数据库覆盖旧回复
-                await DB.updateMessage(msgId, reply);
+                // [v20260810] 必须校验写入结果：若 UPDATE 被 RLS 拦截/失败而界面继续更新，
+                // 会造成"界面是新内容、数据库是旧内容"，切走再回来（页面重载）就回退旧回复。
+                // 写入失败立即回滚，不更新内存/历史/界面。
+                const updated = await DB.updateMessage(msgId, reply);
+                if (!updated) {
+                    Utils.toast('保存失败，请重试');
+                    console.error('[军师] 重生：数据库更新失败，已回滚（界面保持旧回复）');
+                    return;
+                }
                 // 2) 内存替换
                 oldMsg.content = reply;
                 // 3) 窗口历史：重生上下文 + 新回复（保持后续对话连贯）
