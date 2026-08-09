@@ -2088,41 +2088,82 @@ function buildSystemContent(opts: {
 //     思考档下 temperature/惩罚系数官方强制不生效，不传；max_tokens 提到 ≥2000
 //   - 兼容旧模型（deepseek-chat 等非 V4）：不传 thinking 字段，维持原行为
 // ============================================================
+// [v127 超时治降级] LLM 调用超时/重试配置
+//   背景：摸底确认降级真凶 = thinking 模式慢响应 + 裸 fetch 无超时 → 被 Edge Function 60s
+//   超时切断 → catch → 降级知识库拼装。加超时 + 主回复失败重试：
+//   主回复（thinking 档可能慢）25s 超时，超时重试降 thinking off 15s（提速保底，避免降级）
+//   辅助调用（全 off 档）15s 超时不重试（失败已有上层降级语义：返回空/[]/null）
+const LLM_MAIN_TIMEOUT_MS = 25000;
+const LLM_MAIN_RETRY_MS = 15000;
+const LLM_AUX_TIMEOUT_MS = 15000;
+
 async function llmChat(
   llmKey: string, llmBase: string, llmModel: string,
   messages: any[], opts: { temperature?: number; maxTokens?: number; frequencyPenalty?: number; presencePenalty?: number; thinking?: ThinkingMode; _stage?: string } = {}
 ): Promise<string> {
   const thinking = opts.thinking ?? 'off';
   const isV4 = /v4/.test(llmModel);
-  const body: any = {
-    model: llmModel,
-    messages,
+  const stage = (opts as any)._stage || 'llm';
+  const isMain = stage === 'main_reply';
+  const timeoutMs = isMain ? LLM_MAIN_TIMEOUT_MS : LLM_AUX_TIMEOUT_MS;
+  const buildBody = (th: ThinkingMode): any => {
+    const b: any = { model: llmModel, messages };
+    if (isV4 && th !== 'off') {
+      b.thinking = { type: 'enabled' };
+      b.reasoning_effort = th;
+      // 思考模式：temperature / top_p / presence_penalty / frequency_penalty 不生效（官方强制）
+      b.max_tokens = Math.max(opts.maxTokens ?? 1200, THINKING_MAX_TOKENS);
+    } else {
+      if (isV4) b.thinking = { type: 'disabled' }; // V4 默认开思考，非思考档显式关闭
+      b.temperature = opts.temperature ?? 0.4;
+      b.max_tokens = opts.maxTokens ?? 1200;
+      b.frequency_penalty = opts.frequencyPenalty ?? 0.5;
+      b.presence_penalty = opts.presencePenalty ?? 0;
+    }
+    return b;
   };
-  if (isV4 && thinking !== 'off') {
-    body.thinking = { type: 'enabled' };
-    body.reasoning_effort = thinking;
-    // 思考模式：temperature / top_p / presence_penalty / frequency_penalty 不生效（官方强制）
-    body.max_tokens = Math.max(opts.maxTokens ?? 1200, THINKING_MAX_TOKENS);
-  } else {
-    if (isV4) body.thinking = { type: 'disabled' }; // V4 默认开思考，非思考档显式关闭
-    body.temperature = opts.temperature ?? 0.4;
-    body.max_tokens = opts.maxTokens ?? 1200;
-    body.frequency_penalty = opts.frequencyPenalty ?? 0.5;
-    body.presence_penalty = opts.presencePenalty ?? 0;
+  const url = `${llmBase.replace(/\/$/, '')}/chat/completions`;
+  const doFetch = async (th: ThinkingMode, timeout: number): Promise<{ status: number; errText: string; data: any }> => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${llmKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(buildBody(th)),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return { status: resp.status, errText: errText.slice(0, 200), data: null };
+      }
+      return { status: 200, errText: '', data: await resp.json() };
+    } catch (e: any) {
+      return { status: 0, errText: e && e.name === 'AbortError' ? '__TIMEOUT__' : String((e && e.message) || e), data: null };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // 首次请求
+  let attempt = await doFetch(thinking, timeoutMs);
+  // [v127] 主回复：超时/网络错误(status 0)/429/5xx → 重试一次；超时重试降 thinking off 提速
+  if (!attempt.data && isMain && (attempt.status === 0 || attempt.status === 429 || attempt.status >= 500)) {
+    const retryThinking: ThinkingMode = attempt.status === 0 ? 'off' : thinking;
+    const retryTimeout = attempt.status === 0 ? LLM_MAIN_RETRY_MS : timeoutMs;
+    attempt = await doFetch(retryThinking, retryTimeout);
+    if (attempt.data) {
+      console.warn(`[v127] LLM 主回复重试成功（首轮 ${attempt.status === 0 ? '超时/网络错误' : 'HTTP ' + attempt.status}，重试 ${retryThinking === 'off' ? '降档off' : '同档'}）`);
+    }
   }
-  const resp = await fetch(`${llmBase.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${llmKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  if (!attempt.data) {
+    if (attempt.status === 0) throw new Error(`LLM ${attempt.errText === '__TIMEOUT__' ? '超时' : '网络错误'}: ${attempt.errText}（已重试）`);
+    throw new Error(`LLM HTTP ${attempt.status}: ${attempt.errText}`);
   }
-  const data = await resp.json();
+  const data = attempt.data;
   const content = data?.choices?.[0]?.message?.content;
   // [v72 调试] 捕获思考链（thinking 档才有；辅助调用 thinking off 无 reasoning，不会覆盖主回复）
   const reasoning = data?.choices?.[0]?.message?.reasoning_content;
@@ -2202,8 +2243,12 @@ function extractCandidateLines(items: any[], maxPerBlock = 3, maxTotal = 8): str
       s = s.replace(/^[\d#\s.]{1,4}/, '');
       // 残余行首【标记剥掉（如"【这么晚了我们去找个地方休息一下"）
       s = s.replace(/^【/, '').trim();
-      // 句尾括号注释（（框架引领）（会聊））剥掉
-      s = s.replace(/\s*（[^）]{0,12}）\s*$/g, '');
+      // 句尾括号注释（（框架引领）（会聊）（慎用））剥掉，循环剥直到无残留
+      let prevS: string;
+      do {
+        prevS = s;
+        s = s.replace(/\s*（[^）]{0,20}）\s*$/, '').trim();
+      } while (s !== prevS);
       // 剥行尾引号
       s = s.replace(/[""「」『』]+$/, '').trim();
       if (s.length < 8 || s.length > 60) continue;
