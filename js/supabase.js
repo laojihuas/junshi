@@ -187,6 +187,21 @@ const DB = {
         return data;
     },
 
+    // [v20260809 重生] 覆盖某条消息内容（重生后替换旧回复，不新增消息）
+    async updateMessage(messageId, content) {
+        const sb = getSupabaseClient();
+        if (!sb) return false;
+        const { error } = await sb
+            .from('chat_messages')
+            .update({ content: content })
+            .eq('id', messageId);
+        if (error) {
+            console.error('[DB] updateMessage error:', error);
+            return false;
+        }
+        return true;
+    },
+
     async updateSessionTime(sessionId) {
         const sb = getSupabaseClient();
         if (!sb) return;

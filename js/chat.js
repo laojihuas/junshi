@@ -224,6 +224,7 @@ const Chat = {
                         <div class="message-content">${this._escapeHtml(m.content)}</div>
                         <div class="message-footer">
                             <span class="message-time">${time}</span>
+                            <button class="message-regen-btn" data-msg-id="${m.id}">🔄 重生</button>
                             <button class="message-copy-btn" data-content="${this._escapeAttr(m.content)}">
                                 📋 复制
                             </button>
@@ -257,6 +258,11 @@ const Chat = {
                     }, 2000);
                 }
             });
+        });
+
+        // [v20260809 重生] 重生按钮事件：对不满意的回复重新生成（覆盖旧回复）
+        container.querySelectorAll('.message-regen-btn').forEach(btn => {
+            btn.addEventListener('click', () => this.regenMessage(btn));
         });
 
         // [v20260803] 滚动到底部：首次打开聊天页时页面还处于 display:none（未切换 active），
@@ -472,6 +478,82 @@ const Chat = {
             console.error('[军师] 换话题失败:', e);
         } finally {
             // [v83] 请求结束（成功/失败/配额受限），恢复输入区按钮
+            this._setInputBusy(false);
+        }
+    },
+
+    // [v20260809 重生] 对不满意的回复重新生成：
+    //   以该条回复之前最近一条用户消息为输入，用"去掉旧回复后的窗口历史"重新调用军师；
+    //   成功后覆盖旧回复（数据库 + 内存 + 窗口历史 + 界面），不新增消息、不污染对话。
+    async regenMessage(btn) {
+        const msgId = btn.dataset.msgId;
+        if (!msgId || !this.currentSessionId) return;
+
+        // 找到该条 assistant 消息及其前的用户消息（重生输入）
+        const idx = this.messages.findIndex(m => String(m.id) === String(msgId));
+        if (idx < 0 || this.messages[idx].role !== 'assistant') return;
+        const oldMsg = this.messages[idx];
+        let userIdx = -1;
+        for (let i = idx - 1; i >= 0; i--) {
+            if (this.messages[i].role === 'user') { userIdx = i; break; }
+        }
+        if (userIdx < 0) {
+            Utils.toast('没有可重生的对话');
+            return;
+        }
+        if (!await this._checkCanUse()) return;
+
+        // [v83 防连点] 锁输入区按钮 + 重生按钮变灰，防止重复点击并发请求
+        this._setInputBusy(true);
+        btn.disabled = true;
+        const oldText = btn.innerHTML;
+        btn.innerHTML = '⏳ 重生中...';
+
+        try {
+            const systemPrompt = await this._getSystemPrompt();
+            // 窗口历史：从后往前找旧回复（内容匹配），去掉它及之后的内容作为重生上下文，
+            // 让军师基于"用户消息 + 之前的历史"重新作答
+            const history = WindowSession.getHistory(this.currentSessionId);
+            let hIdx = -1;
+            for (let i = history.length - 1; i >= 0; i--) {
+                if (history[i].role === 'assistant' && history[i].content === oldMsg.content) { hIdx = i; break; }
+            }
+            const ctxHistory = hIdx > 0
+                ? history.slice(0, hIdx)
+                : history.filter(x => !(x.role === 'assistant' && x.content === oldMsg.content));
+
+            const reply = await this._callIMA(this.messages[userIdx].content, {
+                history: ctxHistory,
+                system_prompt: systemPrompt
+            });
+
+            // [v20260805] 配额受限：_callIMA 已按 reason 分层提示，直接结束
+            if (reply === '__QUOTA__') return;
+
+            if (reply && reply !== '掉线了') {
+                // 1) 数据库覆盖旧回复
+                await DB.updateMessage(msgId, reply);
+                // 2) 内存替换
+                oldMsg.content = reply;
+                // 3) 窗口历史：重生上下文 + 新回复（保持后续对话连贯）
+                const nextHistory = ctxHistory.slice();
+                nextHistory.push({ role: 'assistant', content: reply });
+                WindowSession.setHistory(this.currentSessionId, nextHistory);
+                // 4) 刷新界面 + 提醒
+                this.renderMessages();
+                if (navigator.vibrate) navigator.vibrate([80, 40, 80]);
+                Utils.toast('已重新生成');
+                await DB.updateSessionTime(this.currentSessionId);
+            } else {
+                Utils.toast(reply === '掉线了' ? '军师掉线了，稍后再试' : '重生失败，请重试');
+            }
+        } catch (e) {
+            Utils.toast('网络错误，请稍后重试');
+            console.error('[军师] 重生失败:', e);
+        } finally {
+            // 成功路径 renderMessages 已重建按钮，此恢复对旧引用无害；失败/配额路径真正恢复
+            btn.disabled = false;
+            btn.innerHTML = oldText;
             this._setInputBusy(false);
         }
     },

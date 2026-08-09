@@ -904,6 +904,32 @@ textarea.input {
     color: #fff;
 }
 
+/* [v20260809 重生] 重生按钮（对不满意的回复重新生成，覆盖旧回复） */
+.message-regen-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: #BA7517;
+    cursor: pointer;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border: 1px solid #BA7517;
+    border-radius: 4px;
+    background: transparent;
+    transition: all 0.2s;
+}
+
+.message-regen-btn:active {
+    background: #BA7517;
+    color: #fff;
+}
+
+.message-regen-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .message.assistant .message-footer {
     display: flex;
     align-items: center;
