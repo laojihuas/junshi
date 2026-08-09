@@ -799,6 +799,8 @@ Deno.serve(async (req) => {
         retreating: topicState.retreating,
         // [v82] 里程碑块注入验证：0=未注入 1=轻引导 2=重引导（排查"收集不生效"用）
         ms_block: msBlock,
+        // [v20260809] 机会窗口命中验证（null=未命中；命中显示里程碑项名，排查"她问军师没反问"用）
+        open_window: switchTopic ? null : detectOpenWindow(query),
         // [v62] 切换话题模式（验证【切换话题】注入）
         switch_topic: switchTopic,
         // [v76] 会话间隔注入文本（验证时间流逝感知；''=未注入）
@@ -1177,6 +1179,31 @@ function detectTopicStagnation(query: string, history: any[]): { staleRounds: nu
   return { staleRounds, retreating };
 }
 
+// [v20260809 机会窗口] 对方主动问起里程碑话题 = 她亲手递来的窗口（纯规则，零 LLM）
+//   命中 → buildSystemContent 注入【机会窗口】块：回答后必须单次镜像反问
+//   她先开口后的镜像反问 = 社交互惠，不是查户口（查户口 = 连环盘问不回应）
+//   数组顺序 = 匹配优先级（先命中者胜；家庭/住哪分开判，防"你家"歧义）
+const OPEN_WINDOW_PATTERNS: Array<[string, RegExp]> = [
+  ['年龄', /你多大|你几岁|你多大了|你几岁了|你今年多大|你哪年|你是哪年|你是哪一年|你哪一年|哪一年生|你属[什么啥]/],
+  ['喜好', /你喜欢什么|你最爱|你平时(喜欢|爱)|你有什么(爱好|兴趣)|你最爱(看|吃|听|玩)/],
+  ['住哪', /你住哪|你住在|你在哪个(区|城市|片区)|你是哪里人|你哪的|你家在哪|你家是哪/],
+  ['家庭', /你家几口|你是独生|你爸妈|你爸你妈|你家里/],
+  ['照片', /发(张|个)照片|你长什么样|看看你|你照片(发|给)|自拍/],
+  ['恋爱经历', /你谈过|你前任|你以前(对象|女朋友)|你感情(史|经历)|你交往过/],
+  ['敏感面', /你最近(在)?(烦|愁|压力)|你有什么压力|你怕什么|你最难/],
+];
+
+// [v20260809] 检测"她主动问里程碑话题"：命中返回里程碑项名（如'年龄'），否则 null
+//   仅对对方原话（query）检测；switchTopic 时主流程传 ''，天然跳过
+function detectOpenWindow(query: string): string | null {
+  const q = String(query || '').trim();
+  if (!q) return null;
+  for (const [name, re] of OPEN_WINDOW_PATTERNS) {
+    if (re.test(q)) return name;
+  }
+  return null;
+}
+
 // [v60 主动推进] 按当前 stage 拼装"主动推进"指令块（无目标/目标已达成时注入）
 //   核心：军师是主动方——主动制造窗口（试探/邀约/张力），读反馈再决定下一步；
 //   绝不表白、绝不逼问、绝不纠缠；优先调用知识库话术当弹药；挽回期禁用推进。
@@ -1244,7 +1271,7 @@ function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; meetBann
     + (topicDead
       ? `- 【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 立即停止死磕老话题，本轮就用其中一个小目标当新话题切入，绝不把话题聊到她失去兴趣。\n`
       : `- 话题聊到第 4 轮还没带出任何小目标 → 本轮必须从"未完成"里挑 1 个当新话题切入。\n`)
-    + `- 边界：绝不生硬转折、绝不盘问查户口；一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要，照片/喜好可随话题自然重复，以自然为准，由你判断。`;
+    + `- 边界：不盘问 = 不连环追问、她不回应不硬要；她主动问起的项目，回答后必须单次镜像反问（社交互惠，见【机会窗口】）。一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要，照片/喜好可随话题自然重复，以自然为准，由你判断。`;
   if (meetGate) s += gateLine;
   return s;
 }
@@ -1982,6 +2009,20 @@ function buildSystemContent(opts: {
       staleRounds: ts.staleRounds,
       retreating: ts.retreating,
     });
+  }
+
+  // [v20260809 机会窗口] 她主动问里程碑话题 → 回答后必须镜像反问（最高优先，紧跟里程碑块）
+  //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
+  const openWindow = detectOpenWindow(opts.lastUserText || '');
+  if (openWindow) {
+    const tip = MILESTONE_TIPS[openWindow] || '';
+    s += `\n\n【机会窗口】(本轮最高优先级，必须接住)\n`
+      + `- 她主动问起了「${openWindow}」——这是她亲手递过来的窗口：说明她对你有兴趣，且大概率愿意等价交换信息。\n`
+      + `- 本轮动作：先自然回答她的问题（自己也交换同等信息，别有保留），然后必须顺势镜像反问（"你呢？"），把「${openWindow}」顺势完成。\n`
+      + `- 区分查户口：查户口 = 连环盘问、她不回应还继续追问（禁止）；她先开口后的单次镜像反问 = 社交互惠（必须做），二者性质完全不同，别把互惠当查户口。\n`
+      + `- 窗口只开这一轮，错过就没了：本轮必须接住，绝不只答不问、绝不让话题滑走。\n`
+      + (tip ? `- 话术方向参考：${tip}\n` : '')
+      + `- 例外：若她以责备/挑衅语气问（如"你多大的人了还这样"）→ 语境不适用，正常回应即可，不强求反问。`;
   }
 
   // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
