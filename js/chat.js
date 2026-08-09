@@ -296,10 +296,18 @@ const Chat = {
         return datePart + ' ' + hm;
     },
 
+    // [v83 防连点] 输入区按钮统一锁定/恢复：发送/粘贴/换话题任一操作进行中，
+    // 三个按钮全部禁用并变灰，结束后恢复，避免重复点击触发重复请求
+    _setInputBusy(disabled) {
+        ['chat-send-btn', 'chat-paste-btn', 'chat-switch-btn'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = disabled;
+        });
+    },
+
     // 发送消息
     async send() {
         const input = document.getElementById('chat-input');
-        const sendBtn = document.getElementById('chat-send-btn');
         const text = input.value.trim();
 
         if (!text) return;
@@ -311,8 +319,8 @@ const Chat = {
             return;
         }
 
-        // 禁用按钮
-        sendBtn.disabled = true;
+        // [v83] 锁定输入区全部按钮（发送/粘贴/换话题变灰不可再按），结束后恢复
+        this._setInputBusy(true);
         input.value = '';
 
         // 1. 添加用户消息
@@ -348,7 +356,7 @@ const Chat = {
 
             // [v20260805] 配额受限：_callIMA 已按 reason 分层提示，直接结束本次发送
             if (reply === '__QUOTA__') {
-                sendBtn.disabled = false;
+                this._setInputBusy(false);
                 return;
             }
 
@@ -379,7 +387,8 @@ const Chat = {
             console.error('[军师] IMA API 调用失败:', e);
         }
 
-        sendBtn.disabled = false;
+        // [v83] 请求结束，恢复输入区按钮（发送/粘贴/换话题）
+        this._setInputBusy(false);
         // 不再自动聚焦输入框：AI 回复后自动聚焦会弹出手机输入法，
         // 打断用户阅读回复；需要输入时用户自行点击输入框即可
         //（input.focus() 已移除）
@@ -391,6 +400,9 @@ const Chat = {
             Utils.toast('请先进入一个好友会话');
             return;
         }
+        // [v83] 已有请求进行中（按钮已禁用变灰）：忽略重复点击
+        const pasteBtn = document.getElementById('chat-paste-btn');
+        if (pasteBtn && pasteBtn.disabled) return;
         try {
             const text = await navigator.clipboard.readText();
             if (!text || !text.trim()) {
@@ -420,8 +432,8 @@ const Chat = {
         if (!await this._checkCanUse()) {
             return;
         }
-        const btn = document.getElementById('chat-switch-btn');
-        if (btn) btn.disabled = true;
+        // [v83] 锁定输入区全部按钮（换话题按钮变灰不可再按），结束后恢复
+        this._setInputBusy(true);
 
         // 显示加载中
         const container = document.getElementById('chat-messages');
@@ -459,7 +471,8 @@ const Chat = {
             Utils.toast('网络错误，请稍后重试');
             console.error('[军师] 换话题失败:', e);
         } finally {
-            if (btn) btn.disabled = false;
+            // [v83] 请求结束（成功/失败/配额受限），恢复输入区按钮
+            this._setInputBusy(false);
         }
     },
 

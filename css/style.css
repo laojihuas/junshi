@@ -964,6 +964,18 @@ textarea.input {
     box-shadow: 0 0 10px rgba(7, 193, 96, 0.35);
 }
 
+/* [v83] 粘贴/换话题按钮禁用态：变灰 + 禁止点击，图标同步变淡 */
+.chat-paste-btn:disabled {
+    background: #2b2b2b;
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: none;
+    cursor: not-allowed;
+    transform: none;
+}
+.chat-paste-btn:disabled svg {
+    opacity: 0.35;
+}
+
 .chat-send-btn {
     padding: 8px 20px;
     background: var(--wechat-green);
