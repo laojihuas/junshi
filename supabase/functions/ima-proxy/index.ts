@@ -610,11 +610,13 @@ Deno.serve(async (req) => {
           const candidates = extractCandidateLines(kbItems);
           lastPickCount = candidates.length;
           if (candidates.length >= 2) {
-            const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history);
+            // [v126 跨轮防重复] 已发话提前取出：① 传入选句器让 LLM 语义层面避开；
+            //   ② 命中兜底仍用 bigram 校验（完全重复/高度相似 → 放弃选句回落主回复）
+            const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
+              ? memoryCard.recent_self_messages.slice(-5) : [];
+            const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history, selfMsgs);
             // [v125 防重复] 选句结果与"自己最近发过的话"重复（同一知识库句被反复选中）→ 放弃选句回落主回复
             if (picked) {
-              const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
-                ? memoryCard.recent_self_messages.slice(-5) : [];
               if (selfMsgs.length === 0 || !isNearDuplicate(picked, selfMsgs)) {
                 reply = picked;
                 lastPickHit = true;
@@ -732,6 +734,8 @@ Deno.serve(async (req) => {
           supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
           history, llmKey, llmBase, llmModel, existingCard: memoryCard,
           pulseAdvice,
+          // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
+          currentReply: reply,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -1317,6 +1321,10 @@ async function updateMemoryCard(ctx: {
   history: any[]; llmKey: string; llmBase: string; llmModel: string;
   existingCard: MemoryCard | null;
   pulseAdvice?: { delay?: boolean; short?: boolean } | null;
+  // [v126] 本轮刚生成的回复：主请求 history 不含本轮 reply，旧逻辑滞后一轮才入库，
+  //   导致选句回复 R 在"重生请求"和"下一轮选句判定"时不在 recent_self_messages 防重复窗口内
+  //   → 重生时 pickBestLine 确定性选中同一句（重生无效）/ 隔轮重复。生成后立即写入。
+  currentReply?: string | null;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
 
@@ -1331,11 +1339,16 @@ async function updateMemoryCard(ctx: {
   }
 
   // [v9] 1.5) 规则追加军师(自己)发过的话（防重复：AI 需知道自己上一条说了什么）
+  // [v126] 优先用本轮刚生成的 reply：history 里"最后一条 assistant"是上一轮的回复，
+  //   本轮 reply 若不入库则滞后一轮，选句防重复（重生/隔轮）会漏掉它
   const lastSelf = [...(Array.isArray(ctx.history) ? ctx.history : [])]
     .reverse().find((h) => h && h.role === 'assistant' && typeof h.content === 'string');
   const selfMsgs = Array.isArray(card.recent_self_messages) ? card.recent_self_messages.slice() : [];
-  if (lastSelf && (selfMsgs.length === 0 || selfMsgs[selfMsgs.length - 1] !== lastSelf.content)) {
-    selfMsgs.push(truncateText(lastSelf.content, 200));
+  const toAdd = (ctx.currentReply && ctx.currentReply.trim())
+    ? ctx.currentReply
+    : (lastSelf && lastSelf.content) || '';
+  if (toAdd && (selfMsgs.length === 0 || selfMsgs[selfMsgs.length - 1] !== toAdd)) {
+    selfMsgs.push(truncateText(toAdd, 200));
     if (selfMsgs.length > 12) selfMsgs.splice(0, selfMsgs.length - 12); // [v59] 20→12 记忆卡压缩降本
     card.recent_self_messages = selfMsgs;
   }
@@ -2319,18 +2332,24 @@ function extractCandidateLines(items: any[], maxPerBlock = 3, maxTotal = 8): str
 //   输出严格限定为单个数字 → 模型没有机会生成句子 → 消毒机制不触发
 async function pickBestLine(
   llmKey: string, llmBase: string, llmModel: string,
-  query: string, candidates: string[], history: any[]
+  query: string, candidates: string[], history: any[],
+  // [v126 跨轮防重复] 自己近期发过的话：语义重复（哪怕措辞不同）不选，bigram 兜底管不住"意思一样换说法"
+  sentLines: string[] = []
 ): Promise<string | null> {
   const candText = candidates.map((c, i) => `${i + 1}. ${c}`).join('\n');
   const recent = (Array.isArray(history) ? history : []).slice(-4)
     .map((h: any) => `${h.role === 'user' ? '她' : '你'}：${String(h.content || '').slice(0, 50)}`).join('\n');
+  const sentBlock = sentLines.length > 0
+    ? `- 你近期发过这些话（语义重复绝对不选，哪怕只是换个说法意思一样也不行）：\n${sentLines.map((c, i) => `  ${i + 1}. ${String(c).slice(0, 40)}`).join('\n')}\n`
+    : '';
   const system = '你是恋爱聊天话术选句助手。\n'
     + '任务：从候选话术列表里选出 1 句可以直接原样发给对方的话——贴合她刚说的话、自然不生硬、像真人聊天。\n'
     + '规则：\n'
     + '- 只有"原样发出去自然、像真人说的、接得上话"才选；明显生硬、教学腔、语境不符、超过40字不选\n'
     + '- 语气相仿、氛围契合、即使细节略有出入（如场景措辞稍不同）也可选；宁可错失，也不选明显生硬的\n'
     + '- 输出严格为一个数字（候选编号）；没有合适的就输出 0\n'
-    + '- 严禁输出句子内容、解释或任何其他文字';
+    + '- 严禁输出句子内容、解释或任何其他文字'
+    + sentBlock;
   const user = `最近对话：\n${recent || '（无）'}\n\n她刚说：【对方说】${query}\n\n候选话术：\n${candText}\n\n输出：`;
   try {
     const replyText = await llmChat(llmKey, llmBase, llmModel,
