@@ -1086,8 +1086,8 @@ const MILESTONE_TIPS: Record<string, string> = {
 //   每个 stage 定义本轮该往哪带一步；带台阶可退（不硬推），优先调用知识库话术当弹药。
 //   设了目标（goal）时由 GOAL_HINTS 接管推进方向，这里不重复注入；挽回特殊路径不推进。
 const ESCALATION_HINTS: Record<string, string> = {
-  '陌生': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或具体的小邀约由头（如"那家店感觉你会喜欢，改天带你去"），自然开场，别查户口。',
-  '朋友': '本轮主动推进：从朋友往暧昧探一步——用推拉或惯例话术做一次轻度试探：模糊邀约（"改天带你去xx"）、半玩笑的拉近距离、或调侃里带一点暧昧钩子。带台阶可退：她接住就顺势带，她回避就洒脱退一步，绝不纠缠。',
+  '陌生': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或展示面话题（聊她的兴趣/日常/朋友圈），自然开场，别查户口。注意：当前阶段【不约见面】——不主动提见面、不抛邀约，先把聊天氛围和舒适感建立起来。',
+  '朋友': '本轮主动推进：从朋友往暧昧探一步——用推拉或惯例话术做一次轻度试探：半玩笑的拉近距离、或调侃里带一点暧昧钩子。带台阶可退：她接住就顺势带，她回避就洒脱退一步，绝不纠缠。注意：当前阶段【不约见面】——不主动提见面、不抛邀约，只做线上的亲近试探。',
   '追求': '本轮主动推进：试探暧昧窗口——半玩笑的拉近距离（如"我们俩这状态算啥"）、推拉话术制造张力、或一次具体但轻松的邀约（结合时间/地点现实性）。她给正反馈就大胆往上抬一档，冷场就换话题养氛围。',
   '暧昧': '本轮主动推进：把暧昧张力往上抬——推拉+留白+一次模糊邀约（"改天带你去那家店"）、调侃里带亲密暗示。敢于调情但守住暧昧窗口，不急着捅破，留钩子让她回味。',
   '恋爱': '本轮主动推进：维持并加固恋爱浓度——具体约见面（结合时间/地点现实性）、共同回忆或未来钩子（"下次带你尝尝我说的那家"），有情绪价值、有小脾气，但别过度客气。',
@@ -1135,12 +1135,14 @@ function detectTopicStagnation(query: string, history: any[]): { staleRounds: nu
 function thisEscalationBlock(stage: string): string {
   const hint = ESCALATION_HINTS[stage || '陌生'];
   if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
+  // [v20260809] 陌生/朋友阶段不约见面：主动开窗的"武器库"去掉模糊邀约
+  const meetBanned = stage === '陌生' || stage === '朋友';
   let s = `\n\n【主动推进】(战略方向，严格遵守)\n`
     + `- 你是关系的主动推进方，不是等待者。每轮都要带着"往下一阶段带一步"的意图说话，但进攻藏在话术里，绝不暴露目的、绝不显得急。\n`
     + `- 本轮推进动作：${hint}\n`
-    + `- 主动开窗：对方没给信号你就自己制造窗口——半玩笑试探、模糊邀约、调侃带钩子，选一个自然的角度发起；不必等她主动。\n`
+    + `- 主动开窗：对方没给信号你就自己制造窗口——${meetBanned ? '半玩笑试探、调侃带钩子、展示面话题' : '半玩笑试探、模糊邀约、调侃带钩子'}，选一个自然的角度发起；不必等她主动。\n`
     + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
-    + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/邀约话术来执行推进，不要自己硬编。\n`
+    + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/${meetBanned ? '调侃' : '邀约'}话术来执行推进，不要自己硬编。\n`
     + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
   return s;
 }
@@ -1149,26 +1151,35 @@ function thisEscalationBlock(stage: string): string {
 //   heavy=false（暧昧前）：保持现状——按链序单一 nextMs 弱引导
 //   heavy=true（暧昧/恋爱）：加重权重——列出全部未完成项，不分先后，情景顺势带
 //   meetGate=true（全局门槛，除"保持当前关系/挽回修复"路径）：约见面前至少完成 2 项小目标
+//   meetBanned=true（v20260809 阶段禁约）：陌生/朋友阶段不主动约见面——不抛邀约、不往"见面"带，
+//     里程碑最多推到"敏感面"，"约会"不引导；她主动约可自然接住，但绝不主动发起
 //   [v82 主动开窗] 新增 staleRounds/retreating（话题停滞检测）：从"等她开口子"改为
 //   "主动开窗义务"——每轮判定能否带，话题聊到第 4 轮/对方退缩时，必须用小目标当新话题切入
 //   （不再被动等窗口：里程碑小目标本身就是现成的新话题弹药）
-function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; milestones: string[]; nextMs: string; staleRounds?: number; retreating?: boolean }): string {
+function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; meetBanned?: boolean; milestones: string[]; nextMs: string; staleRounds?: number; retreating?: boolean }): string {
   const { heavy, meetGate, milestones, nextMs } = opts;
+  const meetBanned = opts.meetBanned ?? false;
   const staleRounds = opts.staleRounds ?? 0;
   const retreating = opts.retreating ?? false;
   const done = milestones.length ? milestones.join('、') : '（无）';
   const gateLine = '\n- 邀约门槛：至少完成 2 项小目标后才能把对话往"见面"带；未达标前本轮以收集为主，不抛邀约、不敲时间，达标后邀约照常（见【本轮动作】）。';
+  const banLine = '\n- 阶段禁约（陌生/朋友）：本轮及后续都【不主动约见面】——不抛邀约、不往"见面"带、不提模糊邀约；她主动约可以自然接住，但绝不主动发起见面话题。';
   // [v82] 话题聊死信号：已连续聊 ≥3 轮 或 对方退缩 → 本轮强制用小目标切入（主动开窗）
   const topicDead = staleRounds >= 3 || retreating;
   if (!heavy) {
     // 暧昧前：单一 nextMs 顺序引导（链序推进，不跳级）
     if (!nextMs || !MILESTONE_TIPS[nextMs]) return '';
+    // [v20260809] 禁约阶段：里程碑最多推到"敏感面"，"约会"不引导
+    if (meetBanned && nextMs === '约会') {
+      return `\n\n【关系里程碑】前序小目标已全部完成，但当前阶段（陌生/朋友）不主动约见面：本轮正常聊天升温即可，不引导见面话题；等关系推进到追求阶段，再自然把对话往"见面"带。`;
+    }
     let s = `\n\n【关系里程碑】下一目标：「${nextMs}」——${MILESTONE_TIPS[nextMs]}。`
       + `已完成（她给过这些，别重复要）：${done}。按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。\n`
       + (topicDead
         ? `【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 停止死磕老话题，本轮就把「${nextMs}」当新话题自然切入（按上面的话术方向），不许把话题聊到她失去兴趣。`
         : `【主动开窗】每轮先判定能否自然带出「${nextMs}」（顺口提一句也算）；话题聊到第 4 轮还没带出 → 本轮必须带。`);
-    if (meetGate) s += gateLine;
+    if (meetBanned) s += banLine;
+    else if (meetGate) s += gateLine;
     return s;
   }
   // 暧昧及之后：加重权重——全部未完成项列出，不分先后，情景顺势带
@@ -1894,9 +1905,12 @@ function buildSystemContent(opts: {
   // [v82 里程碑延迟注入] 紧跟战术指令（本轮行动层，权重最高区域）：
   //   话题聊死 → 小目标当新话题切入；每轮尽量织入一个收集动作
   if (msOpts) {
+    // [v20260809] 陌生/朋友阶段不主动约见面（用户显式设"约见面"目标除外：那是用户主动要求）
+    const meetBanned = goal !== '约见面' && (curStage === '陌生' || curStage === '朋友');
     s += buildMilestoneBlock({
       heavy: msOpts.heavy,
       meetGate: true,
+      meetBanned,
       milestones: msOpts.milestones,
       nextMs: msOpts.nextMs,
       staleRounds: ts.staleRounds,
