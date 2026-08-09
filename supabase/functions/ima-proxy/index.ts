@@ -610,13 +610,14 @@ Deno.serve(async (req) => {
           const candidates = extractCandidateLines(kbItems);
           lastPickCount = candidates.length;
           if (candidates.length >= 2) {
-            // [v126 跨轮防重复] 已发话提前取出：① 传入选句器让 LLM 语义层面避开；
-            //   ② 命中兜底仍用 bigram 校验（完全重复/高度相似 → 放弃选句回落主回复）
-            const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
-              ? memoryCard.recent_self_messages.slice(-5) : [];
-            const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history, selfMsgs);
+            // [v126→回滚] 不再把已发句子注入选句 prompt（省 token）：
+            //   选句防重复与主回复生成句子一致 = 生成后 bigram 检测，
+            //   命中（完全重复/高度相似）→ 放弃选句回落主回复，主回复自带 v9 防重复重生成
+            const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history);
             // [v125 防重复] 选句结果与"自己最近发过的话"重复（同一知识库句被反复选中）→ 放弃选句回落主回复
             if (picked) {
+              const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
+                ? memoryCard.recent_self_messages.slice(-5) : [];
               if (selfMsgs.length === 0 || !isNearDuplicate(picked, selfMsgs)) {
                 reply = picked;
                 lastPickHit = true;
@@ -2323,26 +2324,22 @@ function extractCandidateLines(items: any[], maxPerBlock = 3, maxTotal = 8): str
 
 // [v119] 选句调用：LLM 只判断"哪句原样发出去自然契合"，返回编号；无合适返回 null
 //   输出严格限定为单个数字 → 模型没有机会生成句子 → 消毒机制不触发
+//   [v126→回滚] 防重复与主回复生成句子一致：生成后 bigram 检测命中 → 放弃选句回落主回复，
+//   不把已发句子注入选句 prompt（省 token，无额外成本）
 async function pickBestLine(
   llmKey: string, llmBase: string, llmModel: string,
-  query: string, candidates: string[], history: any[],
-  // [v126 跨轮防重复] 自己近期发过的话：语义重复（哪怕措辞不同）不选，bigram 兜底管不住"意思一样换说法"
-  sentLines: string[] = []
+  query: string, candidates: string[], history: any[]
 ): Promise<string | null> {
   const candText = candidates.map((c, i) => `${i + 1}. ${c}`).join('\n');
   const recent = (Array.isArray(history) ? history : []).slice(-4)
     .map((h: any) => `${h.role === 'user' ? '她' : '你'}：${String(h.content || '').slice(0, 50)}`).join('\n');
-  const sentBlock = sentLines.length > 0
-    ? `- 你近期发过这些话（语义重复绝对不选，哪怕只是换个说法意思一样也不行）：\n${sentLines.map((c, i) => `  ${i + 1}. ${String(c).slice(0, 40)}`).join('\n')}\n`
-    : '';
   const system = '你是恋爱聊天话术选句助手。\n'
     + '任务：从候选话术列表里选出 1 句可以直接原样发给对方的话——贴合她刚说的话、自然不生硬、像真人聊天。\n'
     + '规则：\n'
     + '- 只有"原样发出去自然、像真人说的、接得上话"才选；明显生硬、教学腔、语境不符、超过40字不选\n'
     + '- 语气相仿、氛围契合、即使细节略有出入（如场景措辞稍不同）也可选；宁可错失，也不选明显生硬的\n'
     + '- 输出严格为一个数字（候选编号）；没有合适的就输出 0\n'
-    + '- 严禁输出句子内容、解释或任何其他文字'
-    + sentBlock;
+    + '- 严禁输出句子内容、解释或任何其他文字';
   const user = `最近对话：\n${recent || '（无）'}\n\n她刚说：【对方说】${query}\n\n候选话术：\n${candText}\n\n输出：`;
   try {
     const replyText = await llmChat(llmKey, llmBase, llmModel,
