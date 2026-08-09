@@ -140,9 +140,9 @@ const Chat = {
         const facts = Array.isArray(mc.facts) ? mc.facts : [];
         const goal = mc.goal || '';
 
-        const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '朋友': '#185FA5' };
+        const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '朋友': '#5F5E5A' };
         const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
-        const stageTag = (p.stage && p.stage !== '未知')
+        const stageTag = (p.stage && p.stage !== '陌生')
             ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`
             : '';
 
@@ -151,7 +151,7 @@ const Chat = {
 
         // [v58] 目标 + 阶段推进链（文字版，已过.done 小绿、进行中.on 加亮）
         const goalHtml = goal ? `<div class="memory-goal">目标：${this._escapeHtml(goal)}</div>` : '';
-        const STAGE_CHAIN = ['未知', '朋友', '追求', '暧昧', '恋爱'];
+        const STAGE_CHAIN = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
         let chainHtml = '';
         if (p.stage && STAGE_CHAIN.includes(p.stage)) {
             const idx = STAGE_CHAIN.indexOf(p.stage);
@@ -167,7 +167,7 @@ const Chat = {
         const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
         const doneMs = Array.isArray(mc.milestones) ? mc.milestones.filter(m => MILESTONE_CHAIN.includes(m)) : [];
         let milestoneHtml = '';
-        if (doneMs.length > 0 || (p.stage && p.stage !== '未知' && p.stage !== '挽回')) {
+        if (doneMs.length > 0 || (p.stage && p.stage !== '陌生' && p.stage !== '挽回')) {
             milestoneHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">' + MILESTONE_CHAIN.map(m =>
                 `<span class="chain-node${doneMs.includes(m) ? ' done' : ''}" style="${doneMs.includes(m) ? '' : 'opacity:.45;'}">${doneMs.includes(m) ? '✓' : '○'}${m}</span>`
             ).join('') + '</div>';
@@ -594,10 +594,10 @@ const Chat = {
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
                 this._updateStrategyBadge(this.lastDebug);
-                // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/未知不提示）
+                // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/陌生不提示）
                 const ns = this.lastDebug.memory_stage;
-                if (ns && ns !== '未知' && this._prevStage && ns !== this._prevStage) {
-                    const ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
+                if (ns && ns !== '陌生' && this._prevStage && ns !== this._prevStage) {
+                    const ORDER = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
                     const a = ORDER.indexOf(this._prevStage);
                     const b = ORDER.indexOf(ns);
                     if (a > -1 && b > -1 && b > a) {

@@ -66,7 +66,7 @@ const Friends = {
             const noteHtml = s.note
                 ? `<span class="friend-note" title="${this._escapeHtml(s.note)}">${this._escapeHtml(s.note)}</span>`
                 : '';
-            // [v20260805] A方案：头像底色随关系阶段变色（未知保持原 avatar_color）
+            // [v20260805] A方案：头像底色随关系阶段变色（陌生保持原 avatar_color）
             const st = this._stageInfo(s);
             const avatarBg = st ? st.color : (s.avatar_color || '#07C160');
             const avatarTitle = st ? ` title="关系阶段：${this._escapeHtml(st.stage)}"` : '';
@@ -243,7 +243,7 @@ const Friends = {
         const st = this._stageInfo(session);
         let current = st ? st.stage : '';
         const manual = this._isManualStage(session);
-        if (manual && current === '未知') current = ''; // 手动未知态不参与高亮
+        if (manual && current === '陌生') current = ''; // 手动陌生态不参与高亮
 
         // 高亮当前 stage
         opts.querySelectorAll('.stage-option').forEach(btn => {
@@ -506,14 +506,15 @@ const Friends = {
         return div.innerHTML;
     },
 
-    // [v20260805] A方案：关系阶段 → 头像底色（追求蓝/暧昧粉/恋爱红/挽回琥珀/朋友蓝）
-    // 未知/无画像 → 一律灰色（title 显示"未知"）
+    // [v20260805] A方案：关系阶段 → 头像底色（追求蓝/暧昧粉/恋爱红/挽回琥珀/朋友灰）
+    // [v20260809] 朋友与陌生同为灰色（#5F5E5A），其余不变
+    // 陌生/无画像 → 一律灰色（title 显示"陌生"）
     _STAGE_COLORS: {
         '追求': '#185FA5',
         '暧昧': '#993556',
         '恋爱': '#A32D2D',
         '挽回': '#854F0B',
-        '朋友': '#185FA5',
+        '朋友': '#5F5E5A',
     },
     _DEFAULT_GRAY: '#5F5E5A',
 
@@ -530,7 +531,7 @@ const Friends = {
         }
         const color = this._STAGE_COLORS[stage];
         if (color) return { stage, color };
-        // [v20260805b] 没聊天/未知：一律灰色，不显示随机底色
-        return { stage: stage || '未知', color: this._DEFAULT_GRAY };
+        // [v20260805b] 没聊天/陌生：一律灰色，不显示随机底色
+        return { stage: stage || '陌生', color: this._DEFAULT_GRAY };
     }
 };

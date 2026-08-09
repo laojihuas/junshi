@@ -177,7 +177,7 @@ const STAGE_HINTS: Record<string, string> = {
   '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃保鲜，带点自己的脾气，但别拿原则问题开玩笑。',
   '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压，对方说什么都先接住情绪。',
   '朋友': '线上朋友：自然、有态度、不刻意讨好，话题轻松但保持边界。',
-  '未知': '',
+  '陌生': '',
 };
 
 // [v8] 领域词表：知识库主题检索词
@@ -1021,7 +1021,7 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / 保持当前关系 / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
-  // [v61 里程碑] 关系推进里程碑：从"未知"一路推到"恋爱"要逐个收集的信息/动作
+  // [v61 里程碑] 关系推进里程碑：从"陌生"一路推到"恋爱"要逐个收集的信息/动作
   //   ['照片','年龄','喜好','住哪','家庭','恋爱经历','敏感面','约会']
   //   已完成项（对方已给出/已发生）由 LLM 在 extractProfile 时判定合并，构建 system 时注入进度
   milestones?: string[];
@@ -1039,7 +1039,7 @@ const FACTS_INJECT_MAX = 3;    // 每轮按相关度最多注入几条（v79.2 4
 
 // [v58 M3 目标引导] 目标 → 行动路线（战略层）
 //   目标由用户在前端设置（memory_card.goal）；这里决定每轮注入的"本轮动作"
-//   正常推进顺序：未知/朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
+//   正常推进顺序：陌生/朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
 const GOAL_HINTS: Record<string, { hint: string }> = {
   '约见面': {
     hint: '本轮向"见面"推进：先用具体由头做模糊邀约（如"那家店感觉你会喜欢，改天带你去"）→ 她接住就敲定具体时间地点（结合当前时间/位置，不现实就改约）→ 她推脱就洒脱留钩子（"那这顿先记我账上"）绝不纠缠。',
@@ -1059,7 +1059,7 @@ const GOAL_HINTS: Record<string, { hint: string }> = {
 };
 
 // [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
-const STAGE_ORDER = ['未知', '朋友', '追求', '暧昧', '恋爱'];
+const STAGE_ORDER = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
 
 // [v61 里程碑] 关系推进里程碑链（默认一路推到恋爱要逐个拿下的"小目标"）
 //   顺序有讲究：先易后难、先公开后私密、先线上后线下——
@@ -1086,7 +1086,7 @@ const MILESTONE_TIPS: Record<string, string> = {
 //   每个 stage 定义本轮该往哪带一步；带台阶可退（不硬推），优先调用知识库话术当弹药。
 //   设了目标（goal）时由 GOAL_HINTS 接管推进方向，这里不重复注入；挽回特殊路径不推进。
 const ESCALATION_HINTS: Record<string, string> = {
-  '未知': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或具体的小邀约由头（如"那家店感觉你会喜欢，改天带你去"），自然开场，别查户口。',
+  '陌生': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或具体的小邀约由头（如"那家店感觉你会喜欢，改天带你去"），自然开场，别查户口。',
   '朋友': '本轮主动推进：从朋友往暧昧探一步——用推拉或惯例话术做一次轻度试探：模糊邀约（"改天带你去xx"）、半玩笑的拉近距离、或调侃里带一点暧昧钩子。带台阶可退：她接住就顺势带，她回避就洒脱退一步，绝不纠缠。',
   '追求': '本轮主动推进：试探暧昧窗口——半玩笑的拉近距离（如"我们俩这状态算啥"）、推拉话术制造张力、或一次具体但轻松的邀约（结合时间/地点现实性）。她给正反馈就大胆往上抬一档，冷场就换话题养氛围。',
   '暧昧': '本轮主动推进：把暧昧张力往上抬——推拉+留白+一次模糊邀约（"改天带你去那家店"）、调侃里带亲密暗示。敢于调情但守住暧昧窗口，不急着捅破，留钩子让她回味。',
@@ -1133,7 +1133,7 @@ function detectTopicStagnation(query: string, history: any[]): { staleRounds: nu
 // [v82] 里程碑块不再在此内嵌：由 buildSystemContent 统一延迟到战术块之后注入
 //   （实测中段注入被战术指令压过，LLM 不执行收集；靠后注入权重更高）
 function thisEscalationBlock(stage: string): string {
-  const hint = ESCALATION_HINTS[stage || '未知'];
+  const hint = ESCALATION_HINTS[stage || '陌生'];
   if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
   let s = `\n\n【主动推进】(战略方向，严格遵守)\n`
     + `- 你是关系的主动推进方，不是等待者。每轮都要带着"往下一阶段带一步"的意图说话，但进攻藏在话术里，绝不暴露目的、绝不显得急。\n`
@@ -1352,7 +1352,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/未知"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1378,7 +1378,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     mergedMs.sort((a, b) => MILESTONE_CHAIN.indexOf(a) - MILESTONE_CHAIN.indexOf(b));
     return {
       profile: {
-        stage: typeof p.stage === 'string' && p.stage ? p.stage : '未知',
+        stage: typeof p.stage === 'string' && p.stage ? p.stage : '陌生',
         personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
         relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
         recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
@@ -1825,7 +1825,7 @@ function buildSystemContent(opts: {
   // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
   // [v58/v61] 关系目标 + 里程碑进度（战略层）：用户设了 goal 按目标使劲；
-  //   没设 goal = 默认一路推进到恋爱（未知→朋友→追求→暧昧→恋爱）；
+  //   没设 goal = 默认一路推进到恋爱（陌生→朋友→追求→暧昧→恋爱）；
   //   "保持当前关系" = 用户选择停止升级，只维持现状。
   //   [v61] 里程碑：推进时按"下一个未完成里程碑"给具体引导；已完成的展示进度。
   const goal = opts.memoryCard?.goal || '';
@@ -1853,7 +1853,7 @@ function buildSystemContent(opts: {
     if (!achieved) {
       s += `\n\n【关系目标与进度】(战略方向，严格遵守)\n`
         + `目标：${goal}\n`
-        + `当前阶段：${curStage || '未知'}\n`
+        + `当前阶段：${curStage || '陌生'}\n`
         + `本轮动作：${goalHint.hint}`;
       // 目标推进中：里程碑作为战术弹药（除非目标是挽回——挽回期不收集里程碑）
       // [v74 里程碑×目标联动] 暧昧后加重引导权重；约见面前至少完成 2 项小目标（全局门槛）
@@ -2421,7 +2421,7 @@ const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off' };
 //     中段差异：朋友期轮次密→frequency 给高压口头禅；追求期靠锚点重复拉近距离→frequency 不封顶
 //   frequency 峰值 0.85 封顶：给【话题锚点】复用留空间，且与 presence 叠加避免过度换词
 const STAGE_LLM_PARAMS: Record<string, { temperature: number; presence_penalty: number; frequency_penalty: number }> = {
-  '未知': { temperature: 0.55, presence_penalty: 0.40, frequency_penalty: 0.70 },
+  '陌生': { temperature: 0.55, presence_penalty: 0.40, frequency_penalty: 0.70 },
   '朋友': { temperature: 0.60, presence_penalty: 0.30, frequency_penalty: 0.80 },
   '追求': { temperature: 0.65, presence_penalty: 0.50, frequency_penalty: 0.75 },
   '暧昧': { temperature: 0.75, presence_penalty: 0.65, frequency_penalty: 0.85 },
