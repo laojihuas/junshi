@@ -1410,6 +1410,13 @@ async function updateMemoryCard(ctx: {
       if (!profile.anchor && prev.anchor) {
         profile.anchor = prev.anchor;
       }
+      // [v83] 年龄/地区保护：LLM 本轮没识别出时不清空已有值（防反复丢失）
+      if (!profile.age && prev.age) {
+        profile.age = prev.age;
+      }
+      if (!profile.region && prev.region) {
+        profile.region = prev.region;
+      }
       card.profile = profile;
       // [v57] 长期事实合并（去重 + 上限淘汰）
       mergeFacts(card, extracted.facts || []);
@@ -1445,7 +1452,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方所在城市或地区，如"北京"或"上海浦东"；对方没明确说过则空字符串，保留已有值不清空）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1477,6 +1484,9 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
         recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
         // [v56] 话题锚点：跨轮次连续剧感的共同梗（无则空，不覆盖已有锚点由合并逻辑处理）
         anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
+        // [v83] 年龄/地区：里程碑"年龄""住哪"激活时提取的具体值，供好友列表展示
+        age: typeof p.age === 'string' ? p.age.trim().slice(0, 10) : '',
+        region: typeof p.region === 'string' ? p.region.trim().slice(0, 20) : '',
       },
       facts,
       milestones: mergedMs,

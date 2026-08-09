@@ -63,6 +63,22 @@ const Friends = {
         container.innerHTML = this.sessions.map(s => {
             const initial = s.friend_name ? s.friend_name.charAt(0).toUpperCase() : '?';
             const timeAgo = this._timeAgo(s.updated_at || s.created_at);
+            // [v83] 年龄/地区标签：里程碑"年龄""住哪"激活时提取的具体值，显示在备注前
+            let ageHtml = '';
+            let regionHtml = '';
+            try {
+                const mc = s.memory_card
+                    ? (typeof s.memory_card === 'string' ? JSON.parse(s.memory_card) : s.memory_card)
+                    : null;
+                if (mc && mc.profile) {
+                    if (mc.profile.age) {
+                        ageHtml = `<span class="friend-tag friend-tag-age">${this._escapeHtml(mc.profile.age)}</span>`;
+                    }
+                    if (mc.profile.region) {
+                        regionHtml = `<span class="friend-tag friend-tag-region">${this._escapeHtml(mc.profile.region)}</span>`;
+                    }
+                }
+            } catch (e) {}
             const noteHtml = s.note
                 ? `<span class="friend-note" title="${this._escapeHtml(s.note)}">${this._escapeHtml(s.note)}</span>`
                 : '';
@@ -76,7 +92,7 @@ const Friends = {
                         ${initial}
                     </div>
                     <div class="friend-info">
-                        <div class="friend-name">${this._escapeHtml(s.friend_name)}${noteHtml}</div>
+                        <div class="friend-name">${this._escapeHtml(s.friend_name)}${ageHtml}${regionHtml}${noteHtml}</div>
                         <div class="friend-preview">${s.last_message || '点击开始对话'}</div>
                     </div>
                     <div class="friend-time">${timeAgo}</div>
