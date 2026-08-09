@@ -632,7 +632,8 @@ Deno.serve(async (req) => {
           { role: 'system', content: systemContent },
           ...llmHistory,
           // [v62 切换话题] 换话题时 user 消息用引导语（不把 "/换话题" 指令本身发给 LLM 当用户话）
-          { role: 'user', content: switchTopic ? '（用户按了"换话题"，请按 system 里的【切换话题】指令直接给一句新话题开场白）' : query.trim() },
+          // [v20260809 归属加固] 当前这条待回复的话 = 对方说的，显式标注【对方说】
+          { role: 'user', content: switchTopic ? '（用户按了"换话题"，请按 system 里的【切换话题】指令直接给一句新话题开场白）' : '【对方说】' + query.trim() },
         ];
         // [v77] 六阶段三参数联动：按记忆卡阶段取采样档（temperature/presence/frequency）
         usedStageLlm = resolveStageLlmParams(memoryCard?.profile?.stage);
@@ -659,7 +660,7 @@ Deno.serve(async (req) => {
           const retry = await llmChat(llmKey, llmBase, llmModel, [
             { role: 'system', content: systemContent + '\n\n注意：' + notes.join('') + ' 直接输出新的话术本体，不要解释。' },
             ...llmHistory,
-            { role: 'user', content: query.trim() },
+            { role: 'user', content: '【对方说】' + query.trim() },
           ], {
             temperature: usedStageLlm.temperature,
             maxTokens: MAIN_MAX_TOKENS,
@@ -812,13 +813,16 @@ Deno.serve(async (req) => {
 // [v6 L2] 近详远略：上下文压缩
 //   最近 RECENT_FULL 条全文（单条截断 HISTORY_ITEM_MAX）；
 //   更早的只保留对方消息（≤SUMMARY_ITEM_MAX/条，最多 6 条）拼成摘要
+// [v20260809 归属加固] recent 每条 content 加说话人前缀：
+//   【对方说】= role user（对方）；【我发的】= role assistant（用户本人/军师发出的）
+//   ——显式标注说话人，杜绝 LLM 按 API 原生 role 语义（user=人类/AI）误判归属
 // ============================================================
 function buildContextParts(history: any[]): { recent: any[]; summary: string } {
   const valid = (Array.isArray(history) ? history : [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
   const recent = valid.slice(-RECENT_FULL).map((h) => ({
     role: h.role,
-    content: truncateText(h.content, HISTORY_ITEM_MAX),
+    content: (h.role === 'user' ? '【对方说】' : '【我发的】') + truncateText(h.content, HISTORY_ITEM_MAX),
   }));
   const older = valid.slice(0, Math.max(0, valid.length - RECENT_FULL));
   const olderUsers = older.filter((h) => h.role === 'user').map((h) => truncateText(h.content, SUMMARY_ITEM_MAX));
@@ -1374,8 +1378,11 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
   const cur = JSON.stringify(card.profile || {});
   const curMilestones = JSON.stringify(Array.isArray(card.milestones) ? card.milestones : []);
   const recentDialogue = (Array.isArray(history) ? history : [])
+    // [v20260809 归属加固] 只取对方（role=user）的话喂画像提取：
+    //   把军师/用户自己发的（assistant）也喂进去 → LLM 偶尔把"自己说的话"当对方画像
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
     .slice(-6)
-    .map((h) => `${h.role === 'user' ? '对方' : '用户'}：${truncateText(String(h.content || ''), 200)}`)
+    .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
   const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
     + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
@@ -1745,6 +1752,14 @@ function buildSystemContent(opts: {
     + '你正在扮演「用户本人」用交友app跟对方聊天，你就是那个说话的人，不是顾问、不是助手；有血有肉的真人，有自己的脾气和态度，说话带点痞气，爱擦边的人。\n'
     + '你之前发出的每句话都是既定事实，后续回复必须与之衔接一致：不重复、不推翻、不自相矛盾。\n\n'
     + (opts.systemPrompt || '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。');
+
+  // [v20260809 归属加固] 显式声明对话记录的角色归属（历史每条已带【对方说】/【我发的】前缀；
+  //   此处重申规则，杜绝"把自己说过的话当成对方说的"错位）
+  s += `\n\n【对话记录角色说明】(最高优先级，防归属错位)\n`
+    + `- 对话记录里以【对方说】开头的内容，都是对方（她）说的话；以【我发的】开头的内容，都是你自己（用户本人）之前发出的。\n`
+    + `- 严格区分谁说的：分析她的意图时只看【对方说】；回顾自己说过的话时只看【我发的】。\n`
+    + `- 绝不把【我发的】内容当成她说的，也绝不把【对方说】内容当成你自己说的。\n`
+    + `- 当前待回复的这最后一句话是对方（她）说的。`;
 
   // [v56 意图优先] 先解读潜台词再回复：解决"盯字面回字面"（她哈哈→你回"笑得好"这种废话）
   // [v73 精简] 三问保留，正反例/信号段删除（敷衍/借口信号已由防守类战术卡覆盖）
