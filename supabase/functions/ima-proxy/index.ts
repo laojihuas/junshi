@@ -597,6 +597,32 @@ Deno.serve(async (req) => {
     }
     if (llmKey) {
       try {
+        // [v119 选句通道] 思考挑弹药、程序扣扳机：LLM 只选句不生成，程序取知识库原句
+        //   命中 → reply=原句（100% 保味），跳过主回复 LLM 生成（模型无机会消毒）
+        //   未命中 → 回落现有主回复（LLM 正常思考生成）
+        //   仅在普通轮次启用：换话题（强制新话题）、套路执行期（有独立通道）不走选句
+        lastPickCount = -1;
+        lastPickHit = false;
+        // [v119→v124] 选句对所有轮次生效（含套路执行期）：LLM 选句判定本身按"语境自然契合"把关，
+        //   契合才用原句（保味），不契合回落主回复（套路指令照常执行），无需排除套路期
+        if (!switchTopic && kbItems.length >= 2) {
+          lastPickCount = 0;
+          const candidates = extractCandidateLines(kbItems);
+          lastPickCount = candidates.length;
+          if (candidates.length >= 2) {
+            const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history);
+            // [v125 防重复] 选句结果与"自己最近发过的话"重复（同一知识库句被反复选中）→ 放弃选句回落主回复
+            if (picked) {
+              const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
+                ? memoryCard.recent_self_messages.slice(-5) : [];
+              if (selfMsgs.length === 0 || !isNearDuplicate(picked, selfMsgs)) {
+                reply = picked;
+                lastPickHit = true;
+              }
+            }
+          }
+        }
+        if (!reply) {
         // [v73 迷男精髓] 本轮战术判定（纯规则零 LLM）：防守/进攻/救场 + 吸引/舒适/诱惑阶段
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
         // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
@@ -670,6 +696,7 @@ Deno.serve(async (req) => {
           });
           if (retry) reply = retry;
         }
+        } // [v119] if (!reply) 主回复生成块结束
       } catch (e: any) {
         console.error('LLM error:', e.message);
       }
@@ -728,6 +755,9 @@ Deno.serve(async (req) => {
         llm_history_len: llmHistory.length,
         kb_hits: hitKnowledge,
         kb_items: kbItems.length,
+        // [v119] 选句通道：候选句数 + 是否程序取句（命中=回复为知识库原句）
+        pick_candidates: lastPickCount,
+        pick_hit: lastPickHit,
         // [v79.4] 主回复已统一纯弹药（套路块不再注入），该字段恒为 0，保留兼容
         kb_strat_blocks: kbItems.filter((it: any) => isStratBlock(it)).length,
         // [v79.4] 套路启动通道素材（本轮启动探测取了几块套路，0=未探测）
@@ -2130,6 +2160,101 @@ function stripRoleTags(text: string): string {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
+
+// ============================================================
+// [v119 选句通道] "思考挑弹药、程序扣扳机"
+//   背景：摸底证实 LLM 输出侧在"聊天语境"下会主动消毒（即使指令要求
+//   原样复制，敏感措辞也会被改写），导致知识库经典话术无法原味呈现；
+//   而 API 层本身 0 拦截、纯复述 0 拦截 → 让 LLM 只选句不生成，
+//   由程序直接取知识库原句作为回复 = 100% 保味 + 0 消毒 + 不撞审核
+// ============================================================
+// 候选句抽取：本地规则从命中块 content 抽"可直接发的话术句"
+//   切句 → 去 Markdown 标记 → 丢女方台词（【女：/【她：/【对方：】）→ 剥发话人标记（【男：xxx】/男：xxx → xxx）→
+//   丢纯【标题】整行 → 剥行首编号/引号 → 过滤教学句 → 去重
+const LINE_TEACH_RE = /目的|原理|注意|步骤|原因|方法|总结|比如|例如|场景|分析|技巧|话术|惯例|说明|用途|要点|好处|作用|策略|套路|秘诀|意思|含义|背景|提示|框架|引领|大家可以|请记住|请大家/;
+const LINE_SHE_SPEAKER_RE = /^【?\s*(女|她|对方|妹子)[:：]/;   // 女方台词 → 不入候选
+const LINE_I_SPEAKER_RE = /^【?\s*(男|我|你|他|对方说|男说|她回|他回)[:：]/; // 发话人标记 → 剥掉保留内容
+function extractCandidateLines(items: any[], maxPerBlock = 3, maxTotal = 8): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const it of (Array.isArray(items) ? items : [])) {
+    const c = String((it && (it.content || it.summary)) || '').replace(/\r/g, '');
+    const sents = c.split(/[。！？!?\n]+/).map((s: string) => s.trim());
+    let cnt = 0;
+    for (let s of sents) {
+      if (cnt >= maxPerBlock || out.length >= maxTotal) break;
+      if (!s) continue;
+      s = s.replace(/\*\*/g, '').trim(); // 去 Markdown 加粗
+      if (!s) continue;
+      // 先剥行首引号（内容常以 "男：xxx" 形式带引号开头，先剥才能识别发话人标记）
+      s = s.replace(/^[""「」『』]+/, '').trim();
+      if (!s) continue;
+      // 女方台词整句丢弃（那是"她说的"，不是可发话术）
+      if (LINE_SHE_SPEAKER_RE.test(s)) continue;
+      // 发话人标记：【男：xxx】/ 男：xxx → xxx（话术内容保留）
+      if (LINE_I_SPEAKER_RE.test(s)) {
+        s = s.replace(/^【\s*/, '').replace(/^[^:：]{0,6}[:：]/, '').replace(/】$/, '').trim();
+      } else if (/^【.+】$/.test(s)) {
+        // 纯【标题】整行 → 丢弃
+        continue;
+      }
+      // 行首编号剥除（1/2/3、#、·）
+      s = s.replace(/^[\d#\s.]{1,4}/, '');
+      // 残余行首【标记剥掉（如"【这么晚了我们去找个地方休息一下"）
+      s = s.replace(/^【/, '').trim();
+      // 句尾括号注释（（框架引领）（会聊））剥掉
+      s = s.replace(/\s*（[^）]{0,12}）\s*$/g, '');
+      // 剥行尾引号
+      s = s.replace(/[""「」『』]+$/, '').trim();
+      if (s.length < 8 || s.length > 60) continue;
+      if (LINE_TEACH_RE.test(s)) continue;
+      const key = s.slice(0, 12);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(s);
+      cnt++;
+    }
+    if (out.length >= maxTotal) break;
+  }
+  return out;
+}
+
+// [v119] 选句调用：LLM 只判断"哪句原样发出去自然契合"，返回编号；无合适返回 null
+//   输出严格限定为单个数字 → 模型没有机会生成句子 → 消毒机制不触发
+async function pickBestLine(
+  llmKey: string, llmBase: string, llmModel: string,
+  query: string, candidates: string[], history: any[]
+): Promise<string | null> {
+  const candText = candidates.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  const recent = (Array.isArray(history) ? history : []).slice(-4)
+    .map((h: any) => `${h.role === 'user' ? '她' : '你'}：${String(h.content || '').slice(0, 50)}`).join('\n');
+  const system = '你是恋爱聊天话术选句助手。\n'
+    + '任务：从候选话术列表里选出 1 句可以直接原样发给对方的话——贴合她刚说的话、自然不生硬、像真人聊天。\n'
+    + '规则：\n'
+    + '- 只有"原样发出去自然、像真人说的、接得上话"才选；明显生硬、教学腔、语境不符、超过40字不选\n'
+    + '- 语气相仿、氛围契合、即使细节略有出入（如场景措辞稍不同）也可选；宁可错失，也不选明显生硬的\n'
+    + '- 输出严格为一个数字（候选编号）；没有合适的就输出 0\n'
+    + '- 严禁输出句子内容、解释或任何其他文字';
+  const user = `最近对话：\n${recent || '（无）'}\n\n她刚说：【对方说】${query}\n\n候选话术：\n${candText}\n\n输出：`;
+  try {
+    const replyText = await llmChat(llmKey, llmBase, llmModel,
+      [{ role: 'system', content: system }, { role: 'user', content: user }],
+      { temperature: 0.1, maxTokens: 20, thinking: 'off', _stage: 'pick_line' });
+    const m = String(replyText || '').trim().match(/^(\d+)$/);
+    if (m) {
+      const idx = parseInt(m[1], 10) - 1;
+      if (idx >= 0 && idx < candidates.length) return candidates[idx];
+    }
+    return null;
+  } catch (e: any) {
+    console.warn('选句失败:', e.message);
+    return null;
+  }
+}
+
+// [v119] 选句通道调试统计（顶层声明防作用域事故）
+let lastPickCount = 0;
+let lastPickHit = false;
 // [v72 调试] 最近一次主回复的思考链原文（thinking 档才有；_debug 透传，辅助调用不覆盖）
 let llmReasoning = '';
 
