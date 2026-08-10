@@ -106,8 +106,8 @@
 //   - _debug 新增 self_msgs_len 便于验证
 //
 // [v8 语义拆解检索]（词表约束 + few-shot，替代"整句直搜"）
-//   - TOPIC_VOCAB 领域词表 91 词：主题词 4 类 41 词 + 技巧术语 50 词
-//     （由本地 4379 篇知识库全文 bigram 高频统计 + LLM 特征段落提炼合成）
+//   - TOPIC_VOCAB 领域词表 78 词 5 类（2026-08-06 校准后实测）：情绪状态 10 / 关系阶段 11 /
+//     场景需求 23 / 对方性格 7 / 惯例术语 27（由本地话术库 bigram 高频统计 + LLM 特征提炼合成）
 //   - extractSemanticKeywords：LLM 把对方的话拆解为 3-5 个 2-5 字检索词
 //     （词表词优先 + 少量贴近原话的字面词），输出 JSON 数组
 //   - 首轮检索词顺序：语义词 > bigram 字面词 > 原句垫底
@@ -214,7 +214,18 @@ const STAGE_VOCAB: Record<string, string[]> = {
 };
 
 // [v11] 根据记忆卡解析当前 M3 战术阶段词表（目标驱动）
+// [v20260810 攻略] 攻略激活时优先按"当前阶段任务"取词（攻略承载目标，goal 引导退居二线）
 function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
+  const guide = memoryCard?.guide;
+  if (guide && guide.status === 'running' && Array.isArray(guide.phases)
+    && guide.current_phase >= 0 && guide.current_phase < guide.phases.length) {
+    const phaseText = (guide.phases[guide.current_phase].mission || '')
+      + ' ' + (guide.phases[guide.current_phase].signals || []).join(' ');
+    const fromPhase = extractKeywords(phaseText)
+      .filter((k) => TOPIC_VOCAB.includes(k))
+      .slice(0, 5);
+    if (fromPhase.length >= 2) return fromPhase; // 阶段任务词 ≥2 个才接管（否则回落目标/阶段推断）
+  }
   const goal = memoryCard?.strategy?.goal || '';
   const stage = memoryCard?.profile?.stage || '';
   let phase: keyof typeof STAGE_VOCAB = 'attract';
@@ -406,6 +417,24 @@ Deno.serve(async (req) => {
     }
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = strategyClear && (rawQuery === '/换话题' || rawQuery.startsWith('/换话题 '));
+
+    // [v20260810 攻略] 自动制定/重制作战攻略（战略层）：
+    //   有目标 && 无攻略 && 对话轮数足够 → 自动生成（一次性 ~900 token，写入记忆卡由 updateMemoryCard 落库）
+    //   goal 变化 → 旧攻略作废置空，下轮自动按新目标重制
+    if (memoryCard && llmKey) {
+      try {
+        if (memoryCard.guide && memoryCard.goal && memoryCard.guide.goal !== memoryCard.goal) {
+          memoryCard.guide = null;
+        }
+        if (!memoryCard.guide && memoryCard.goal
+          && (Array.isArray(history) ? history.length : 0) >= GUIDE_MIN_ROUNDS) {
+          const guide = await extractGuide(llmKey, llmBase, llmModel, memoryCard, history);
+          if (guide) memoryCard.guide = guide;
+        }
+      } catch (e: any) {
+        console.warn('攻略生成失败:', e.message);
+      }
+    }
 
     // [v6 L2] 上下文工程：近详远略压缩
     //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
@@ -734,6 +763,8 @@ Deno.serve(async (req) => {
         limit: quotaInfo.limit,
         bonus: quotaInfo.bonus ?? null,
       } : null,
+      // [v20260810 攻略] 攻略状态透传（前端攻略面板渲染；null=无攻略）
+      guide: memoryCard?.guide || null,
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
         offline: reply === '掉线了',
@@ -814,6 +845,21 @@ Deno.serve(async (req) => {
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
         strategy_name: memoryCard?.strategy?.name || null,
         strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
+        // [v20260810 攻略] 攻略状态（验证攻略注入/推进）：status + 当前阶段 + 已耗轮次
+        guide_status: memoryCard?.guide?.status || null,
+        guide_phase: (() => {
+          const g = memoryCard?.guide;
+          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+          const ph = g.phases[g.current_phase];
+          return ph ? `${g.current_phase + 1}/${g.phases.length} ${ph.name}` : null;
+        })(),
+        guide_rounds: (() => {
+          const g = memoryCard?.guide;
+          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+          const ph = g.phases[g.current_phase];
+          return ph ? `${ph.rounds_in_phase || 0}/${ph.stay_max_rounds || 8}` : null;
+        })(),
+        guide_eval: memoryCard?.guide?.last_eval || null,
         // [v20260805] 套路总轮数上限（前端策略徽标显示进度 x/y 用；零成本，随 _debug 返回）
         strategy_max_rounds: memoryCard?.strategy?.max_rounds ?? null,
         strategy_clear: strategyClear,
@@ -1038,6 +1084,29 @@ type PulseState = {
   avg_gap_min?: number;   // 近 5 轮平均回复间隔（分钟，可选项）
 };
 
+// [v20260810 攻略] 作战攻略（战略层）：把"皮球式被动应答"升级为"带剧本的主动推进"
+//   三层结构：攻略(总目标) → 阶段(任务/信号/安全阀/预案) → 战术(复用 strategy + 知识库套路)
+//   信号驱动推进：无时间表/无 deadline——阶段全部成功信号达成才进下一阶段；
+//   stay_max_rounds 仅作安全阀（不达标超限 → 执行 exit_plan 切换打法，绝不作为推进条件）；
+//   里程碑（MILESTONE_CHAIN）已融入各阶段 signals（如"喜好已收集"），不再单独注入
+type GuidePhase = {
+  name: string;              // 阶段名（像攻略关卡，如"舒适感铺垫"）
+  mission: string;           // 本阶段任务（≤60字，注入 system 的行动方向）
+  signals: string[];         // 成功信号 3-6 条（具体可判定：里程碑型"X已收集" + 行为型"她主动分享3次"）
+  stay_max_rounds: number;   // 安全阀：不达标超限 → exit_plan（不推进）
+  rounds_in_phase: number;   // 已耗轮次（每轮回复后 +1）
+  exit_plan: string;         // 不达标预案（≤40字，如"降低推进浓度回归纯聊天3轮再试"）
+};
+type GuideState = {
+  name: string;              // 攻略名（≤20字）
+  goal: string;              // 总目标（来自 memory_card.goal）
+  status: 'running' | 'paused' | 'done' | 'aborted';
+  current_phase: number;     // 当前阶段下标
+  started_at: string;
+  phases: GuidePhase[];
+  last_eval?: string;        // 最近一次进度评估摘要（供前端面板显示）
+};
+
 // [v11] 话题主权引擎（线上"框架"量化：谁在追谁）
 type BalanceState = {
   direction: 'self_pursuing' | 'balanced' | 'user_pursuing'; // 用户需求感外露 / 均衡 / 对方主动
@@ -1071,12 +1140,19 @@ type MemoryCard = {
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
   strategy?: StrategyState | null;
+  // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
+  guide?: GuideState | null;
   updated_at?: string;
 };
 
 // [v57] facts 容量与注入上限
 const FACTS_MAX = 20;          // 长期记忆上限（超了淘汰最久没提的）
 const FACTS_INJECT_MAX = 3;    // 每轮按相关度最多注入几条（v79.2 4→3 收紧）
+
+// [v20260810 攻略] 攻略常量
+const GUIDE_MIN_ROUNDS = 5;    // 自动制定攻略的最低对话轮数（history 消息条数，双方合计；画像够用再出攻略）
+const GUIDE_MIN_PHASES = 3;    // 攻略阶段数下限
+const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
 
 // [v58 M3 目标引导] 目标 → 行动路线（战略层）
 //   目标由用户在前端设置（memory_card.goal）；这里决定每轮注入的"本轮动作"
@@ -1421,7 +1497,24 @@ async function updateMemoryCard(ctx: {
         card.milestones = extracted.milestones;
       }
     }
+    // [v20260810 攻略] LLM 低频信号评估（与画像同周期 ~5min）：判定行为型信号是否达成 → 全部达成即推进
+    if (card.guide && card.guide.status === 'running') {
+      const ev = await evalGuideSignals(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
+      if (ev) {
+        const gph = card.guide.phases[card.guide.current_phase];
+        if (gph && Array.isArray(gph.signals) && gph.signals.length > 0 && ev.done.length >= gph.signals.length) {
+          advanceGuide(card, ev.summary); // 全部信号达成 → 推进/完成
+        } else if (ev.summary) {
+          card.guide.last_eval = ev.summary; // 未达成 → 只更新评估摘要
+        }
+      }
+    }
     card.updated_at = new Date().toISOString();
+  }
+
+  // [v20260810 攻略] 攻略进度（每轮规则）：里程碑型信号判定 + 安全阀（超限执行预案不推进）
+  if (card.guide && card.guide.status === 'running') {
+    updateGuideProgress(card, ctx.history);
   }
 
   // [v7] 套路轮次回写：每轮 +1，达到上限自动终止（用户在 "/" 打断时 strategy 已被置空）
@@ -1491,6 +1584,187 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     console.warn('extractProfile failed:', e.message);
     return null;
   }
+}
+
+// ============================================================
+// [v20260810 攻略] 作战攻略：生成 / 信号评估 / 推进 / 安全阀
+//   信号驱动（无时间表）：阶段全部成功信号达成才推进；stay_max_rounds 仅安全阀
+//   里程碑已融入 signals（如"喜好已收集"）；攻略激活时 GOAL_HINTS/ESCALATION 停用
+// ============================================================
+
+// 信号是否为里程碑型（文本含里程碑项，如"喜好已收集"）
+function isMilestoneSignal(sig: string): boolean {
+  return MILESTONE_CHAIN.some((m) => sig.includes(m));
+}
+
+// 里程碑型信号是否已达成（对应里程碑在已完成集合里）
+function milestoneIn(sig: string, done: Set<string>): boolean {
+  for (const m of MILESTONE_CHAIN) {
+    if (sig.includes(m)) return done.has(m);
+  }
+  return false;
+}
+
+// 推进/完成攻略（规则版与 LLM 版共用；current_phase 越界视为完成）
+function advanceGuide(card: MemoryCard, evalSummary?: string): void {
+  const g = card.guide;
+  if (!g || !Array.isArray(g.phases) || g.phases.length === 0) { if (g) g.status = 'done'; return; }
+  if (g.current_phase + 1 >= g.phases.length) {
+    g.status = 'done';
+    g.last_eval = evalSummary || `攻略完成：${g.phases[g.current_phase].name} 全部信号达成`;
+  } else {
+    g.current_phase += 1;
+    g.last_eval = evalSummary || `已推进到「${g.phases[g.current_phase].name}」`;
+  }
+}
+
+// 每轮规则进度：里程碑型信号判定 + 安全阀（超限执行预案，不推进）
+function updateGuideProgress(card: MemoryCard, history: any[]): void {
+  const g = card.guide;
+  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return;
+  const ph = g.phases[g.current_phase];
+  if (!ph) { g.status = 'done'; return; }
+  ph.rounds_in_phase = (ph.rounds_in_phase || 0) + 1;
+  const signals = Array.isArray(ph.signals) ? ph.signals : [];
+  // 里程碑型信号规则判定：全部信号都是里程碑型 且 全部已达成 → 直接推进
+  // （含行为型信号时规则判定不了，交给 LLM 低频评估 evalGuideSignals）
+  const msDone = new Set(Array.isArray(card.milestones) ? card.milestones : []);
+  if (signals.length > 0 && signals.every((sig) => isMilestoneSignal(sig) && milestoneIn(sig, msDone))) {
+    advanceGuide(card);
+    return;
+  }
+  // 安全阀：超限未达标 → 执行预案（不推进，重置轮次开始新一轮尝试）
+  const maxRounds = ph.stay_max_rounds || 8;
+  if (ph.rounds_in_phase >= maxRounds) {
+    g.last_eval = `「${ph.name}」已耗 ${ph.rounds_in_phase}/${maxRounds} 轮未达标，按预案：${ph.exit_plan || '切换话题方向继续'}（信号不变，重新计数）`;
+    ph.rounds_in_phase = 0;
+  }
+}
+
+// [v20260810 攻略] LLM 低频评估当前阶段信号（行为型信号需要语义判断；与画像提取同周期 ~5min）
+async function evalGuideSignals(
+  llmKey: string, llmBase: string, llmModel: string,
+  card: MemoryCard, history: any[]
+): Promise<{ done: number[]; summary: string } | null> {
+  const g = card.guide;
+  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+  const ph = g.phases[g.current_phase];
+  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
+  const recent = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .slice(-6)
+    .map((h) => `对方：${truncateText(String(h.content || ''), 150)}`)
+    .join('\n');
+  const prompt = `你是恋爱攻略的进度评估助手。用户正在按攻略推进与女生的聊天。\n`
+    + `当前攻略阶段「${ph.name}」，任务：${ph.mission}\n`
+    + `成功信号（编号从 1 开始，逐条判定）：\n`
+    + ph.signals.map((sig, i) => `${i + 1}. ${sig}`).join('\n')
+    + `\n最近对方说的话：\n${recent || '（无）'}\n`
+    + `要求：只根据"对方已经做了什么/给出了什么"判定信号是否达成（已收集里程碑类信息、主动分享、接住调侃、答应邀约等），拿不准的不算达成；只输出 JSON：{"done":[已达成信号编号数组，无则[]],"summary":"一句话进度评估，≤40字"}，不要任何其他文字。`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 200, _stage: 'guide_eval',
+    });
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const p = JSON.parse(content.slice(start, end + 1));
+    const done = Array.isArray(p.done)
+      ? p.done.map((n: any) => parseInt(n, 10)).filter((n: number) => n >= 1 && n <= ph.signals.length)
+      : [];
+    return {
+      done,
+      summary: typeof p.summary === 'string' ? p.summary.slice(0, 40) : '',
+    };
+  } catch (e: any) {
+    console.warn('evalGuideSignals failed:', e.message);
+    return null;
+  }
+}
+
+// [v20260810 攻略] 制定作战攻略（LLM 一次性生成，信号驱动无时间表）
+//   输入：画像/目标/里程碑/最近对话 → 输出 GuideState（3-5 阶段，每阶段 mission/signals/安全阀/预案）
+async function extractGuide(
+  llmKey: string, llmBase: string, llmModel: string,
+  card: MemoryCard, history: any[]
+): Promise<GuideState | null> {
+  const p = card.profile || {};
+  const msDone = Array.isArray(card.milestones) ? card.milestones : [];
+  const msPending = MILESTONE_CHAIN.filter((m) => !msDone.includes(m));
+  const recent = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .slice(-8)
+    .map((h) => `对方：${truncateText(String(h.content || ''), 120)}`)
+    .join('\n');
+  const prompt = `你是恋爱攻略策划师。为「用户本人」制定一份和当前这位女生聊天的作战攻略（像游戏攻略：有明确目的地和路线，军师主动推进，不靠对方踢一下动一下）。\n`
+    + `当前情况：\n`
+    + `- 关系阶段：${p.stage || '陌生'}\n`
+    + `- 对方性格：${p.personality || '未知'}\n`
+    + `- 关系背景：${p.relationship_note || '无'}\n`
+    + `- 用户设定的总目标：${card.goal || '推进恋爱'}\n`
+    + `- 已收集里程碑：${msDone.join('/') || '无'}\n`
+    + `- 待收集里程碑：${msPending.join('/') || '无'}\n`
+    + `- 最近对方说的话：${recent || '（无）'}\n`
+    + `要求（严格遵守）：\n`
+    + `1. 规划 ${GUIDE_MIN_PHASES}~${GUIDE_MAX_PHASES} 个阶段，从当前状态一步步通往总目标；阶段名像攻略关卡（如"破冰建立连接"→"舒适感铺垫"→"暧昧试探"→"邀约落地"）。\n`
+    + `2. 每个阶段给出：mission（本阶段任务，≤60字，可执行的动作方向）、signals（成功信号 3~6 条，必须具体可判定：优先用里程碑型硬信号"X已收集"，其次用对方行为信号如"她主动分享3次""她接住调侃并回撩"；全部达成才进下一阶段）、stay_max_rounds（本阶段最多停留轮数 3~10，超了还没达标就按预案换打法，不硬耗不纠缠）、exit_plan（不达标预案，≤40字，如"降低推进浓度回归纯聊天3轮再试"）。\n`
+    + `3. 把「待收集里程碑」按推进顺序自然分配到各阶段 signals 里（如阶段2信号含"住哪已收集"），已收集的里程碑不用再要求。\n`
+    + `4. 信号驱动：禁止写时间/天数要求，只写可观察的达成信号；阶段之间必须有递进，最后一阶段信号全达成 = 攻略完成。\n`
+    + `5. 若总目标是挽回/修复：第一阶段必须是"稳情绪重建信任"，禁止调侃/打压类信号，且各阶段节奏都更温和。\n`
+    + `只输出 JSON：{"name":"攻略名(≤20字)","goal":"总目标(≤30字)","phases":[{"name":"阶段名","mission":"...","signals":["...","..."],"stay_max_rounds":n,"exit_plan":"..."}]}，不要任何其他文字。`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.4, maxTokens: 900, _stage: 'extract_guide',
+    });
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    const g = JSON.parse(content.slice(start, end + 1));
+    const name = typeof g.name === 'string' ? g.name.trim().slice(0, 20) : '恋爱推进攻略';
+    const phases = (Array.isArray(g.phases) ? g.phases : [])
+      .filter((ph: any) => ph && typeof ph === 'object' && typeof ph.name === 'string')
+      .slice(0, GUIDE_MAX_PHASES)
+      .map((ph: any) => ({
+        name: String(ph.name).trim().slice(0, 20),
+        mission: String(ph.mission || '').trim().slice(0, 60),
+        signals: (Array.isArray(ph.signals) ? ph.signals : [])
+          .map((s: any) => (typeof s === 'string' ? s.trim().slice(0, 30) : ''))
+          .filter((s: string) => s.length > 0)
+          .slice(0, 6),
+        stay_max_rounds: Math.max(3, Math.min(10, parseInt(ph.stay_max_rounds, 10) || 6)),
+        rounds_in_phase: 0,
+        exit_plan: String(ph.exit_plan || '降低推进浓度，回归轻松聊天几轮再试').trim().slice(0, 40),
+      }));
+    if (phases.length < GUIDE_MIN_PHASES) return null; // 阶段数不足 = 生成失败
+    return {
+      name,
+      goal: String(card.goal || g.goal || '推进恋爱').slice(0, 30),
+      status: 'running',
+      current_phase: 0,
+      started_at: new Date().toISOString(),
+      phases,
+      last_eval: `攻略已制定：${phases.length} 个阶段，当前「${phases[0].name}」`,
+    };
+  } catch (e: any) {
+    console.warn('extractGuide failed:', e.message);
+    return null;
+  }
+}
+
+// [v20260810 攻略] 当前攻略注入块（buildSystemContent 用）：替代 GOAL_HINTS/ESCALATION
+function buildGuideBlock(guide: GuideState, ph: GuidePhase, msDone: string[]): string {
+  const doneSet = new Set(msDone);
+  const sigList = (ph.signals || []).map((sig) => {
+    const hit = isMilestoneSignal(sig) ? milestoneIn(sig, doneSet) : false;
+    return `  ${hit ? '✓' : '○'} ${sig}`;
+  }).join('\n');
+  const maxRounds = ph.stay_max_rounds || 8;
+  return `\n\n【当前攻略】(战略层，最高优先级，替代目标引导)\n`
+    + `- 你在执行攻略「${guide.name}」，总目标：${guide.goal}。你不是被动的应声虫——每一轮都带着攻略目的在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急。\n`
+    + `- 当前阶段 ${guide.current_phase + 1}/${guide.phases.length}「${ph.name}」：${ph.mission}\n`
+    + `- 本阶段成功信号（全部达成才进入下一阶段）：\n${sigList}\n`
+    + `- 已耗 ${ph.rounds_in_phase || 0}/${maxRounds} 轮（超限未达成将按预案切换打法，不硬耗不纠缠）。\n`
+    + `- 主动引导：按阶段任务主动推进——该抛钩子抛钩子、该收集信息自然收集、该试探就试探，不要只被动接话；她接住信号就顺势推进一档，她冷淡/回避就执行预案（${ph.exit_plan || '降速换话题养氛围'}）再找机会，绝不硬推、绝不表白、绝不逼问。`;
 }
 
 // [v57] 合并新事实到长期记忆：去重(互含视为同条并刷新提及时间) + 上限淘汰(按提及新旧)
@@ -1954,7 +2228,16 @@ function buildSystemContent(opts: {
   // [v82-fix] curIdx 提到分支外：默认推进分支（无 goal）也使用，避免 ReferenceError
   const curIdx = STAGE_ORDER.indexOf(curStage);
 
-  if (goal === '保持当前关系') {
+  // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块：GOAL_HINTS/ESCALATION/里程碑块全部停用
+  //   （攻略的阶段任务+信号替代目标引导；里程碑已融入攻略 signals，不再单独注入）
+  const guide = opts.memoryCard?.guide || null;
+  const guideRunning = !!guide && guide.status === 'running'
+    && Array.isArray(guide.phases) && guide.phases.length > 0
+    && guide.current_phase >= 0 && guide.current_phase < guide.phases.length;
+
+  if (guideRunning) {
+    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], milestones);
+  } else if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令（GOAL_HINTS 已含 hint）
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可，她主动给信息自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
   } else if (goalHint) {

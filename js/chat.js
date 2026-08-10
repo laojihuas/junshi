@@ -33,8 +33,9 @@ const Chat = {
         // [v20260805] 记忆：缓存 memory_card（记忆按钮弹层用；打开时已有，零额外请求）
         this.memoryCard = session.memory_card || null;
         // [v58] 阶段升级提示基线：记录打开时的 stage
+        let mc = null;
         try {
-            const mc = this.memoryCard
+            mc = this.memoryCard
                 ? (typeof this.memoryCard === 'string' ? JSON.parse(this.memoryCard) : this.memoryCard)
                 : null;
             this._prevStage = (mc && mc.profile && mc.profile.stage) || '';
@@ -43,6 +44,8 @@ const Chat = {
         }
         // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
         this._updateStrategyBadge(session.memory_card || null);
+        // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
+        this._updateGuidePanel((mc && mc.guide) || null);
 
         // [多窗口会话] 记录当前窗口正在对话的好友，
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
@@ -733,6 +736,14 @@ const Chat = {
                 }
                 this._prevStage = ns || this._prevStage;
             }
+            // [v20260810 攻略] 攻略状态（后端透传 guide 对象）→ 渲染面板 + 同步缓存
+            if (data && data.guide) {
+                const mcObj = this.memoryCard
+                    ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
+                    : null;
+                if (mcObj) { mcObj.guide = data.guide; this.memoryCard = mcObj; }
+            }
+            this._updateGuidePanel((data && data.guide) || null);
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
@@ -783,6 +794,118 @@ const Chat = {
             console.error('[军师] 策略徽标渲染失败:', e);
             el.classList.remove('show');
             el.innerHTML = '';
+        }
+    },
+
+    // [v20260810 攻略] 攻略面板：聊天页顶部显示当前作战攻略（目标/阶段/信号/进度/控制按钮）
+    // 输入：guide 对象（后端响应 data.guide，形态 {name,goal,status,current_phase,phases,last_eval}）
+    //   或 memory_card 对象（打开会话时，取 .guide 字段，兼容字符串）
+    _updateGuidePanel(src) {
+        const el = document.getElementById('chat-guide');
+        if (!el) return;
+        let guide = null;
+        if (src && src.guide) {
+            guide = src.guide;
+            if (typeof guide === 'string') { try { guide = JSON.parse(guide); } catch (e) { guide = null; } }
+        } else if (src && src.phases && src.status) {
+            guide = src;
+        }
+        if (!guide || !Array.isArray(guide.phases) || guide.phases.length === 0) {
+            el.classList.remove('show');
+            el.innerHTML = '';
+            return;
+        }
+        // 状态/阶段变化 toast（仅用户可见，纯前端 UI）
+        const st = guide.status;
+        const phIdx = guide.current_phase;
+        if (this._prevGuideStatus && this._prevGuideStatus !== 'running' && st === 'running') {
+            Utils.toast('攻略已启动：「' + guide.name + '」');
+        } else if (this._prevGuideStatus === 'running' && st === 'done') {
+            Utils.toast('攻略完成！🎉');
+        } else if (this._prevGuideStatus === 'running' && st === 'aborted') {
+            Utils.toast('攻略已终止');
+        } else if (st === 'running' && this._prevGuidePhase != null && phIdx !== this._prevGuidePhase) {
+            Utils.toast('攻略推进：进入阶段「' + guide.phases[phIdx].name + '」');
+        }
+        this._prevGuideStatus = st;
+        this._prevGuidePhase = phIdx;
+        // 里程碑已完成集合（判断"X已收集"型信号是否达成）
+        const mcObj = this.memoryCard
+            ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
+            : null;
+        const msDone = new Set((mcObj && mcObj.milestones) || []);
+        const MS_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
+        const isMsSig = (s) => MS_CHAIN.some(m => s.includes(m));
+        const msHit = (s) => { for (const m of MS_CHAIN) if (s.includes(m)) return msDone.has(m); return false; };
+        const ph = guide.phases[phIdx] || guide.phases[0];
+        const sigHtml = (ph.signals || []).map(s => {
+            const hit = isMsSig(s) ? msHit(s) : false;
+            return '<div class="guide-sig' + (hit ? ' done' : '') + '">' + (hit ? '✓' : '○') + ' ' + this._escapeHtml(s) + '</div>';
+        }).join('');
+        const rounds = (ph.rounds_in_phase || 0) + '/' + (ph.stay_max_rounds || 8);
+        const ST = { running: '运行中', paused: '已暂停', done: '已完成', aborted: '已终止' };
+        const btnHtml = guide.status === 'running'
+            ? '<button class="guide-btn" data-act="pause">暂停</button><button class="guide-btn" data-act="abort">终止</button><button class="guide-btn" data-act="reset">重制</button>'
+            : (guide.status === 'paused'
+                ? '<button class="guide-btn primary" data-act="resume">继续</button><button class="guide-btn" data-act="abort">终止</button><button class="guide-btn" data-act="reset">重制</button>'
+                : '<button class="guide-btn primary" data-act="reset">重新制定</button>');
+        el.innerHTML =
+            '<div class="guide-head"><span class="guide-name">攻略「' + this._escapeHtml(guide.name) + '」</span>'
+            + '<span class="guide-status ' + guide.status + '">' + (ST[guide.status] || guide.status) + '</span></div>'
+            + '<div class="guide-goal">目标：' + this._escapeHtml(guide.goal) + '</div>'
+            + '<div class="guide-track">' + guide.phases.map((p, i) =>
+                '<div class="guide-dot' + (i < phIdx ? ' done' : (i === phIdx ? ' cur' : '')) + '"></div>'
+                + (i < guide.phases.length - 1 ? '<div class="guide-line' + (i < phIdx ? ' done' : '') + '"></div>' : '')
+              ).join('') + '</div>'
+            + '<div class="guide-phase"><span class="guide-phase-name">' + this._escapeHtml(ph.name) + '</span>'
+            + '<span class="guide-rounds">' + rounds + ' 轮</span></div>'
+            + '<div class="guide-mission">' + this._escapeHtml(ph.mission) + '</div>'
+            + '<div class="guide-sigs">' + sigHtml + '</div>'
+            + (guide.last_eval ? '<div class="guide-eval">' + this._escapeHtml(guide.last_eval) + '</div>' : '')
+            + '<div class="guide-actions">' + btnHtml + '</div>';
+        el.classList.add('show');
+        // 绑定控制按钮（暂停/继续/终止/重制）
+        el.querySelectorAll('.guide-btn').forEach(b => {
+            b.onclick = () => this._guideAction(b.dataset.act);
+        });
+    },
+
+    // [v20260810 攻略] 控制按钮：暂停/继续/终止/重制
+    //   直接改 chat_sessions.memory_card.guide（零后端调用；重制=清空，后端下轮自动重新制定）
+    async _guideAction(action) {
+        if (!this.currentSessionId) {
+            Utils.toast('请先进入一个好友会话');
+            return;
+        }
+        try {
+            const sb = getSupabaseClient();
+            const { data } = await sb.from('chat_sessions').select('memory_card').eq('id', this.currentSessionId).single();
+            if (!data) { Utils.toast('会话不存在'); return; }
+            let mc = data.memory_card
+                ? (typeof data.memory_card === 'string' ? JSON.parse(data.memory_card) : data.memory_card)
+                : {};
+            if (!mc || typeof mc !== 'object') mc = {};
+            if (action === 'reset') {
+                if (mc.guide) delete mc.guide;
+                this._prevGuideStatus = null;
+                this._prevGuidePhase = null;
+            } else if (mc.guide) {
+                if (action === 'pause') mc.guide.status = 'paused';
+                else if (action === 'resume') mc.guide.status = 'running';
+                else if (action === 'abort') mc.guide.status = 'aborted';
+            }
+            const { error } = await sb.from('chat_sessions').update({ memory_card: JSON.stringify(mc) }).eq('id', this.currentSessionId);
+            if (error) {
+                console.error('[军师] 攻略控制失败:', error);
+                Utils.toast('操作失败，请重试');
+                return;
+            }
+            this.memoryCard = mc;
+            this._updateGuidePanel(mc);
+            Utils.toast({ pause: '攻略已暂停', resume: '攻略已继续', abort: '攻略已终止', reset: '攻略已清除，下轮对话自动重新制定' }[action] || 'ok');
+        } catch (e) {
+            console.error('[军师] 攻略控制异常:', e);
+            Utils.toast('网络错误，请稍后重试');
         }
     },
 

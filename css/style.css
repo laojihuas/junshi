@@ -675,6 +675,147 @@ textarea.input {
     color: rgba(180, 200, 255, 0.75);
 }
 
+/* ============================================================
+   [v20260810 攻略] 攻略面板：聊天页顶部常驻卡片
+   暗色主题：深底卡片 + 亮色进度条 + 信号勾选清单 + 控制按钮
+   ============================================================ */
+.chat-guide {
+    display: none;
+    margin: 8px 10px 0;
+    padding: 10px 12px;
+    background: rgba(23, 24, 28, 0.92);
+    border: 0.5px solid rgba(124, 252, 154, 0.25);
+    border-radius: 12px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.chat-guide.show {
+    display: block;
+}
+.guide-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.guide-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #7CFC9A;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.guide-status {
+    flex: none;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 20px;
+    background: rgba(124, 252, 154, 0.12);
+    color: #7CFC9A;
+}
+.guide-status.paused { background: rgba(240, 173, 78, 0.14); color: #FAC775; }
+.guide-status.done   { background: rgba(124, 252, 154, 0.16); color: #7CFC9A; }
+.guide-status.aborted{ background: rgba(240, 92, 92, 0.14); color: #F09595; }
+.guide-goal {
+    margin-top: 4px;
+    color: rgba(255, 255, 255, 0.75);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.guide-track {
+    display: flex;
+    align-items: center;
+    margin: 8px 0 6px;
+    padding: 0 2px;
+}
+.guide-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.18);
+    flex: none;
+}
+.guide-dot.cur {
+    background: #7CFC9A;
+    box-shadow: 0 0 0 3px rgba(124, 252, 154, 0.18);
+}
+.guide-dot.done { background: #1D9E75; }
+.guide-line {
+    flex: 1;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.12);
+    margin: 0 4px;
+    border-radius: 1px;
+}
+.guide-line.done { background: #1D9E75; }
+.guide-phase {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.guide-phase-name {
+    font-weight: 500;
+    color: #fff;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.guide-rounds {
+    flex: none;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.55);
+}
+.guide-mission {
+    margin-top: 3px;
+    color: rgba(255, 255, 255, 0.72);
+}
+.guide-sigs {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.guide-sig {
+    color: rgba(255, 255, 255, 0.6);
+    padding-left: 2px;
+}
+.guide-sig.done {
+    color: #7CFC9A;
+}
+.guide-eval {
+    margin-top: 6px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 11px;
+}
+.guide-actions {
+    margin-top: 8px;
+    display: flex;
+    gap: 6px;
+}
+.guide-btn {
+    flex: 1;
+    padding: 4px 0;
+    font-size: 12px;
+    text-align: center;
+    border-radius: 6px;
+    border: 0.5px solid rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.75);
+    cursor: pointer;
+}
+.guide-btn.primary {
+    background: rgba(124, 252, 154, 0.14);
+    border-color: rgba(124, 252, 154, 0.35);
+    color: #7CFC9A;
+}
+.guide-btn:active { opacity: 0.7; }
+
 /* [v20260805] 聊天头部右上角"记忆"按钮 */
 .chat-memory-btn {
     position: absolute;
