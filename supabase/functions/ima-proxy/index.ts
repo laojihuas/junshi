@@ -615,13 +615,16 @@ Deno.serve(async (req) => {
             //   命中（完全重复/高度相似）→ 放弃选句回落主回复，主回复自带 v9 防重复重生成
             const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history);
             // [v125 防重复] 选句结果与"自己最近发过的话"重复（同一知识库句被反复选中）→ 放弃选句回落主回复
-            // [v128] 窗口 5→10 条：recent_self_messages 存 12 条，拉长检查窗口降低"隔几轮又选同一句"概率
+            // [v128] 窗口 10→12 条：与记忆卡 recent_self_messages 上限一致（取全量），
+            //   最大程度降低"隔几轮又选同一句"概率
             if (picked) {
+              pickAttemptTotal++; // [v128b] 命中率统计：LLM 选出了句子的次数
               const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
-                ? memoryCard.recent_self_messages.slice(-10) : [];
+                ? memoryCard.recent_self_messages.slice(-12) : [];
               if (selfMsgs.length === 0 || !isNearDuplicate(picked, selfMsgs)) {
                 reply = picked;
                 lastPickHit = true;
+                pickHitTotal++; // [v128b] 命中率统计：正式采用（通过防重复）的次数
               }
             }
           }
@@ -736,6 +739,11 @@ Deno.serve(async (req) => {
     }
     mark('memory');
 
+    // [v128b] 选句观测日志：每轮记录选句结果，跑几天用 grep "[pick]" 统计命中率
+    if (lastPickCount >= 0) {
+      console.info(`[pick] candidates=${lastPickCount} hit=${lastPickHit} total=${pickAttemptTotal} hits=${pickHitTotal} reply_from=${reply === '掉线了' ? 'offline' : (lastPickHit ? 'pick' : 'llm')}`);
+    }
+
     return new Response(JSON.stringify({
       reply,
       from_knowledge_base: hitKnowledge,
@@ -757,6 +765,9 @@ Deno.serve(async (req) => {
         // [v119] 选句通道：候选句数 + 是否程序取句（命中=回复为知识库原句）
         pick_candidates: lastPickCount,
         pick_hit: lastPickHit,
+        // [v128b] 选句命中率累计（进程内累加，趋势观测用）
+        pick_total: pickAttemptTotal,
+        pick_hit_total: pickHitTotal,
         // [v79.4] 主回复已统一纯弹药（套路块不再注入），该字段恒为 0，保留兼容
         kb_strat_blocks: kbItems.filter((it: any) => isStratBlock(it)).length,
         // [v79.4] 套路启动通道素材（本轮启动探测取了几块套路，0=未探测）
@@ -2361,6 +2372,11 @@ async function pickBestLine(
 // [v119] 选句通道调试统计（顶层声明防作用域事故）
 let lastPickCount = 0;
 let lastPickHit = false;
+// [v128b] 选句命中率累计（进程内累加，跨实例不完全精确，够看趋势）：
+//   pickAttemptTotal = LLM 选出了句子的次数；pickHitTotal = 正式采用（过防重复）的次数
+//   命中率 = pickHitTotal / pickAttemptTotal；跑几天看数据决定是否扩候选池/调温度
+let pickAttemptTotal = 0;
+let pickHitTotal = 0;
 // [v72 调试] 最近一次主回复的思考链原文（thinking 档才有；_debug 透传，辅助调用不覆盖）
 let llmReasoning = '';
 
