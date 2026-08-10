@@ -641,6 +641,14 @@ const Chat = {
                 await Friends.load();
                 App.navigate('friends');
             }
+        } else if (reason === 'device_frozen') {
+            // [v20260810] 管理员封禁设备（游客身份）：提示后退出登录
+            Utils.toast(message || '设备已被封禁，请联系管理员');
+            if (!Auth.isAccount) {
+                await Auth.logout();
+                await Friends.load();
+                App.navigate('friends');
+            }
         } else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') {
             Utils.toast('使用太频繁，请稍后再试');
         } else if (reason === 'device_not_found') {

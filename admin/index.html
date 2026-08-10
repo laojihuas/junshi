@@ -512,11 +512,14 @@
                 } else {
                     badge = badge + ' <span class="badge badge-free" style="background:#ECEFF1;color:#546E7A;">游客设备</span>';
                 }
-                // [v20260810] 操作列：注册账号可冻结/解冻/删除；游客设备暂只读（管制功能后续扩展）
+                // [v20260810] 操作列：注册账号与游客设备均可冻结/解冻/删除
+                //   账号 → uid + type=account；游客设备 → device_id + type=device
                 let ops = '<span style="color:var(--muted);font-size:11px;">-</span>';
-                if (u.is_account && u.uid) {
-                    ops = `<button class="btn btn-outline btn-op" data-uid="${u.uid}" data-action="${u.frozen ? 'unfreeze' : 'freeze'}" data-name="${u.device_id || ''}">${u.frozen ? '解冻' : '冻结'}</button> ` +
-                          `<button class="btn btn-outline btn-op btn-del" data-uid="${u.uid}" data-action="delete" data-name="${u.device_id || ''}">删除</button>`;
+                const tgt = u.is_account ? (u.uid || '') : (u.device_id || '');
+                const typ = u.is_account ? 'account' : 'device';
+                if (tgt) {
+                    ops = `<button class="btn btn-outline btn-op" data-tgt="${tgt}" data-type="${typ}" data-action="${u.frozen ? 'unfreeze' : 'freeze'}" data-name="${u.device_id || ''}">${u.frozen ? '解冻' : '冻结'}</button> ` +
+                          `<button class="btn btn-outline btn-op btn-del" data-tgt="${tgt}" data-type="${typ}" data-action="delete" data-name="${u.device_id || ''}">删除</button>`;
                 }
                 return `<tr>
                     <td class="code-display" title="${u.device_id}">${(u.device_id || '').slice(0, 12)}...</td>
@@ -529,26 +532,28 @@
                     <td>${ops}</td>
                 </tr>`;
             }).join('');
-            // [v20260810] 绑定操作按钮（冻结/解冻/删除）
+            // [v20260810] 绑定操作按钮（冻结/解冻/删除；account 或 device）
             document.querySelectorAll('#users-tbody .btn-op').forEach(btn => {
                 btn.addEventListener('click', async () => {
-                    const uid = btn.dataset.uid;
+                    const tgt = btn.dataset.tgt;
+                    const typ = btn.dataset.type || 'account';
                     const action = btn.dataset.action;
                     const name = btn.dataset.name || '';
-                    await userAction(uid, action, name);
+                    await userAction(tgt, action, name, typ);
                 });
             });
         }
 
-        // [v20260810] 用户管制：冻结 / 解冻 / 删除（调 admin_user_action RPC）
-        async function userAction(uid, action, name) {
-            if (!uid) return;
+        // [v20260810] 用户/设备管制：冻结 / 解冻 / 删除（调 admin_user_action RPC）
+        async function userAction(tgt, action, name, type) {
+            if (!tgt) return;
             const label = action === 'delete' ? '删除' : (action === 'freeze' ? '冻结' : '解冻');
+            const kind = type === 'device' ? '设备' : '账号';
             const msg = action === 'delete'
-                ? `确定删除账号「${name}」？\n将同时清除其所有聊天记录、会话、配额与资料，不可恢复！`
-                : (action === 'freeze' ? `确定冻结账号「${name}」？冻结后无法继续使用（配额拦截）` : `确定解冻账号「${name}」？`);
+                ? `确定${label}${kind}「${name}」？\n将同时清除其所有聊天记录、会话、配额与资料，不可恢复！`
+                : (action === 'freeze' ? `确定${label}${kind}「${name}」？${label}后无法继续使用（配额拦截）` : `确定${label}${kind}「${name}」？`);
             if (!confirm(msg)) return;
-            const { data, error } = await sb.rpc('admin_user_action', { p_user_id: uid, p_action: action });
+            const { data, error } = await sb.rpc('admin_user_action', { p_target: tgt, p_action: action, p_type: type });
             if (error) { toast('操作失败：' + error.message); return; }
             if (!data || data.success === false) { toast('操作失败：' + ((data && data.message) || '未知错误')); return; }
             toast(data.message || '操作成功');

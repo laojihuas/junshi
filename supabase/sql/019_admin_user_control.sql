@@ -379,7 +379,7 @@ BEGIN
         LEFT JOIN public.daily_quota dq ON dq.identity_type = 'account' AND dq.identity_key = a.id::text AND dq.day = v_day
         UNION ALL
         SELECT NULL::uuid AS uid, d.device_id, d.created_at, d.is_vip, d.vip_expires_at, d.invite_bonus,
-               false AS frozen,
+               coalesce(d.frozen, false) AS frozen,
                coalesce(dq.used_count, 0) AS today_calls,
                (SELECT coalesce(sum(used_count), 0) FROM public.daily_quota x
                 WHERE x.identity_type = 'device' AND x.identity_key = d.device_id) AS total_calls,
