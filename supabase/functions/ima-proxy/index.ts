@@ -615,9 +615,10 @@ Deno.serve(async (req) => {
             //   命中（完全重复/高度相似）→ 放弃选句回落主回复，主回复自带 v9 防重复重生成
             const picked = await pickBestLine(llmKey, llmBase, llmModel, query, candidates, history);
             // [v125 防重复] 选句结果与"自己最近发过的话"重复（同一知识库句被反复选中）→ 放弃选句回落主回复
+            // [v128] 窗口 5→10 条：recent_self_messages 存 12 条，拉长检查窗口降低"隔几轮又选同一句"概率
             if (picked) {
               const selfMsgs = (memoryCard && Array.isArray(memoryCard.recent_self_messages))
-                ? memoryCard.recent_self_messages.slice(-5) : [];
+                ? memoryCard.recent_self_messages.slice(-10) : [];
               if (selfMsgs.length === 0 || !isNearDuplicate(picked, selfMsgs)) {
                 reply = picked;
                 lastPickHit = true;
@@ -2344,7 +2345,7 @@ async function pickBestLine(
   try {
     const replyText = await llmChat(llmKey, llmBase, llmModel,
       [{ role: 'system', content: system }, { role: 'user', content: user }],
-      { temperature: 0.1, maxTokens: 20, thinking: 'off', _stage: 'pick_line' });
+      { temperature: 0.2, maxTokens: 20, thinking: 'off', _stage: 'pick_line' });
     const m = String(replyText || '').trim().match(/^(\d+)$/);
     if (m) {
       const idx = parseInt(m[1], 10) - 1;
