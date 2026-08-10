@@ -61,13 +61,13 @@
 //     挑 top4（FACTS_INJECT_MAX），不全量塞——像人按话题想起相关记忆
 //   - _debug 新增 facts_len
 //
-// [v58 M3 目标引导]（2026-08-05，战略层：目标→路线→主动推进）
-//   - memory_card.goal（用户前端设置）：约见面/推进恋爱/挽回修复/保持暧昧
-//   - GOAL_HINTS 目标→行动映射；buildSystemContent 注入【关系目标与进度】
-//     （当前阶段+本轮动作），目标达成(按 STAGE_ORDER 达到目标 stage)则停止注入
+// [v58→v141 战略层演进]（目标引导已删除，攻略接管）
+//   - [v141] GOAL_HINTS 目标引导与 ESCALATION 默认推进已删除（从未见效且与攻略重复，浪费 token）
+//   - memory_card.goal 仅剩两个语义：'保持当前关系'（不升级）或 空（默认推进，前端只剩这两个选项）
+//   - 战略驱动唯一来源 = 攻略 guide（自动生成，见 extractGuide；聊满 GUIDE_MIN_ROUNDS 且非"保持当前关系"）
 //   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 追求→暧昧→恋爱
 //     最多升一级；冷淡/回避可降级；拿不准保持
-//   - 战略层(目标引导) > 战术层(套路) > 弹药层(锚点/幽默/IOI) 三层叠加
+//   - 战略层(攻略) > 战术层(套路) > 弹药层(锚点/幽默/IOI) 三层叠加
 //
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
@@ -426,7 +426,7 @@ Deno.serve(async (req) => {
         if (memoryCard.guide && memoryCard.goal && memoryCard.guide.goal !== memoryCard.goal) {
           memoryCard.guide = null;
         }
-        if (!memoryCard.guide && memoryCard.goal
+        if (!memoryCard.guide && memoryCard.goal !== '保持当前关系'
           && (Array.isArray(history) ? history.length : 0) >= GUIDE_MIN_ROUNDS) {
           const guide = await extractGuide(llmKey, llmBase, llmModel, memoryCard, history);
           if (guide) memoryCard.guide = guide;
@@ -1154,27 +1154,6 @@ const GUIDE_MIN_ROUNDS = 5;    // 自动制定攻略的最低对话轮数（hist
 const GUIDE_MIN_PHASES = 3;    // 攻略阶段数下限
 const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
 
-// [v58 M3 目标引导] 目标 → 行动路线（战略层）
-//   目标由用户在前端设置（memory_card.goal）；这里决定每轮注入的"本轮动作"
-//   正常推进顺序：陌生/朋友 → 追求(Attract) → 暧昧(Comfort前) → 恋爱(确立)
-const GOAL_HINTS: Record<string, { hint: string }> = {
-  '约见面': {
-    hint: '本轮向"见面"推进：先用具体由头做模糊邀约（如"那家店感觉你会喜欢，改天带你去"）→ 她接住就敲定具体时间地点（结合当前时间/位置，不现实就改约）→ 她推脱就洒脱留钩子（"那这顿先记我账上"）绝不纠缠。',
-  },
-  '推进恋爱': {
-    hint: '本轮向"恋爱"推进：先确认舒适感够不够（聊三观/家庭/日常等深度话题的频率）→ 够就试探暧昧窗口（如"我们俩这状态算啥"的半玩笑试探）→ 不够就补舒适感话题+推进见面。她给兴趣信号（主动追问/发照片/吃醋）时，必须顺势推进一档。',
-  },
-  '挽回修复': {
-    hint: '挽回路径：本轮先稳情绪、重建信任——不追问不施压、稳定低压力的输出、她说啥先接住情绪；对方明显松动后再逐步重新制造吸引，此路径禁用调侃与反击。',
-  },
-  '保持暧昧': {
-    hint: '本轮维持暧昧张力：推拉+留白+神秘感，不急着捅破窗户纸；守住暧昧窗口，适度抛模糊邀约试探但不逼问。',
-  },
-  '保持当前关系': {
-    hint: '用户选择保持当前关系阶段，暂停升级推进：本轮正常聊天、稳住现有关系温度即可，不主动试探升级、不收集新的里程碑信息；她主动给信号就自然接住，但不主动发起推进；情绪价值照给，绝不冷场。',
-  },
-};
-
 // [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
 const STAGE_ORDER = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
 
@@ -1197,18 +1176,6 @@ const MILESTONE_TIPS: Record<string, string> = {
   '恋爱经历': '半开玩笑地聊情感史（"像你这样的应该不缺人追吧"），引导她讲上一段/恋爱观；她愿意说 = 信任升级，接住情绪别评判。',
   '敏感面': '引导她说出脆弱/真实的一面（烦恼、压力、怕什么），先共情接住再推进；她向你展露情绪 = 最重要的信任里程碑。',
   '约会': '落到具体见面：用已收集的喜好/住哪做模糊邀约（"改天带你去你说的那家店"），她接住就敲定时间地点，不现实就改约。',
-};
-
-// [v60 主动推进] 无目标时的默认推进指令：军师是主动方，不设目标也要"带着推进意图聊"
-//   每个 stage 定义本轮该往哪带一步；带台阶可退（不硬推），优先调用知识库话术当弹药。
-//   设了目标（goal）时由 GOAL_HINTS 接管推进方向，这里不重复注入；挽回特殊路径不推进。
-const ESCALATION_HINTS: Record<string, string> = {
-  '陌生': '本轮主动推进：先用惯例/话术制造一点张力，为建立连接铺垫——轻松调侃、带钩子的开场或展示面话题（聊她的兴趣/日常/朋友圈），自然开场，别查户口。注意：当前阶段【不约见面】——不主动提见面、不抛邀约，先把聊天氛围和舒适感建立起来。',
-  '朋友': '本轮主动推进：从朋友往暧昧探一步——用推拉或惯例话术做一次轻度试探：半玩笑的拉近距离、或调侃里带一点暧昧钩子。带台阶可退：她接住就顺势带，她回避就洒脱退一步，绝不纠缠。注意：当前阶段【不约见面】——不主动提见面、不抛邀约，只做线上的亲近试探。',
-  '追求': '本轮主动推进：试探暧昧窗口——半玩笑的拉近距离（如"我们俩这状态算啥"）、推拉话术制造张力、或一次具体但轻松的邀约（结合时间/地点现实性）。她给正反馈就大胆往上抬一档，冷场就换话题养氛围。',
-  '暧昧': '本轮主动推进：把暧昧张力往上抬——推拉+留白+一次模糊邀约（"改天带你去那家店"）、调侃里带亲密暗示。敢于调情但守住暧昧窗口，不急着捅破，留钩子让她回味。',
-  '恋爱': '本轮主动推进：维持并加固恋爱浓度——具体约见面（结合时间/地点现实性）、共同回忆或未来钩子（"下次带你尝尝我说的那家"），有情绪价值、有小脾气，但别过度客气。',
-  '挽回': '',
 };
 
 // [v82 主动开窗] 话题停滞检测（纯规则零 LLM）：
@@ -1265,28 +1232,6 @@ function detectOpenWindow(query: string): string | null {
     if (re.test(q)) return name;
   }
   return null;
-}
-
-// [v60 主动推进] 按当前 stage 拼装"主动推进"指令块（无目标/目标已达成时注入）
-//   核心：军师是主动方——主动制造窗口（试探/邀约/张力），读反馈再决定下一步；
-//   绝不表白、绝不逼问、绝不纠缠；优先调用知识库话术当弹药；挽回期禁用推进。
-// [v61] 里程碑：默认推进路径 = 未完成里程碑逐个拿下（照片→…→约会），
-//   stage 升级与里程碑收集互相印证：里程碑是"战术动作"，stage 是"战略判定"。
-// [v82] 里程碑块不再在此内嵌：由 buildSystemContent 统一延迟到战术块之后注入
-//   （实测中段注入被战术指令压过，LLM 不执行收集；靠后注入权重更高）
-function thisEscalationBlock(stage: string): string {
-  const hint = ESCALATION_HINTS[stage || '陌生'];
-  if (!hint) return ''; // 挽回等无推进指令的阶段：不注入
-  // [v20260809] 陌生/朋友阶段不约见面：主动开窗的"武器库"去掉模糊邀约
-  const meetBanned = stage === '陌生' || stage === '朋友';
-  let s = `\n\n【主动推进】(战略方向，严格遵守)\n`
-    + `- 你是关系的主动推进方，不是等待者。每轮都要带着"往下一阶段带一步"的意图说话，但进攻藏在话术里，绝不暴露目的、绝不显得急。\n`
-    + `- 本轮推进动作：${hint}\n`
-    + `- 主动开窗：对方没给信号你就自己制造窗口——${meetBanned ? '半玩笑试探、调侃带钩子、展示面话题' : '半玩笑试探、模糊邀约、调侃带钩子'}，选一个自然的角度发起；不必等她主动。\n`
-    + `- 读反馈再决定下一步：她接住（回撩/应约/延长话题/发照片）→ 顺势再进一档；她回避/冷淡/转移 → 洒脱退一步换话题养氛围，隔 1-2 轮再推进，绝不硬推、绝不表白、绝不逼问。\n`
-    + `- 弹药优先：需要具体话术时，从下方知识库参考资料里挑现成的惯例/推拉/${meetBanned ? '调侃' : '邀约'}话术来执行推进，不要自己硬编。\n`
-    + `- 节奏：推进频率不设限，但同一种进攻手法不要连续两轮用；情绪低落/挽回期禁用一切推进（见【节奏】）。`;
-  return s;
 }
 
 // [v74 里程碑×目标联动] 统一里程碑引导块（替代旧的"下一目标"单行弱引导）
@@ -1738,7 +1683,8 @@ async function extractGuide(
     if (phases.length < GUIDE_MIN_PHASES) return null; // 阶段数不足 = 生成失败
     return {
       name,
-      goal: String(card.goal || g.goal || '推进恋爱').slice(0, 30),
+      // [v141] 攻略目标固定取用户 goal；无 goal（默认推进）= 统一"推进恋爱"，不用 LLM 自拟
+      goal: String(card.goal || '推进恋爱').slice(0, 30),
       status: 'running',
       current_phase: 0,
       started_at: new Date().toISOString(),
@@ -2216,7 +2162,6 @@ function buildSystemContent(opts: {
   //   "保持当前关系" = 用户选择停止升级，只维持现状。
   //   [v61] 里程碑：推进时按"下一个未完成里程碑"给具体引导；已完成的展示进度。
   const goal = opts.memoryCard?.goal || '';
-  const goalHint = GOAL_HINTS[goal];
   const curStage = opts.memoryCard?.profile?.stage || '';
   const milestones = Array.isArray(opts.memoryCard?.milestones) ? (opts.memoryCard!.milestones!) : [];
   const nextMs = MILESTONE_CHAIN.find((m) => !milestones.includes(m)) || '';
@@ -2225,11 +2170,11 @@ function buildSystemContent(opts: {
   // [v82 里程碑延迟注入] 先记参数，战术块之后统一注入（实测中段注入被战术指令压过，
   //   LLM 不执行收集；靠后注入紧跟"本轮最高优先"战术指令，执行权重更高）
   let msOpts: { heavy: boolean; milestones: string[]; nextMs: string } | null = null;
-  // [v82-fix] curIdx 提到分支外：默认推进分支（无 goal）也使用，避免 ReferenceError
   const curIdx = STAGE_ORDER.indexOf(curStage);
 
-  // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块：GOAL_HINTS/ESCALATION/里程碑块全部停用
-  //   （攻略的阶段任务+信号替代目标引导；里程碑已融入攻略 signals，不再单独注入）
+  // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块（战略层唯一驱动）：
+  //   [v141] 目标引导（GOAL_HINTS）与默认推进（ESCALATION）已删除——从未见效且与攻略重复，
+  //   浪费 token；攻略激活时里程碑块也停用（已融入攻略 signals）
   const guide = opts.memoryCard?.guide || null;
   const guideRunning = !!guide && guide.status === 'running'
     && Array.isArray(guide.phases) && guide.phases.length > 0
@@ -2238,32 +2183,12 @@ function buildSystemContent(opts: {
   if (guideRunning) {
     s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], milestones);
   } else if (goal === '保持当前关系') {
-    // 停止升级：只显示进度 + 维持现状指令（GOAL_HINTS 已含 hint）
+    // 停止升级：只显示进度 + 维持现状指令
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可，她主动给信息自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
-  } else if (goalHint) {
-    const goalTarget = goal === '挽回修复' || goal === '推进恋爱'
-      ? '恋爱'
-      : goal === '约见面' ? '' : '暧昧';
-    const goalIdx = goalTarget ? STAGE_ORDER.indexOf(goalTarget) : -1;
-    const achieved = goalIdx > -1 && curIdx >= goalIdx;
-    if (!achieved) {
-      s += `\n\n【关系目标与进度】(战略方向，严格遵守)\n`
-        + `目标：${goal}\n`
-        + `当前阶段：${curStage || '陌生'}\n`
-        + `本轮动作：${goalHint.hint}`;
-      // 目标推进中：里程碑作为战术弹药（除非目标是挽回——挽回期不收集里程碑）
-      // [v74 里程碑×目标联动] 暧昧后加重引导权重；约见面前至少完成 2 项小目标（全局门槛）
-      if (goal !== '挽回修复') {
-        msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
-      }
-    } else {
-      // [v60] 目标已达成：不再按目标使劲，改按里程碑/当前 stage 继续（恋爱后还差"约会"等）
-      s += thisEscalationBlock(curStage);
-      msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
-    }
   } else {
-    // [v60/v61 默认推进] 没设目标 = 默认从当前阶段一级一级推进到恋爱（用户用军师就是为了谈恋爱）
-    s += thisEscalationBlock(curStage);
+    // [v141] 无攻略且非"保持当前关系"（如对话<5轮攻略未生成）：不注入任何目标/推进指令，
+    //   推进方向完全交给攻略（默认启动，聊满 GUIDE_MIN_ROUNDS 自动生成）；
+    //   此阶段仅保留里程碑轻量收集引导（数据收集是基础能力，非推进方向）
     msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
   }
 

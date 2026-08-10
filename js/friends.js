@@ -310,7 +310,7 @@ const Friends = {
                     const ok = await this._setGoal(session, val);
                     Utils.hideLoading();
                     if (ok) {
-                        Utils.toast(val === '__none__' ? '已取消目标' : '目标已设为「' + val + '」');
+                        Utils.toast(val === '__none__' ? '已设为默认推进' : '目标已设为「' + val + '」');
                         await this.load();
                     } else {
                         Utils.toast('保存失败，请重试');
