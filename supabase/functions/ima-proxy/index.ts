@@ -491,8 +491,6 @@ Deno.serve(async (req) => {
     let usedStageLlm = DEFAULT_STAGE_LLM;
     // [v79.4] 套路启动通道素材块数（_debug 用；0=未探测）
     let lastStratMaterialCount: number | null = null;
-    // [v82] 里程碑块注入验证（_debug 用；0=未注入 1=轻引导 2=重引导；顶层声明防作用域事故）
-    let msBlock = 0;
     // [v143 套路爽感] 本轮她踩坑（套路激活 && 追问/好奇词命中；顶层声明防作用域事故）
     let trapCaught = false;
     // [v143] 套路启动前快照（防"本轮刚启动套路"误判成"她已踩坑"：只有上一轮就激活的套路才算）
@@ -603,7 +601,7 @@ Deno.serve(async (req) => {
             lastStratMaterialCount = (Array.isArray(convItems) ? convItems : []).length;
             if ((Array.isArray(convItems) ? convItems : []).length > 0) {
               // [v18] 传入 memoryCard → extractStrategy 在 prompt 里注入里程碑可选融合段
-              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query, memoryCard);
+              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query);
               if (st) {
                 memoryCard = { ...(memoryCard || {}), strategy: st };
                 quotaOpts.strategyActive = true; // 本轮起按执行期配额
@@ -664,15 +662,10 @@ Deno.serve(async (req) => {
           lastGapText,
           // [v81 回退 v78] 思考档（v78 曾注入【思考预算】，已删除；档位由 llmChat 控制）
           thinking: effectiveThinkingMode,
-          // [v82 主动开窗] 话题停滞状态（里程碑主动开窗判定）
-          topicState,
           // [v129] 高危词预检结果 → 命中则注入【措辞底线】保味指令
           riskHit: lastRiskHit,
         });
         const systemContent = built.systemContent;
-        // [v82] 里程碑块注入验证：0=未注入 1=轻引导 2=重引导（排查"收集不生效"用）
-        msBlock = systemContent.includes('【关系里程碑】(暧昧期推进重点') ? 2
-          : (systemContent.includes('【关系里程碑】') ? 1 : 0);
         pulseAdvice = built.pulseAdvice;
         factsInjected = built.factsInjected;
         const messages: any[] = [
@@ -827,8 +820,6 @@ Deno.serve(async (req) => {
         // [v82] 话题停滞状态（验证主动开窗/换话题弹药）：stale_rounds=当前话题已聊轮数, retreating=对方退缩信号
         stale_rounds: topicState.staleRounds,
         retreating: topicState.retreating,
-        // [v82] 里程碑块注入验证：0=未注入 1=轻引导 2=重引导（排查"收集不生效"用）
-        ms_block: msBlock,
         // [v20260809] 机会窗口命中验证（null=未命中；命中显示里程碑项名，排查"她问军师没反问"用）
         open_window: switchTopic ? null : detectOpenWindow(query),
         // [v62] 切换话题模式（验证【切换话题】注入）
@@ -1168,9 +1159,6 @@ const GUIDE_MIN_ROUNDS = 5;    // 自动制定攻略的最低对话轮数（hist
 const GUIDE_MIN_PHASES = 3;    // 攻略阶段数下限
 const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
 
-// [v58] 阶段推进正常顺序（升级判定用：只允许顺序前进，不越级）
-const STAGE_ORDER = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
-
 // [v61 里程碑] 关系推进里程碑链（默认一路推到恋爱要逐个拿下的"小目标"）
 //   顺序有讲究：先易后难、先公开后私密、先线上后线下——
 //   照片(吸引力确认) → 年龄(基础信息) → 喜好(邀约弹药) → 住哪(距离判断) →
@@ -1246,56 +1234,6 @@ function detectOpenWindow(query: string): string | null {
     if (re.test(q)) return name;
   }
   return null;
-}
-
-// [v74 里程碑×目标联动] 统一里程碑引导块（替代旧的"下一目标"单行弱引导）
-//   heavy=false（暧昧前）：保持现状——按链序单一 nextMs 弱引导
-//   heavy=true（暧昧/恋爱）：加重权重——列出全部未完成项，不分先后，情景顺势带
-//   meetGate=true（全局门槛，除"保持当前关系/挽回修复"路径）：约见面前至少完成 2 项小目标
-//   meetBanned=true（v20260809 阶段禁约）：陌生/朋友阶段不主动约见面——不抛邀约、不往"见面"带，
-//     里程碑最多推到"敏感面"，"约会"不引导；她主动约可自然接住，但绝不主动发起
-//   [v82 主动开窗] 新增 staleRounds/retreating（话题停滞检测）：从"等她开口子"改为
-//   "主动开窗义务"——每轮判定能否带，话题聊到第 4 轮/对方退缩时，必须用小目标当新话题切入
-//   （不再被动等窗口：里程碑小目标本身就是现成的新话题弹药）
-function buildMilestoneBlock(opts: { heavy: boolean; meetGate: boolean; meetBanned?: boolean; milestones: string[]; nextMs: string; staleRounds?: number; retreating?: boolean }): string {
-  const { heavy, meetGate, milestones, nextMs } = opts;
-  const meetBanned = opts.meetBanned ?? false;
-  const staleRounds = opts.staleRounds ?? 0;
-  const retreating = opts.retreating ?? false;
-  const done = milestones.length ? milestones.join('、') : '（无）';
-  const gateLine = '\n- 邀约门槛：至少完成 2 项小目标后才能把对话往"见面"带；未达标前本轮以收集为主，不抛邀约、不敲时间，达标后邀约照常（见【本轮动作】）。';
-  const banLine = '\n- 阶段禁约（陌生/朋友）：本轮及后续都【不主动约见面】——不抛邀约、不往"见面"带、不提模糊邀约；她主动约可以自然接住，但绝不主动发起见面话题。';
-  // [v82] 话题聊死信号：已连续聊 ≥3 轮 或 对方退缩 → 本轮强制用小目标切入（主动开窗）
-  const topicDead = staleRounds >= 3 || retreating;
-  if (!heavy) {
-    // 暧昧前：单一 nextMs 顺序引导（链序推进，不跳级）
-    if (!nextMs || !MILESTONE_TIPS[nextMs]) return '';
-    // [v20260809] 禁约阶段：里程碑最多推到"敏感面"，"约会"不引导
-    if (meetBanned && nextMs === '约会') {
-      return `\n\n【关系里程碑】前序小目标已全部完成，但当前阶段（陌生/朋友）不主动约见面：本轮正常聊天升温即可，不引导见面话题；等关系推进到追求阶段，再自然把对话往"见面"带。`;
-    }
-    let s = `\n\n【关系里程碑】下一目标：「${nextMs}」——${MILESTONE_TIPS[nextMs]}。`
-      + `已完成（她给过这些，别重复要）：${done}。按链序推进（照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会），不跳级硬要；她给了信息就自然记住并复用（对应【我记得这些】）。\n`
-      + (topicDead
-        ? `【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 停止死磕老话题，本轮就把「${nextMs}」当新话题自然切入（按上面的话术方向），不许把话题聊到她失去兴趣。`
-        : `【主动开窗】每轮先判定能否自然带出「${nextMs}」（顺口提一句也算）；话题聊到第 4 轮还没带出 → 本轮必须带。`);
-    if (meetBanned) s += banLine;
-    else if (meetGate) s += gateLine;
-    return s;
-  }
-  // 暧昧及之后：加重权重——全部未完成项列出，不分先后，情景顺势带
-  const pending = MILESTONE_CHAIN.filter((m) => !milestones.includes(m));
-  const pendingText = pending.length ? pending.join('、') : '（全部完成，正常升温即可）';
-  let s = `\n\n【关系里程碑】(暧昧期推进重点，本轮务必带一步)\n`
-    + `- 已完成（给过就别重复要）：${done}。\n`
-    + `- 未完成（不分先后，任选其一）：${pendingText}。\n`
-    + `- 每轮先判定：能否从"未完成"里挑 1 个最贴合当前情景的自然带出？能则带（优先用下方知识库素材当话术）。\n`
-    + (topicDead
-      ? `- 【主动开窗】当前话题已聊 ${staleRounds + 1} 轮、她回复变短/敷衍 → 立即停止死磕老话题，本轮就用其中一个小目标当新话题切入，绝不把话题聊到她失去兴趣。\n`
-      : `- 话题聊到第 4 轮还没带出任何小目标 → 本轮必须从"未完成"里挑 1 个当新话题切入。\n`)
-    + `- 边界：不盘问 = 不连环追问、她不回应不硬要；她主动问起的项目，回答后必须单次镜像反问（社交互惠，见【机会窗口】）。一次性信息（年龄/住哪/家庭/恋爱经历/敏感面）给过就不重复要，照片/喜好可随话题自然重复，以自然为准，由你判断。`;
-  if (meetGate) s += gateLine;
-  return s;
 }
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
@@ -1762,31 +1700,12 @@ const TRAP_CAUGHT_RE = /为什么|然后呢|后来呢|真的假的|怎么说|说
 
 async function extractStrategy(
   llmKey: string, llmBase: string, llmModel: string,
-  kbItems: any[], query: string,
-  memCard: MemoryCard | null = null
+  kbItems: any[], query: string
 ): Promise<StrategyState | null> {
   const texts = (Array.isArray(kbItems) ? kbItems : [])
     .map((i) => `${i.title || ''}\n${i.content || ''}`)
     .join('\n');
   if (!texts || !STRATEGY_HINT_RE.test(texts)) return null;
-
-  // [v18] 可选化目标融合：把 milestones 集合 + MILESTONE_TIPS 话术方向塞进 prompt，
-  //   措辞强调"套路节奏优先/不生硬就不带"，让 LLM 看场景自选融合而非硬塞
-  let milestoneBlock = '';
-  if (Array.isArray(memCard?.milestones)) {
-    const pending = MILESTONE_CHAIN.filter((m) => !memCard!.milestones!.includes(m));
-    const done = MILESTONE_CHAIN.filter((m) => memCard!.milestones!.includes(m));
-    if (pending.length > 0) {
-      const tipLines = pending.map((m) => `  · ${m}：${MILESTONE_TIPS[m] || ''}`).join('\n');
-      milestoneBlock = `\n### 可选：自然推进收集项（不影响套路节奏就不带）\n`
-        + `本会话还在推进一些"收集项"（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会）。\n`
-        + `不强制本套路带出——但如果当前对话场景恰好能自然融合某个，可以选一个融入到某一步骤里（让氛围+推进一步到位）。\n`
-        + `- 未完成（这些还没收集到）：${pending.join('、')}\n`
-        + `- 已完成（这些已有，别再问）：${done.join('、') || '（无）'}\n`
-        + `- 融入参考话术方向（与执行期同一套提示）：\n${tipLines}\n`
-        + `铁律：① 套路节奏与完整性永远优先；② 只有当前场景自然（不生硬、不查户口、不破坏推拉/冷读/互动节奏）才能融入；③ 没有合适时机就不带，宁缺毋滥；④ 已完成的不要重复要；⑤ 不要为了塞目标而强行多走一步步骤。`;
-    }
-  }
 
   const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己用交友APP（纯文字聊天）回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
     + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
@@ -1799,7 +1718,6 @@ async function extractStrategy(
     + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
     + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低。\n`
     + `- [v20260809 场景契合] 提炼前先判断：该惯例必须与"当前对方的话"和对话场景契合（她刚发网名/寒暄/闲聊时，推拉/冷读/打压类惯例就明显不适用，应返回空）。只提炼当下真正用得上的，宁缺毋滥。\n`
-    + milestoneBlock
     + `\n如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -2045,8 +1963,6 @@ function buildSystemContent(opts: {
   // [v78→v81 回退] 本轮思考档（off/low/high/max）：v78 曾用于注入【思考预算】压缩思考链，
   //   已删除（用户实测变笨）；档位机制本身由 llmChat 的 thinking 参数控制，此处保留签名兼容
   thinking?: ThinkingMode;
-  // [v82 主动开窗] 话题停滞状态（主流程 detectTopicStagnation 计算）：里程碑主动开窗判定用
-  topicState?: { staleRounds: number; retreating: boolean };
   // [v129] 本轮参考弹药是否含敏感词（高危词预检结果）→ 命中则注入【措辞底线】保味指令
   riskHit?: boolean;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
@@ -2175,24 +2091,15 @@ function buildSystemContent(opts: {
 
   // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
-  // [v58/v61] 关系目标 + 里程碑进度（战略层）：用户设了 goal 按目标使劲；
-  //   没设 goal = 默认一路推进到恋爱（陌生→朋友→追求→暧昧→恋爱）；
-  //   "保持当前关系" = 用户选择停止升级，只维持现状。
-  //   [v61] 里程碑：推进时按"下一个未完成里程碑"给具体引导；已完成的展示进度。
+  // [v58/v61→v145] 关系目标 + 里程碑数据（战略层）：
+  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；milestones 仅作数据（攻略 signals 判定/生成/面板）
   const goal = opts.memoryCard?.goal || '';
-  const curStage = opts.memoryCard?.profile?.stage || '';
   const milestones = Array.isArray(opts.memoryCard?.milestones) ? (opts.memoryCard!.milestones!) : [];
-  const nextMs = MILESTONE_CHAIN.find((m) => !milestones.includes(m)) || '';
-  // [v82 主动开窗] 话题停滞状态（主流程 detectTopicStagnation 计算）
-  const ts = opts.topicState || { staleRounds: 0, retreating: false };
-  // [v82 里程碑延迟注入] 先记参数，战术块之后统一注入（实测中段注入被战术指令压过，
-  //   LLM 不执行收集；靠后注入紧跟"本轮最高优先"战术指令，执行权重更高）
-  let msOpts: { heavy: boolean; milestones: string[]; nextMs: string } | null = null;
-  const curIdx = STAGE_ORDER.indexOf(curStage);
 
   // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块（战略层唯一驱动）：
-  //   [v141] 目标引导（GOAL_HINTS）与默认推进（ESCALATION）已删除——从未见效且与攻略重复，
-  //   浪费 token；攻略激活时里程碑块也停用（已融入攻略 signals）
+  //   [v141] 目标引导（GOAL_HINTS）与默认推进（ESCALATION）已删除——从未见效且与攻略重复，浪费 token；
+  //   [v145] 里程碑引导块（buildMilestoneBlock）已删除——收集引导/进度点亮全部并入攻略 signals，
+  //     里程碑仅作数据留存（extractProfile 照常收集，攻略生成/推进/面板勾选读取）
   const guide = opts.memoryCard?.guide || null;
   const guideRunning = !!guide && guide.status === 'running'
     && Array.isArray(guide.phases) && guide.phases.length > 0
@@ -2203,12 +2110,9 @@ function buildSystemContent(opts: {
   } else if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可，她主动给信息自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
-  } else {
-    // [v141] 无攻略且非"保持当前关系"（如对话<5轮攻略未生成）：不注入任何目标/推进指令，
-    //   推进方向完全交给攻略（默认启动，聊满 GUIDE_MIN_ROUNDS 自动生成）；
-    //   此阶段仅保留里程碑轻量收集引导（数据收集是基础能力，非推进方向）
-    msOpts = { heavy: curIdx >= STAGE_ORDER.indexOf('暧昧'), milestones, nextMs };
   }
+  // [v145] 无攻略且非"保持当前关系"（如对话<5轮攻略未生成）：不注入任何推进/收集指令，
+  //   方向完全交给攻略（默认启动，聊满 GUIDE_MIN_ROUNDS 自动生成）
 
   // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
   //   放在所有目标/推进指令之后 = 最高优先级；检索词已切到"新话题/开场白"方向
@@ -2230,23 +2134,7 @@ function buildSystemContent(opts: {
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
   s += buildTacticBlock(tactic.category, tactic.phase);
 
-  // [v82 里程碑延迟注入] 紧跟战术指令（本轮行动层，权重最高区域）：
-  //   话题聊死 → 小目标当新话题切入；每轮尽量织入一个收集动作
-  if (msOpts) {
-    // [v20260809] 陌生/朋友阶段不主动约见面（用户显式设"约见面"目标除外：那是用户主动要求）
-    const meetBanned = goal !== '约见面' && (curStage === '陌生' || curStage === '朋友');
-    s += buildMilestoneBlock({
-      heavy: msOpts.heavy,
-      meetGate: true,
-      meetBanned,
-      milestones: msOpts.milestones,
-      nextMs: msOpts.nextMs,
-      staleRounds: ts.staleRounds,
-      retreating: ts.retreating,
-    });
-  }
-
-  // [v20260809 机会窗口] 她主动问里程碑话题 → 回答后必须镜像反问（最高优先，紧跟里程碑块）
+  // [v20260809 机会窗口] 她主动问里程碑话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
   //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
   const openWindow = detectOpenWindow(opts.lastUserText || '');
   if (openWindow) {
