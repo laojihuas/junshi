@@ -493,6 +493,10 @@ Deno.serve(async (req) => {
     let lastStratMaterialCount: number | null = null;
     // [v82] 里程碑块注入验证（_debug 用；0=未注入 1=轻引导 2=重引导；顶层声明防作用域事故）
     let msBlock = 0;
+    // [v143 套路爽感] 本轮她踩坑（套路激活 && 追问/好奇词命中；顶层声明防作用域事故）
+    let trapCaught = false;
+    // [v143] 套路启动前快照（防"本轮刚启动套路"误判成"她已踩坑"：只有上一轮就激活的套路才算）
+    let strategyAtStart = false;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -563,6 +567,10 @@ Deno.serve(async (req) => {
         }
         mark('kbft');
         hitKnowledge = kbItems.length > 0;
+
+        // [v143 踩坑时序] 套路启动前快照：只有"上一轮已激活"的套路才算踩坑语境
+        //   （本轮刚由 query 触发的套路启动，坑还没埋，她当前的追问不算上钩）
+        strategyAtStart = !!memoryCard?.strategy;
 
         // [v7] 套路启动（独立惯例检索通道）：当前无套路 + 用户未打断 → 专门检索惯例/魔术/玩法类内容，
         //   LLM 提炼步骤启动套路；结果仅用于启动，不混入主回复参考（话术加权不影响套路启动素材）
@@ -750,6 +758,10 @@ Deno.serve(async (req) => {
     }
     mark('memory');
 
+    // [v143 套路爽感] 她踩坑检测（上一轮已激活的套路 && 当前对方的话命中追问/好奇词 = 上钩信号）
+    //   strategyAtStart 保证"本轮刚启动"不误判；switchTopic 时 query 是"/换话题"，天然不命中
+    trapCaught = strategyAtStart && TRAP_CAUGHT_RE.test(String(query || ''));
+
     // [v129 消毒观测] 每轮记录高危词预检 + 消毒检测结果，跑几天用 grep "[sanitize]" 统计消毒率
     console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
 
@@ -860,6 +872,8 @@ Deno.serve(async (req) => {
           return ph ? `${ph.rounds_in_phase || 0}/${ph.stay_max_rounds || 8}` : null;
         })(),
         guide_eval: memoryCard?.guide?.last_eval || null,
+        // [v143 套路爽感] 她踩坑信号（验证"上钩"提示；true=套路激活且她追问/好奇）
+        trap_caught: trapCaught,
         // [v20260805] 套路总轮数上限（前端策略徽标显示进度 x/y 用；零成本，随 _debug 返回）
         strategy_max_rounds: memoryCard?.strategy?.max_rounds ?? null,
         strategy_clear: strategyClear,
@@ -1742,6 +1756,10 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 const STRATEGY_HINT_RE = /惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读/;
 const STRATEGY_MAX_STEPS = 6;
 
+// [v143 套路爽感] 她踩坑信号（套路激活时检测）：她追问/好奇/接梗 = 上钩
+//   收紧为正例：明确追问/好奇词，不含"哈哈/嗯"等高频词（防每轮误报刷屏）
+const TRAP_CAUGHT_RE = /为什么|然后呢|后来呢|真的假的|怎么说|说来听听|说说看|继续说|接着呢|快说|想听|好奇|展开说说|细说|你倒是说|然后\?|然后呐/;
+
 async function extractStrategy(
   llmKey: string, llmBase: string, llmModel: string,
   kbItems: any[], query: string,
@@ -2304,21 +2322,23 @@ function buildSystemContent(opts: {
 
   // [v7] 套路执行指令：方向盘优先，检索为弹药，输出不提步骤/进度
   // [v17] 注入 essence（核心原理/节奏/分寸）+ 例句按语境微调，防"只剩骨架"
+  // [v143 套路爽感] 执行优先级调整：按剧本走 > 自然跟随；只有她明确冷淡/反感才放弃；
+  //   她追问/好奇 = 踩坑信号，必须接住顺势推进，绝不提前揭晓（悬念是坑的灵魂）
   const strategy = opts.memoryCard?.strategy;
   if (strategy && Array.isArray(strategy.steps) && strategy.steps.length > 0) {
     const stepText = strategy.steps.map((st, i) => `${i + 1}. ${st}`).join('\n');
-    s += `\n\n【当前执行套路】你正在执行「${strategy.name}」惯例，目标：${strategy.goal}\n`
+    s += `\n\n【当前执行套路】(按剧本走，最高优先)\n你正在执行「${strategy.name}」惯例，目标：${strategy.goal}\n`
       + (strategy.essence
         ? `核心原理：${strategy.essence}（这是本套路的灵魂：按此原则临场发挥节奏和分寸，不要机械照搬步骤）\n`
         : '')
       + `执行步骤：\n${stepText}\n`
       + `执行规则（严格遵守）：\n`
-      + `- 套路决定对话方向；但对方抛出明显更有趣/更投入/更感兴趣的新话题时，优先跟随对方，套路自然搁置、不强拉回。\n`
-      + `- 步骤中的例句是参考话术：优先采用，但可按当前语境微调语气措辞，保留其韵味和节奏，禁止改写成官方腔/翻译腔。\n`
-      + `- 参考资料与套路冲突时以对话连续性为准；方向一致才采用参考素材。\n`
-      + `- 根据对方最新反应自然推进：先顺应对方，再判断要不要往套路方向带，绝不生硬。\n`
+      + `- 套路激活期间，按剧本执行是最高优先：每一步照做，把钩子埋好、悬念留足，按节奏推进；不要因为"更自然""她抛了别的话题"就搁置套路。\n`
+      + `- 她正常回应（接梗/好奇/追问）→ 继续按套路走。她追问"为什么/然后呢/真的假的"就是踩坑信号：接住并顺势推进下一步，绝不提前把答案揭晓（悬念是坑的灵魂，忍住）。\n`
+      + `- 她明确冷淡/反感/拒绝/敷衍（"不想聊这个/别这样/哦/嗯"）→ 立即放弃套路，正常回应即可，绝不强行拉回、不纠缠。\n`
+      + `- 步骤中的例句是参考话术：优先采用，可按当前语境微调语气措辞，保留韵味和节奏，禁止官方腔/翻译腔。\n`
       + `- 严禁向对方提及套路、步骤、进度、惯例、第几步等任何元信息，输出必须是可直接发送的自然消息。\n`
-      + `- 当对方反应表明套路目标已达成或已失效、或话题已自然转移时，套路视为完成，自然过渡到正常聊天，不要强行拉回。`;
+      + `- 套路目标达成（她踩完坑、收网成功）或她明确抗拒时，套路自然结束，过渡到正常聊天。`;
   }
 
   // [v11 迷男OS] 节奏建议（引擎层 → 线上"假性时间限制"）：delay 建议回写记忆卡

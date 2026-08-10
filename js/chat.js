@@ -44,6 +44,13 @@ const Chat = {
         }
         // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
         this._updateStrategyBadge(session.memory_card || null);
+        // [v143 套路爽感] 记录打开时的策略名（套路结束时 toast 用）
+        try {
+            const smc = session.memory_card
+                ? (typeof session.memory_card === 'string' ? JSON.parse(session.memory_card) : session.memory_card)
+                : null;
+            this._prevStrategyName = (smc && smc.strategy && smc.strategy.name) || '';
+        } catch (e) { this._prevStrategyName = ''; }
         // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
         this._updateGuidePanel((mc && mc.guide) || null);
 
@@ -736,6 +743,16 @@ const Chat = {
                 }
                 this._prevStage = ns || this._prevStage;
             }
+            // [v143 套路爽感] 她踩坑了：套路执行期间她追问/好奇 = 上钩，提示用户顺势收网
+            if (this.lastDebug.trap_caught) {
+                Utils.toast('她上钩了，顺着套路收网');
+            }
+            // [v143 套路爽感] 套路走完：上轮还在执行、本轮已清除（非用户手动 / 打断）→ 收工提示
+            if (this._prevStrategyName && !this.lastDebug.strategy_name && !this.lastDebug.strategy_clear) {
+                Utils.toast('套路走完：' + this._prevStrategyName + ' 收工');
+            }
+            if (this.lastDebug.strategy_name) this._prevStrategyName = this.lastDebug.strategy_name;
+            else if (!this.lastDebug.strategy_clear) this._prevStrategyName = '';
             // [v20260810 攻略] 攻略状态（后端透传 guide 对象）→ 渲染面板 + 同步缓存
             if (data && data.guide) {
                 const mcObj = this.memoryCard
