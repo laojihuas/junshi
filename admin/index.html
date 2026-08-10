@@ -113,6 +113,10 @@
         .btn-primary { background: var(--green); color: white; }
         .btn-danger { background: var(--danger); color: white; }
         .btn-outline { background: transparent; border: 1px solid var(--border); }
+        /* [v20260810] 用户操作列按钮 */
+        .btn-op { font-size: 11px; padding: 3px 8px; border-radius: 4px; }
+        .btn-del { color: var(--danger); border-color: rgba(229, 57, 53, 0.4); }
+        .btn-del:hover { background: rgba(229, 57, 53, 0.08); }
 
         .form-row {
             display: flex;
@@ -262,10 +266,11 @@
                                 <th>邀请赠送</th>
                                 <th>VIP 到期</th>
                                 <th>注册时间</th>
+                                <th>操作</th>
                             </tr>
                         </thead>
                         <tbody id="users-tbody">
-                            <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
+                            <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -484,11 +489,11 @@
             renderUsers();
         }
 
-        // 渲染用户列表（设备维度）
+        // 渲染用户列表（设备维度 + 注册账号；[v20260810] 账号可冻结/删除）
         function renderUsers() {
             const users = window.__adminUsers || [];
             if (users.length === 0) {
-                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);">暂无设备</td></tr>';
+                document.getElementById('users-tbody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);">暂无设备</td></tr>';
                 return;
             }
             document.getElementById('users-tbody').innerHTML = users.map(u => {
@@ -500,6 +505,19 @@
                         badge = '<span class="badge badge-vip">VIP</span>';
                     }
                 }
+                if (u.frozen) {
+                    badge = '<span class="badge badge-expired">❄️ 已冻结</span>';
+                } else if (u.is_account) {
+                    badge = badge + ' <span class="badge badge-free" style="background:#E3F2FD;color:#1565C0;">账号</span>';
+                } else {
+                    badge = badge + ' <span class="badge badge-free" style="background:#ECEFF1;color:#546E7A;">游客设备</span>';
+                }
+                // [v20260810] 操作列：注册账号可冻结/解冻/删除；游客设备暂只读（管制功能后续扩展）
+                let ops = '<span style="color:var(--muted);font-size:11px;">-</span>';
+                if (u.is_account && u.uid) {
+                    ops = `<button class="btn btn-outline btn-op" data-uid="${u.uid}" data-action="${u.frozen ? 'unfreeze' : 'freeze'}" data-name="${u.device_id || ''}">${u.frozen ? '解冻' : '冻结'}</button> ` +
+                          `<button class="btn btn-outline btn-op btn-del" data-uid="${u.uid}" data-action="delete" data-name="${u.device_id || ''}">删除</button>`;
+                }
                 return `<tr>
                     <td class="code-display" title="${u.device_id}">${(u.device_id || '').slice(0, 12)}...</td>
                     <td>${badge}</td>
@@ -508,8 +526,34 @@
                     <td>${u.invite_bonus || 0}</td>
                     <td>${u.vip_expires_at ? new Date(u.vip_expires_at).toLocaleDateString() : '-'}</td>
                     <td>${new Date(u.created_at).toLocaleDateString()}</td>
+                    <td>${ops}</td>
                 </tr>`;
             }).join('');
+            // [v20260810] 绑定操作按钮（冻结/解冻/删除）
+            document.querySelectorAll('#users-tbody .btn-op').forEach(btn => {
+                btn.addEventListener('click', async () => {
+                    const uid = btn.dataset.uid;
+                    const action = btn.dataset.action;
+                    const name = btn.dataset.name || '';
+                    await userAction(uid, action, name);
+                });
+            });
+        }
+
+        // [v20260810] 用户管制：冻结 / 解冻 / 删除（调 admin_user_action RPC）
+        async function userAction(uid, action, name) {
+            if (!uid) return;
+            const label = action === 'delete' ? '删除' : (action === 'freeze' ? '冻结' : '解冻');
+            const msg = action === 'delete'
+                ? `确定删除账号「${name}」？\n将同时清除其所有聊天记录、会话、配额与资料，不可恢复！`
+                : (action === 'freeze' ? `确定冻结账号「${name}」？冻结后无法继续使用（配额拦截）` : `确定解冻账号「${name}」？`);
+            if (!confirm(msg)) return;
+            const { data, error } = await sb.rpc('admin_user_action', { p_user_id: uid, p_action: action });
+            if (error) { toast('操作失败：' + error.message); return; }
+            if (!data || data.success === false) { toast('操作失败：' + ((data && data.message) || '未知错误')); return; }
+            toast(data.message || '操作成功');
+            if (window.__adminUsers) delete window.__adminUsers;
+            await loadStats();
         }
 
         // 加载用户列表（数据来自 admin_stats，不再直查 profiles）
@@ -892,18 +936,24 @@
                 if (dry.error) { toast('扫描失败：' + dry.error.message); return; }
                 const a = dry.rule_a_test_prefix || { count: 0, device_ids: [] };
                 const b = dry.rule_b_fp_island     || { count: 0, device_ids: [] };
-                const total = (a.count || 0) + (b.count || 0);
+                const c = dry.rule_c_test_accounts || { count: 0, account_names: [] };
+                const d = dry.rule_d_account_islands || { count: 0, account_names: [] };
+                const total = (a.count || 0) + (b.count || 0) + (c.count || 0) + (d.count || 0);
                 if (total === 0) {
                     toast('✅ 干净，无幽灵设备');
                     return;
                 }
                 const aIds = (a.device_ids || []).join('\n  • ');
                 const bIds = (b.device_ids || []).join('\n  • ');
+                const cNames = (c.account_names || []).join('\n  • ');
+                const dNames = (d.account_names || []).join('\n  • ');
                 const msg =
-                    `发现 ${total} 个候选设备：\n` +
-                    `\n【规则 A：测试前缀】${a.count || 0} 个${aIds ? '\n  • ' + aIds : ''}\n` +
-                    `\n【规则 B：fp_ 孤岛】${b.count || 0} 个${bIds ? '\n  • ' + bIds : ''}\n` +
-                    `\n确认删除这些设备？（绑定账号/激活码的设备不在候选中）`;
+                    `发现 ${total} 个候选：\n` +
+                    `\n【规则 A：测试设备】${a.count || 0} 个${aIds ? '\n  • ' + aIds : ''}\n` +
+                    `\n【规则 B：fp_ 孤岛设备】${b.count || 0} 个${bIds ? '\n  • ' + bIds : ''}\n` +
+                    `\n【规则 C：测试账号】${c.count || 0} 个${cNames ? '\n  • ' + cNames : ''}\n` +
+                    `\n【规则 D：孤儿账号】${d.count || 0} 个${dNames ? '\n  • ' + dNames : ''}\n` +
+                    `\n确认删除？（账号删除会同时清除其聊天记录/会话/配额；管理员账号自动跳过）`;
                 if (!confirm(msg)) return;
                 // 2) 真删
                 btn.textContent = '🧹 清理中...';

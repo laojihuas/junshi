@@ -375,6 +375,7 @@ Deno.serve(async (req) => {
       else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') message = '使用太频繁，请稍后再试';
       else if (reason === 'device_not_found') message = '设备未注册，请重试';
       else if (reason === 'account_not_found') message = '账号异常，请重新登录';
+      else if (reason === 'account_frozen') message = '账号已被冻结，请联系管理员';
       return new Response(JSON.stringify({ error: reason, message, quota: quotaInfo }), { headers, status: 403 });
     }
 

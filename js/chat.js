@@ -633,6 +633,14 @@ const Chat = {
             }
         } else if (reason === 'vip_daily_limit') {
             Utils.toast('服务过载，请明天再试');
+        } else if (reason === 'account_frozen') {
+            // [v20260810] 管理员冻结：提示后退出登录（账号已无法使用）
+            Utils.toast(message || '账号已被冻结，请联系管理员');
+            if (Auth.isAccount) {
+                await Auth.logout();
+                await Friends.load();
+                App.navigate('friends');
+            }
         } else if (reason === 'ip_limit' || reason === 'ip_new_device_limit') {
             Utils.toast('使用太频繁，请稍后再试');
         } else if (reason === 'device_not_found') {
