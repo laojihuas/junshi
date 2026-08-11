@@ -63,7 +63,7 @@ const Friends = {
         container.innerHTML = this.sessions.map(s => {
             const initial = s.friend_name ? s.friend_name.charAt(0).toUpperCase() : '?';
             const timeAgo = this._timeAgo(s.updated_at || s.created_at);
-            // [v83] 年龄/地区标签：里程碑"年龄""住哪"激活时提取的具体值，显示在备注前
+            // [v83] 年龄/地区标签：话题"年龄""住哪"聊出结果时提取的具体值，显示在备注前
             let ageHtml = '';
             let regionHtml = '';
             try {

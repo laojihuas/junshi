@@ -2,6 +2,17 @@
 // 军师 - 聊天窗口模块
 // ============================================================
 
+// [v20260811 话题] 话题库 short 名清单（与后端 TOPIC_LIBRARY 对齐，攻略信号判断用）
+//   顺序与后端一致：破冰15/升温15/暧昧10/恋爱10
+const TOPIC_LIBRARY_SHORTS = [
+    '名字', '年龄', '照片', '住哪', '工作', '作息', '通勤', '饮食', '做饭', '运动',
+    '爱好', '追剧', '音乐', '电影', '看书',
+    '周末', '社交', '酒量', '抽烟', '宠物', '旅游', '季节', '穿衣', '手机', '睡眠',
+    '怕什么', '学生时代', '童年', '家庭', '父母关系',
+    '感情经历', '前任', '分手原因', '前任态度', '择偶标准', '恋爱观', '第一印象', '关系状态', '同事关系', '压力',
+    '约会', '敏感面', '金钱观', '消费', '未来', '结婚', '孩子', '定居', '吵架', '我们',
+];
+
 const Chat = {
     currentSessionId: null,
     currentFriendName: '',
@@ -165,15 +176,15 @@ const Chat = {
         // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
         const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
-        // [v61] 里程碑进度（追求/暧昧阶段的推进小目标：照片→年龄→喜好→住哪→家庭→恋爱经历→敏感面→约会）
-        // [v74b] 移除"加微信"：部分用户本就在微信聊天，引导加微信显尴尬
-        const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
-        const doneMs = Array.isArray(mc.milestones) ? mc.milestones.filter(m => MILESTONE_CHAIN.includes(m)) : [];
-        let milestoneHtml = '';
-        if (doneMs.length > 0 || (p.stage && p.stage !== '陌生' && p.stage !== '挽回')) {
-            milestoneHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">' + MILESTONE_CHAIN.map(m =>
-                `<span class="chain-node${doneMs.includes(m) ? ' done' : ''}" style="${doneMs.includes(m) ? '' : 'opacity:.45;'}">${doneMs.includes(m) ? '✓' : '○'}${m}</span>`
-            ).join('') + '</div>';
+        // [v20260811 话题] 已聊话题进度（攻略信号打钩来源：话题 short 名列表）
+        const doneTopics = Array.isArray(mc.topics_done) ? mc.topics_done : [];
+        let topicHtml = '';
+        if (doneTopics.length > 0 || (p.stage && p.stage !== '陌生' && p.stage !== '挽回')) {
+            topicHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">'
+                + (doneTopics.length > 0
+                    ? doneTopics.map(t => `<span class="chain-node done">✓${this._escapeHtml(t)}</span>`).join('')
+                    : '<span class="chain-node" style="opacity:.5;">聊过的话题会显示在这里</span>')
+                + '</div>';
         }
 
         const factsHtml = facts.length > 0
@@ -189,13 +200,12 @@ const Chat = {
             ? `<ul class="memory-items">${profileBits.map(x => `<li>${x}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无画像信息</div>';
 
-        // [v20260805b] 去掉"她说过的话/我说过的话"：聊天会话里本来就能看到，不重复展示
-        // [v20260807] 删除"军师主动引导推进：照片→年龄→…→约会"提示行（用户反馈没必要显示，节点本身保留）
-        const milestoneSec = milestoneHtml
-            ? sec('推进里程碑', '#BA7517', milestoneHtml)
+        // [v20260811 话题] 已聊话题（记忆面板展示）
+        const topicSec = topicHtml
+            ? sec('已聊话题', '#BA7517', topicHtml)
             : '';
         return stageSec
-            + milestoneSec
+            + topicSec
             + sec('长期记忆', '#1D9E75', factsHtml)
             + sec('她的画像', '#378ADD', profileHtml);
     },
@@ -787,18 +797,19 @@ const Chat = {
         }
         this._prevGuideStatus = st;
         this._prevGuidePhase = phIdx;
-        // 里程碑已完成集合（判断"X已收集"型信号是否达成）
+        // [v20260811 话题] 已聊话题集合（判断"聊过XX"型信号是否达成）
         const mcObj = this.memoryCard
             ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
             : null;
-        const msDone = new Set((mcObj && mcObj.milestones) || []);
-        const MS_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
-        const isMsSig = (s) => MS_CHAIN.some(m => s.includes(m));
-        const msHit = (s) => { for (const m of MS_CHAIN) if (s.includes(m)) return msDone.has(m); return false; };
+        const doneTopics = new Set((mcObj && mcObj.topics_done) || []);
         const ph = guide.phases[phIdx] || guide.phases[0];
+        // 信号 = 话题 short 名（如"名字"）；命中已聊集合 = 打钩；非话题型信号（行为描述）不勾
+        const isKnownTopic = (s) => TOPIC_LIBRARY_SHORTS.indexOf(s) > -1;
         const sigHtml = (ph.signals || []).map(s => {
-            const hit = isMsSig(s) ? msHit(s) : false;
-            return '<div class="guide-sig' + (hit ? ' done' : '') + '">' + (hit ? '✓' : '○') + ' ' + this._escapeHtml(s) + '</div>';
+            const known = isKnownTopic(s);
+            const hit = known && doneTopics.has(s);
+            const label = known ? '聊' + s : s;
+            return '<div class="guide-sig' + (hit ? ' done' : '') + '">' + (hit ? '✓' : '○') + ' ' + this._escapeHtml(label) + '</div>';
         }).join('');
         const rounds = (ph.rounds_in_phase || 0) + '/' + (ph.stay_max_rounds || 8);
         const ST = { running: '运行中', paused: '已暂停', done: '已完成', aborted: '已终止' };
@@ -868,7 +879,9 @@ const Chat = {
                 + '</span>';
         }).join('');
         return '<div class="guide-quest" title="行动步骤：' + this._escapeHtml(plan.join(' → ')) + '">'
-            + '<div class="guide-quest-head">🎯 当前行动：<b>' + this._escapeHtml(target) + '</b>'
+            + '<div class="guide-quest-head">🎯 当前行动：<b>'
+            + this._escapeHtml(TOPIC_LIBRARY_SHORTS.indexOf(target) > -1 ? '聊' + target : target)
+            + '</b>'
             + ' <span class="guide-qstatus">' + status + '</span>'
             + ' <span class="guide-qpos">' + cur + '/' + total + ' 步</span></div>'
             + '<div class="guide-qsteps">' + stepsText + '</div>'

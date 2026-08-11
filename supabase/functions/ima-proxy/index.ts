@@ -417,7 +417,7 @@ Deno.serve(async (req) => {
     const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
 
     // [v82 主动开窗] 话题停滞检测（纯规则）：当前话题连续轮数 + 对方退缩信号
-    //   供 ①里程碑主动开窗（话题聊死 → 小目标当新话题切入）②检索换话题弹药叠加
+    //   供 ①话题主动开窗（话题聊死 → 换话题切入）②检索换话题弹药叠加
     const topicState = detectTopicStagnation(switchTopic ? '' : query, history);
 
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
@@ -517,13 +517,14 @@ Deno.serve(async (req) => {
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
 
         // [v153 行动层 ActiveQuest] 攻略 → 行动任务调度（semanticKws 已就绪）：
-        //   攻略 running 且当前 phase 有待达成里程碑 → 生成/恢复 quest（跨轮布局执行）
-        //   达成判定统一在 updateMemoryCard 回写（本轮她已给目标信息 → 本轮就点亮里程碑+清空 quest，
-        //   主流程不清空——避免"清了 quest 但里程碑没点亮"的断链）
+        //   攻略 running 且当前 phase 有未聊话题 → 生成/恢复 quest（跨轮布局执行）
+        //   达成判定统一在 updateMemoryCard 回写（本轮她已聊到该话题 → 本轮就打钩+清空 quest，
+        //   主流程不清空——避免"清了 quest 但话题没打钩"的断链）
         //   [2026-08-11] 素材源由套路块改为话术弹药（套路机制已移除）
         if (memoryCard && llmKey && memoryCard.guide && memoryCard.guide.status === 'running') {
           try {
-            const qTarget = nextQuestTarget(memoryCard);
+            // [v20260811 话题] 传 query 让 nextQuestTarget 按当前对话匹配最近话题（聊起来自然）
+            const qTarget = nextQuestTarget(memoryCard, switchTopic ? '' : query);
             const existing = memoryCard.quest;
             if (qTarget && (!existing || existing.target !== qTarget)) {
               // 目标变化或 quest 缺失 → 布局新 quest（检索话术弹药作灵感源）
@@ -761,12 +762,12 @@ Deno.serve(async (req) => {
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
-        // [v61] 里程碑进度（验证推进引导）
-        milestones: Array.isArray(memoryCard?.milestones) ? memoryCard!.milestones : [],
+        // [v20260811 话题] 已聊话题进度（验证打钩推进）
+        topics_done: Array.isArray(memoryCard?.topics_done) ? memoryCard!.topics_done! : [],
         // [v82] 话题停滞状态（验证主动开窗/换话题弹药）：stale_rounds=当前话题已聊轮数, retreating=对方退缩信号
         stale_rounds: topicState.staleRounds,
         retreating: topicState.retreating,
-        // [v20260809] 机会窗口命中验证（null=未命中；命中显示里程碑项名，排查"她问军师没反问"用）
+        // [v20260809] 机会窗口命中验证（null=未命中；命中显示话题名，排查"她问军师没反问"用）
         open_window: switchTopic ? null : detectOpenWindow(query),
         // [v62] 切换话题模式（验证【切换话题】注入）
         switch_topic: switchTopic,
@@ -1015,16 +1016,16 @@ async function extractSemanticKeywords(
 //   [2026-08-11] strategy 套路字段已随套路机制移除
 // ============================================================
 
-// [v153 行动层] ActiveQuest：把攻略里的里程碑目标转成"跨轮执行的多步布局"
-//   战略层（攻略定义"要什么"）→ 行动层（quest 定义"怎么一步步拿到"）→ 执行（状态机逐步兑现）
+// [v153 行动层] ActiveQuest：把攻略里的话题清单目标转成"跨轮执行的多步布局"
+//   [v20260811 话题] 战略层（攻略定义"聊什么"）→ 行动层（quest 定义"怎么一步步自然聊到"）→ 执行（状态机逐步兑现）
 //   [2026-08-11] 素材源由知识库套路改为话术弹药（套路机制已移除）
 type ActiveQuest = {
-  target: string;             // 目标里程碑，如 '照片'（MILESTONE_CHAIN 之一）
-  goal_note: string;          // 目标说明（≤40字）：为什么拿/怎么用，供 LLM 把握动机
+  target: string;             // 目标话题 short 名，如 '年龄'（TOPIC_LIBRARY 之一）
+  goal_note: string;          // 目标说明（≤40字）：为什么聊/怎么聊，供 LLM 把握动机
   plan: string[];             // LLM 布局的 2-4 步（每步 = 话术思路 + 可直接发的例句 + 时机），如
-                              //   ["埋钩：笑她说话像小学生，为打赌铺垫（'你说话跟小学生似的，想证明一下'）",
-                              //    "升级：打赌（'赌一把，猜错的人做10个深蹲，敢不敢'）",
-                              //    "收网：要照片评判（'发张照片来，我亲眼评判输赢，输了别耍赖'）"]
+                              //   ["铺垫：笑她说话像小学生，为话题引入做引子（'你说话跟小学生似的，想证明一下'）",
+                              //    "引入：自然把话题引到目标上（'赌一把，猜错的人做10个深蹲，敢不敢'）",
+                              //    "聊开：引导她说出实质内容（'发张照片来，我亲眼评判输赢，输了别耍赖'）"]
   current_step: number;       // 当前执行到第几步（0-based）
   hook_laid: boolean;         // 上一步钩子已发出，等她接
   waiting_close: boolean;     // 待收网：最后一步已发出，只等收尾
@@ -1043,11 +1044,11 @@ type PulseState = {
 //   三层结构：攻略(总目标) → 阶段(任务/信号/安全阀/预案) → 战术(弹药)
 //   信号驱动推进：无时间表/无 deadline——阶段全部成功信号达成才进下一阶段；
 //   stay_max_rounds 仅作安全阀（不达标超限 → 执行 exit_plan 切换打法，绝不作为推进条件）；
-//   里程碑（MILESTONE_CHAIN）已融入各阶段 signals（如"喜好已收集"），不再单独注入
+//   [v20260811 话题] signals 改为话题 short 名（TOPIC_LIBRARY），不再用里程碑
 type GuidePhase = {
   name: string;              // 阶段名（像攻略关卡，如"舒适感铺垫"）
   mission: string;           // 本阶段任务（≤60字，注入 system 的行动方向）
-  signals: string[];         // 成功信号 3-6 条（具体可判定：里程碑型"X已收集" + 行为型"她主动分享3次"）
+  signals: string[];         // [v20260811] 话题清单 3-6 条（话题 short 名，聊过即打钩）
   stay_max_rounds: number;   // 安全阀：不达标超限 → exit_plan（不推进）
   rounds_in_phase: number;   // 已耗轮次（每轮回复后 +1）
   exit_plan: string;         // 不达标预案（≤40字，如"降低推进浓度回归纯聊天3轮再试"）
@@ -1086,15 +1087,14 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / 保持当前关系 / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
-  // [v61 里程碑] 关系推进里程碑：从"陌生"一路推到"恋爱"要逐个收集的信息/动作
-  //   ['照片','年龄','喜好','住哪','家庭','恋爱经历','敏感面','约会']
-  //   已完成项（对方已给出/已发生）由 LLM 在 extractProfile 时判定合并，构建 system 时注入进度
-  milestones?: string[];
+  // [v20260811 话题清单] 已聊过话题（short 名，如 '名字'/'年龄'）——攻略信号"聊过XX"判定用
+  //   由 extractProfile LLM 低频判定 + 每轮规则打钩（topicHit + 权重话题 topicResultHit）共同写入
+  topics_done?: string[];
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
-  // [v153 行动层] 当前执行的行动任务（攻略里程碑 → 跨轮布局）
+  // [v153 行动层] 当前执行的行动任务（攻略话题清单 → 跨轮布局）
   quest?: ActiveQuest | null;
   // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
   guide?: GuideState | null;
@@ -1110,31 +1110,102 @@ const GUIDE_MIN_ROUNDS = 5;    // 自动制定攻略的最低对话轮数（hist
 const GUIDE_MIN_PHASES = 3;    // 攻略阶段数下限
 const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
 
-// [v61 里程碑] 关系推进里程碑链（默认一路推到恋爱要逐个拿下的"小目标"）
-//   顺序有讲究：先易后难、先公开后私密、先线上后线下——
-//   照片(吸引力确认) → 年龄(基础信息) → 喜好(邀约弹药) → 住哪(距离判断) →
-//   家庭(信任表态) → 恋爱经历(私密升级) → 敏感面(情绪信任) → 约会(线下落地)
-//   [v74b] 移除"加微信"：部分用户本就在微信聊天，引导加微信显尴尬
-//   [v61b] 排序修正：喜好提前到住哪前（聊天初期即可收集，作邀约弹药）；
-//   里程碑不阻塞关系升级——stage 推进只看兴趣信号，里程碑只是每轮的"战术抓手"。
-const MILESTONE_CHAIN = ['照片', '年龄', '喜好', '住哪', '家庭', '恋爱经历', '敏感面', '约会'];
-
-// [v61] 各里程碑对应的"本轮推进话术方向"（带台阶可退，军师用来主动引导）
-const MILESTONE_TIPS: Record<string, string> = {
-  '照片': '自然地要一张她的照片（"看看你长啥样，下次别认错人"），或先发自己的一张引导互换；她给了就顺势夸一句并记下。',
-  '年龄': '轻巧地聊到年龄（"你看着不像 xx 岁，是不是改小了两岁"），交换信息时自然带出；别像查户口。',
-  '喜好': '深挖一个具体喜好（吃的/玩的/歌/电影），问出能当"邀约由头"的细节（如最爱的店、最想看的电影），记住并复用；这是最轻松的破冰话题，聊天早期就该多攒。',
-  '住哪': '聊到她住哪个区/通勤（"你平时在哪个区活动，那边好吃的多吗"），为以后的约地点/接人做铺垫；顺口带出自己住哪。',
-  '家庭': '聊家庭/家乡/成长背景（"你是本地人吗，家里几个孩子"），自然地交换，拉近"自己人"的感觉，不盘问。',
-  '恋爱经历': '半开玩笑地聊情感史（"像你这样的应该不缺人追吧"），引导她讲上一段/恋爱观；她愿意说 = 信任升级，接住情绪别评判。',
-  '敏感面': '引导她说出脆弱/真实的一面（烦恼、压力、怕什么），先共情接住再推进；她向你展露情绪 = 最重要的信任里程碑。',
-  '约会': '落到具体见面：用已收集的喜好/住哪做模糊邀约（"改天带你去你说的那家店"），她接住就敲定时间地点，不现实就改约。',
+// [v20260811 话题清单] 话题库（攻略清单素材库，源文件 话题.txt，共 50 个）
+//   4 期分组：破冰15 / 升温15 / 暧昧10 / 恋爱10；每话题带打钩关键词 kws
+//   weight：'age'|'photo'|'region' = 权重话题（年龄/照片/住哪，好友列表昵称旁可见，
+//   信息最容易自然拿到）——生成攻略时强制排进前阶段、quest 优先引导、且必须"聊出结果"才打钩
+type TopicDef = {
+  name: string;         // 话题名（攻略信号/面板显示用，如 '聊名字'）
+  short: string;        // 短名（quest/打钩引用用，如 '名字'）
+  stage: 'break' | 'warm' | 'flirt' | 'love';  // 所属期
+  kws: string[];        // 打钩预检关键词（她的话命中任一即视为"聊过"）
+  weight?: 'age' | 'photo' | 'region';          // 权重话题标记
 };
+const TOPIC_LIBRARY: TopicDef[] = [
+  // ---- 相识破冰期（15）----
+  { name: '聊名字', short: '名字', stage: 'break', kws: ['名字', '全名', '昵称', '外号', '叫啥', '怎么称呼'] },
+  { name: '聊年龄', short: '年龄', stage: 'break', weight: 'age', kws: ['年龄', '多大', '几岁', '生日', '生肖', '星座', '属'] },
+  { name: '聊照片', short: '照片', stage: 'break', weight: 'photo', kws: ['照片', '自拍', '长相', '本人', '发张', '看看你'] },
+  { name: '聊住哪', short: '住哪', stage: 'break', weight: 'region', kws: ['住哪', '哪里人', '城市', '区域', '租房', '买房', '合租', '独居'] },
+  { name: '聊工作/学业', short: '工作', stage: 'break', kws: ['工作', '上班', '职业', '做什么', '学业', '上学', '专业', '实习'] },
+  { name: '聊作息时间', short: '作息', stage: 'break', kws: ['作息', '几点起', '几点睡', '熬夜', '早睡', '失眠'] },
+  { name: '聊日常通勤', short: '通勤', stage: 'break', kws: ['通勤', '地铁', '公交', '开车', '上班路', '路上'] },
+  { name: '聊饮食习惯', short: '饮食', stage: 'break', kws: ['吃', '饮食', '辣', '火锅', '口味', '忌口', '爱吃'] },
+  { name: '聊会不会做饭', short: '做饭', stage: 'break', kws: ['做饭', '做菜', '拿手菜', '厨艺', '下厨', '黑暗料理'] },
+  { name: '聊运动健身', short: '运动', stage: 'break', kws: ['运动', '健身', '跑步', '打球', '健身房', '瑜伽', '户外'] },
+  { name: '聊兴趣爱好', short: '爱好', stage: 'break', kws: ['爱好', '兴趣', '空闲', '平时干嘛', '业余', '打发时间'] },
+  { name: '聊最近在追的剧/综艺/动漫', short: '追剧', stage: 'break', kws: ['追剧', '综艺', '动漫', '最近看', '剧'] },
+  { name: '聊喜欢的音乐类型和歌手', short: '音乐', stage: 'break', kws: ['音乐', '歌手', '歌单', '听歌', '演唱会', '曲风'] },
+  { name: '聊电影口味', short: '电影', stage: 'break', kws: ['电影', '影院', '大片', '看电影', '片单'] },
+  { name: '聊看书吗', short: '看书', stage: 'break', kws: ['看书', '读书', '书', '小说', '电子书', '纸质书'] },
+  // ---- 好感升温期（15）----
+  { name: '聊周末怎么过', short: '周末', stage: 'warm', kws: ['周末', '放假', '宅', '出门', '休息日'] },
+  { name: '聊社交习惯', short: '社交', stage: 'warm', kws: ['聚会', '社恐', '朋友多', '社交', '交际'] },
+  { name: '聊酒量', short: '酒量', stage: 'warm', kws: ['喝酒', '酒量', '酒', '微醺', '喝醉'] },
+  { name: '聊抽不抽烟', short: '抽烟', stage: 'warm', kws: ['抽烟', '吸烟', '烟瘾'] },
+  { name: '聊养宠物', short: '宠物', stage: 'warm', kws: ['宠物', '猫', '狗', '养猫', '养狗'] },
+  { name: '聊旅游', short: '旅游', stage: 'warm', kws: ['旅游', '旅行', '去过', '想去', '度假', '自驾'] },
+  { name: '聊喜欢的季节和天气', short: '季节', stage: 'warm', kws: ['季节', '天气', '冬天', '夏天', '下雨', '下雪'] },
+  { name: '聊穿衣风格', short: '穿衣', stage: 'warm', kws: ['穿衣', '穿搭', '风格', '打扮', '衣服'] },
+  { name: '聊手机', short: '手机', stage: 'warm', kws: ['手机', '苹果', '安卓', 'app', '刷手机'] },
+  { name: '聊睡眠习惯', short: '睡眠', stage: 'warm', kws: ['睡眠', '睡觉', '睡姿', '呼噜', '认床', '失眠', '做梦'] },
+  { name: '聊怕什么', short: '怕什么', stage: 'warm', kws: ['怕', '害怕', '怕黑', '怕虫', '怕高', '怕鬼', '胆小'] },
+  { name: '聊学生时代', short: '学生时代', stage: 'warm', kws: ['学生', '上学', '成绩', '逃课', '老师', '学校', '同学'] },
+  { name: '聊童年', short: '童年', stage: 'warm', kws: ['童年', '小时候', '长大', '老家', '回忆'] },
+  { name: '聊家庭情况', short: '家庭', stage: 'warm', kws: ['家庭', '爸妈', '父母', '兄弟姐妹', '独生', '家里'] },
+  { name: '聊和父母的关系', short: '父母关系', stage: 'warm', kws: ['父母', '爸妈', '瞒着', '说心里话', '跟家里'] },
+  // ---- 暧昧期（10）----
+  { name: '聊感情经历', short: '感情经历', stage: 'flirt', kws: ['感情', '谈过', '恋爱史', '交往过', '几段'] },
+  { name: '聊前任', short: '前任', stage: 'flirt', kws: ['前任', 'ex', '前男友', '前女友', '分手后'] },
+  { name: '聊分手原因', short: '分手原因', stage: 'flirt', kws: ['分手', '分开', '异地', '出轨', '性格不合', '闹掰'] },
+  { name: '聊对前任的态度', short: '前任态度', stage: 'flirt', kws: ['放下', '恨', '释怀', '忘不了', '翻篇'] },
+  { name: '聊择偶标准', short: '择偶标准', stage: 'flirt', kws: ['择偶', '标准', '理想型', '喜欢什么样', '对象标准'] },
+  { name: '聊对恋爱的看法', short: '恋爱观', stage: 'flirt', kws: ['恋爱', '爱情', '感情观', '谈恋爱', '爱是什么'] },
+  { name: '聊第一次见面什么印象', short: '第一印象', stage: 'flirt', kws: ['第一印象', '初见', '见面印象'] },
+  { name: '聊现在的关系状态', short: '关系状态', stage: 'flirt', kws: ['关系', '我们', '算什么', '进展', '怎么看我'] },
+  { name: '聊和同事/同学的关系', short: '同事关系', stage: 'flirt', kws: ['同事', '同学', '讨厌的人', '关系好'] },
+  { name: '聊压力来源', short: '压力', stage: 'flirt', kws: ['压力', '焦虑', '烦', '心事', '累'] },
+  // ---- 正式恋爱期（10）----
+  { name: '聊约会', short: '约会', stage: 'love', kws: ['约会', '见面', '出来', '约', '下次', '安排'] },
+  { name: '聊敏感面', short: '敏感面', stage: 'love', kws: ['脆弱', '敏感', '不安', '不敢提', '软肋'] },
+  { name: '聊金钱观', short: '金钱观', stage: 'love', kws: ['钱', '金钱', '花钱', '存钱', 'AA', '买单', '消费观'] },
+  { name: '聊消费习惯', short: '消费', stage: 'love', kws: ['消费', '舍得', '贵', '便宜', '购物', '买东西'] },
+  { name: '聊未来规划', short: '未来', stage: 'love', kws: ['未来', '规划', '发展', '五年', '以后', '打算'] },
+  { name: '聊结婚', short: '结婚', stage: 'love', kws: ['结婚', '婚姻', '嫁', '婚房', '想结'] },
+  { name: '聊孩子', short: '孩子', stage: 'love', kws: ['孩子', '小孩', '宝宝', '要几个'] },
+  { name: '聊定居', short: '定居', stage: 'love', kws: ['定居', '房子', '买房', '城市', '落户'] },
+  { name: '聊吵架', short: '吵架', stage: 'love', kws: ['吵架', '生气', '冷战', '和好', '闹矛盾', '哄'] },
+  { name: '聊我们', short: '我们', stage: 'love', kws: ['我们', '合适', '未来', '爱不爱', '在一起'] },
+];
+const TOPIC_STAGE_LABEL: Record<string, string> = { break: '相识破冰期', warm: '好感升温期', flirt: '暧昧期', love: '正式恋爱期' };
+const TOPIC_WEIGHT_LABEL: Record<string, string> = { age: '年龄', photo: '照片', region: '住哪' };
+
+// [v20260811] 话题查找：按 short 找 TopicDef
+function topicDef(short: string): TopicDef | undefined {
+  return TOPIC_LIBRARY.find((t) => t.short === short);
+}
+// [v20260811] 打钩预检：她的话是否命中话题关键词（任一命中 = 可能聊过）
+function topicHit(topic: TopicDef | undefined, text: string): boolean {
+  if (!topic || !text) return false;
+  return topic.kws.some((k) => String(text).includes(k));
+}
+// [v20260811] 权重话题"聊出结果"判定（年龄/照片/住哪必须拿到具体信息才打钩）
+const TOPIC_RESULT_RE: Record<string, RegExp> = {
+  'age': /我(今年|现在)?\s?[0-9一二三四五六七八九十]{1,2}\s?岁|生日|属[鼠牛虎兔龙蛇马羊猴鸡狗猪]|星座|我是[0-9]{2}年/,
+  'photo': /发(张|个)?(照片|自拍)|这是我|你看(看)?(我|这张)|加个(微信|好友)|相册/,
+  'region': /我(住|家在|在|是).{0,8}(区|市|这边|附近|租房|买房|合租|独居|本地|外地)|住在|上班(在|去|到)/,
+};
+// 权重话题必须"聊出结果"：命中关键词 + 命中结果正则 才打钩
+function topicResultHit(topic: TopicDef, text: string): boolean {
+  if (!topic.weight) return true;              // 非权重话题：聊过即打钩
+  const re = TOPIC_RESULT_RE[topic.weight];
+  return re ? re.test(String(text)) : true;
+}
 
 // [v82 主动开窗] 话题停滞检测（纯规则零 LLM）：
 //   staleRounds = 当前话题已连续聊的轮数（历史对方消息与 query 共享关键词的连续条数）
 //   retreating  = 当前 query 或最近对方消息短/敷衍（退缩信号：≤4 字或纯敷衍词）
-//   用途：里程碑"主动开窗"判定（话题聊死 → 用小目标当新话题切入）+ 检索换话题弹药
+//   用途：话题"主动开窗"判定（话题聊死 → 换新话题切入）+ 检索换话题弹药
 function detectTopicStagnation(query: string, history: any[]): { staleRounds: number; retreating: boolean } {
   const curKws = new Set(extractKeywords(String(query || '')));
   const userMsgs = (Array.isArray(history) ? history : [])
@@ -1162,21 +1233,22 @@ function detectTopicStagnation(query: string, history: any[]): { staleRounds: nu
   return { staleRounds, retreating };
 }
 
-// [v20260809 机会窗口] 对方主动问起里程碑话题 = 她亲手递来的窗口（纯规则，零 LLM）
+// [v20260809 机会窗口] 对方主动问起话题库相关话题 = 她亲手递来的窗口（纯规则，零 LLM）
 //   命中 → buildSystemContent 注入【机会窗口】块：回答后必须单次镜像反问
 //   她先开口后的镜像反问 = 社交互惠，不是查户口（查户口 = 连环盘问不回应）
-//   数组顺序 = 匹配优先级（先命中者胜；家庭/住哪分开判，防"你家"歧义）
+//   [v20260811 话题] 返回值改为话题 short 名（TOPIC_LIBRARY 对齐），命中=该话题顺势完成
+//   数组顺序 = 匹配优先级（先命中者胜）
 const OPEN_WINDOW_PATTERNS: Array<[string, RegExp]> = [
   ['年龄', /你多大|你几岁|你多大了|你几岁了|你今年多大|你哪年|你是哪年|你是哪一年|你哪一年|哪一年生|你属[什么啥]/],
   ['喜好', /你喜欢什么|你最爱|你平时(喜欢|爱)|你有什么(爱好|兴趣)|你最爱(看|吃|听|玩)/],
   ['住哪', /你住哪|你住在|你在哪个(区|城市|片区)|你是哪里人|你哪的|你家在哪|你家是哪/],
   ['家庭', /你家几口|你是独生|你爸妈|你爸你妈|你家里/],
   ['照片', /发(张|个)照片|你长什么样|看看你|你照片(发|给)|自拍/],
-  ['恋爱经历', /你谈过|你前任|你以前(对象|女朋友)|你感情(史|经历)|你交往过/],
-  ['敏感面', /你最近(在)?(烦|愁|压力)|你有什么压力|你怕什么|你最难/],
+  ['感情经历', /你谈过|你前任|你以前(对象|女朋友)|你感情(史|经历)|你交往过/],
+  ['压力', /你最近(在)?(烦|愁|压力)|你有什么压力|你怕什么|你最难/],
 ];
 
-// [v20260809] 检测"她主动问里程碑话题"：命中返回里程碑项名（如'年龄'），否则 null
+// [v20260809] 检测"她主动问话题库话题"：命中返回话题 short 名（如'年龄'），否则 null
 //   仅对对方原话（query）检测；switchTopic 时主流程传 ''，天然跳过
 function detectOpenWindow(query: string): string | null {
   const q = String(query || '').trim();
@@ -1189,7 +1261,7 @@ function detectOpenWindow(query: string): string | null {
 
 // [v147 机会窗口扩展] 她主动"袒露自我"（分享日常/自述特质/分享经历/表达喜好/关心你/分享心情）
 //   = 舒适期窗口：她信任你、想拉近距离，主动递了"了解我"的钥匙
-//   与里程碑窗口（她问你）互补：她问你 → 镜像反问等价交换；她自述 → 先接住再升级
+//   与话题窗口（她问你）互补：她问你 → 镜像反问等价交换；她自述 → 先接住再升级
 //   命中 → buildSystemContent 注入【接住分享】块：①先接情绪（认可/共鸣）②再深挖一句 ③可轻升级，禁止交易式接话
 //   数组顺序 = 匹配优先级（自述特质 > 日常习惯 > 分享经历 > 表达喜好 > 关心对方 > 分享心情）
 const SELF_DISCLOSURE_PATTERNS: Array<[string, RegExp]> = [
@@ -1224,8 +1296,9 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
     if (!raw) return null;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (parsed && typeof parsed === 'object') {
-      // [2026-08-11] 存量清洗：旧套路字段 strategy 已废弃，读入即剥离，写回时自然消失
+      // [2026-08-11] 存量清洗：旧套路字段 strategy、旧里程碑字段 milestones 已废弃，读入即剥离，写回时自然消失
       delete parsed.strategy;
+      delete parsed.milestones;
       return parsed;
     }
     return null;
@@ -1371,9 +1444,9 @@ async function updateMemoryCard(ctx: {
       card.profile = profile;
       // [v57] 长期事实合并（去重 + 上限淘汰）
       mergeFacts(card, extracted.facts || []);
-      // [v61] 里程碑合并（LLM 判定 + 已有并集，按链序排序）
-      if (Array.isArray(extracted.milestones)) {
-        card.milestones = extracted.milestones;
+      // [v20260811 话题] 已聊话题合并（LLM 判定 + 已有并集）
+      if (Array.isArray(extracted.topics_done)) {
+        card.topics_done = extracted.topics_done;
       }
     }
     // [v20260810 攻略] LLM 低频信号评估（与画像同周期 ~5min）：判定行为型信号是否达成 → 全部达成即推进
@@ -1391,39 +1464,63 @@ async function updateMemoryCard(ctx: {
     card.updated_at = new Date().toISOString();
   }
 
-  // [v20260810 攻略] 攻略进度（每轮规则）：里程碑型信号判定 + 安全阀（超限执行预案不推进）
+  // [v20260810 攻略] 攻略进度（每轮规则）：话题型信号判定 + 安全阀（超限执行预案不推进）
   if (card.guide && card.guide.status === 'running') {
     updateGuideProgress(card, ctx.history);
   }
 
+  // [v20260811 话题打钩] 每轮规则打钩：她本轮的话命中当前阶段未完成话题 → 打钩
+  //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
+  //   与 quest 达成共用同一判定（话题命中 = 该话题实质聊过）
+  {
+    const g = card.guide;
+    const gph = g && g.status === 'running' ? g.phases[g.current_phase] : null;
+    if (gph && Array.isArray(gph.signals)) {
+      const herText = String(ctx.currentQuery || '');
+      const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+      let changed = false;
+      for (const sig of gph.signals) {
+        const t = topicDef(sig);
+        if (!t || done.has(sig)) continue;
+        if (herText && topicHit(t, herText) && topicResultHit(t, herText)) {
+          done.add(sig);
+          changed = true;
+        }
+      }
+      if (changed) {
+        card.topics_done = [...done];
+        // 打钩后立即检查本阶段是否全部达成 → 推进（纯规则，无需等 LLM）
+        if (gph.signals.every((sig) => isTopicSignal(sig) && topicSignalDone(sig, done))) {
+          advanceGuide(card, `本阶段话题已全部聊过，攻略推进`);
+        }
+      }
+    }
+  }
+
   // [v153 行动层 ActiveQuest] 回写推进（读-写闭环）：
   //   推进规则：
-  //   - 她已达成目标（本轮或上轮给了照片/年龄等）→ 里程碑点亮 + quest 清空 + 攻略推进
+  //   - 目标话题已聊过（本轮规则打钩或上轮）→ 打钩已完成 + quest 清空（下轮按对话重新匹配最近话题）
   //   - 收网态（waiting_close）：上轮最后一步已发出，本轮她已回应 → 任务完成清空
   //   - 坑已埋（hook_laid）：她接招（questEngageHit 命中）→ 放行下一步（current_step++），
   //     到末步 → 进入收网；没接 → 忍住不推进
   //   - 刚启动（!hook_laid）：本轮执行了当前步（埋钩）→ hook_laid=true；当前步是末步 → 进入收网
-  //   - 轮次上限兜底：非收网态且超限 → 放弃清空（不点亮里程碑，改日再布局）
+  //   - 轮次上限兜底：非收网态且超限 → 放弃清空（改日再布局）
   if (card.quest) {
     const q = card.quest;
     const lastUser = [...(Array.isArray(ctx.history) ? ctx.history : [])]
       .reverse().find((h) => h && h.role === 'user' && typeof h.content === 'string');
     const lastUserText = String((lastUser as any)?.content || '');
-    // [v153] 达成判定优先看本轮 query（她本轮刚给目标信息 → 本轮就点亮，不滞后一轮）
-    const qAchieved = questAchieved(q.target, ctx.currentQuery || lastUserText);
-    if (qAchieved) {
-      // 达成：点亮里程碑 + 清空 quest + 推进攻略（该 phase 全信号达成则自动推进）
-      const ms = Array.isArray(card.milestones) ? card.milestones.slice() : [];
-      if (!ms.includes(q.target)) ms.push(q.target);
-      card.milestones = ms;
-      card.quest = null;
-      if (card.guide && card.guide.status === 'running') {
-        const gph = card.guide.phases[card.guide.current_phase];
-        if (gph && Array.isArray(gph.signals) && gph.signals.length > 0
-          && gph.signals.every((sig) => isMilestoneSignal(sig) && milestoneIn(sig, new Set(ms)))) {
-          advanceGuide(card, `里程碑「${q.target}」已达成，本阶段全部信号完成`);
-        }
+    // [v20260811] 目标话题已聊过 = quest 达成（本轮 herText 命中，或已打钩记录在册）
+    const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+    const qDone = done.has(q.target)
+      || topicDoneByText(topicDef(q.target), ctx.currentQuery || lastUserText);
+    if (qDone) {
+      // 达成：目标话题打钩 + 清空 quest（推进已由每轮打钩块处理）
+      if (!done.has(q.target)) {
+        done.add(q.target);
+        card.topics_done = [...done];
       }
+      card.quest = null;
     } else if (q.waiting_close) {
       // 收网轮：上轮最后一步已发出，本轮她已回应 → 任务完成，恢复正常聊天
       card.quest = null;
@@ -1440,7 +1537,7 @@ async function updateMemoryCard(ctx: {
     }
     q.rounds_used = (q.rounds_used || 0) + 1;
     if (card.quest && !q.waiting_close && q.rounds_used >= (q.max_rounds || QUEST_MAX_ROUNDS)) {
-      card.quest = null; // 轮次上限：放弃本次布局，改日再战（不点亮里程碑）
+      card.quest = null; // 轮次上限：放弃本次布局，改日再战
     }
   }
 
@@ -1449,10 +1546,11 @@ async function updateMemoryCard(ctx: {
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
 // [v57] 返回 {profile, facts}：profile=画像对象；facts=本轮新提取的长期事实（string[]）
-// [v61] profile 新增 milestones：关系推进里程碑已完成项（照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会）
-async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[] } | null> {
+// [v20260811 话题] 返回新增 topics_done：已实质聊过的话题 short 列表（LLM 兜底判定，
+//   规则打钩漏判时补上；与每轮 topicHit 规则打钩合并去重）
+async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[]; topics_done: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
-  const curMilestones = JSON.stringify(Array.isArray(card.milestones) ? card.milestones : []);
+  const curTopics = JSON.stringify(Array.isArray(card.topics_done) ? card.topics_done : []);
   const recentDialogue = (Array.isArray(history) ? history : [])
     // [v20260809 归属加固] 只取对方（role=user）的话喂画像提取：
     //   把军师/用户自己发的（assistant）也喂进去 → LLM 偶尔把"自己说的话"当对方画像
@@ -1460,7 +1558,8 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .slice(-6)
     .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前里程碑：${curMilestones}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、milestones（关系推进里程碑已完成项数组，从"照片/年龄/喜好/住哪/家庭/恋爱经历/敏感面/约会"8项中选出对方已给出/已发生的项，保留当前里程碑里已有的项并加上本轮新完成的，去重；没有则空数组。对方明确给过照片/年龄/喜好/家庭/恋爱经历/敏感面或约好见面等任一信息时必须如实记入，不得遗漏；"住哪"只要对方提到任何地点/居住信息就算完成，不论大小（如"我是平南人""我住XX村"都算），不得因地方小就漏记）、facts（从最近对话里新提取的"值得跨天记住的硬事实"数组，如明确的日期/约定/生日/她的偏好/雷点/家庭/工作/宠物名，每条≤40字，最多3条；没有新事实则空数组）。\n`
+  const topicShortList = TOPIC_LIBRARY.map((t) => t.short).join('/');
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
     + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1474,16 +1573,15 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       .map((t: any) => (typeof t === 'string' ? t.trim().slice(0, 40) : ''))
       .filter((t: string) => t.length > 0)
       .slice(0, 3);
-    // [v61] 里程碑：取 LLM 判定结果 + 合并已有（LLM 可能漏报历史项，并集兜底）
-    const llmMs = (Array.isArray(p.milestones) ? p.milestones : [])
+    // [v20260811 话题] 已聊话题：LLM 判定 + 合并已有（并集兜底），只保留库里存在的 short
+    const validShorts = new Set(TOPIC_LIBRARY.map((t) => t.short));
+    const llmTopics = (Array.isArray(p.topics_done) ? p.topics_done : [])
       .map((m: any) => (typeof m === 'string' ? m.trim() : ''))
-      .filter((m: string) => MILESTONE_CHAIN.includes(m));
-    const mergedMs = Array.from(new Set([
-      ...(Array.isArray(card.milestones) ? card.milestones : []),
-      ...llmMs,
-    ])).filter((m) => MILESTONE_CHAIN.includes(m));
-    // 按链顺序排，保证进度展示稳定
-    mergedMs.sort((a, b) => MILESTONE_CHAIN.indexOf(a) - MILESTONE_CHAIN.indexOf(b));
+      .filter((m: string) => validShorts.has(m));
+    const mergedTopics = Array.from(new Set([
+      ...(Array.isArray(card.topics_done) ? card.topics_done : []),
+      ...llmTopics,
+    ])).filter((m) => validShorts.has(m));
     return {
       profile: {
         stage: typeof p.stage === 'string' && p.stage ? p.stage : '陌生',
@@ -1492,12 +1590,12 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
         recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
         // [v56] 话题锚点：跨轮次连续剧感的共同梗（无则空，不覆盖已有锚点由合并逻辑处理）
         anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
-        // [v83] 年龄/地区：里程碑"年龄""住哪"激活时提取的具体值，供好友列表展示
+        // [v83] 年龄/地区：话题"年龄""住哪"聊出结果时提取的具体值，供好友列表展示
         age: typeof p.age === 'string' ? p.age.trim().slice(0, 10) : '',
         region: typeof p.region === 'string' ? p.region.trim().slice(0, 20) : '',
       },
       facts,
-      milestones: mergedMs,
+      topics_done: mergedTopics,
     };
   } catch (e: any) {
     console.warn('extractProfile failed:', e.message);
@@ -1508,20 +1606,23 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
 // ============================================================
 // [v20260810 攻略] 作战攻略：生成 / 信号评估 / 推进 / 安全阀
 //   信号驱动（无时间表）：阶段全部成功信号达成才推进；stay_max_rounds 仅安全阀
-//   里程碑已融入 signals（如"喜好已收集"）；攻略激活时 GOAL_HINTS/ESCALATION 停用
+//   [v20260811 话题] 攻略 signals 改为"聊过XX话题"（话题 short 名，来自 TOPIC_LIBRARY）
 // ============================================================
 
-// 信号是否为里程碑型（文本含里程碑项，如"喜好已收集"）
-function isMilestoneSignal(sig: string): boolean {
-  return MILESTONE_CHAIN.some((m) => sig.includes(m));
+// 信号是否为话题型（信号文本 = TOPIC_LIBRARY 里的 short 名）
+function isTopicSignal(sig: string): boolean {
+  return !!topicDef(sig);
 }
 
-// 里程碑型信号是否已达成（对应里程碑在已完成集合里）
-function milestoneIn(sig: string, done: Set<string>): boolean {
-  for (const m of MILESTONE_CHAIN) {
-    if (sig.includes(m)) return done.has(m);
-  }
-  return false;
+// 话题型信号是否已达成（对应话题在已聊集合里）
+function topicSignalDone(sig: string, done: Set<string>): boolean {
+  return done.has(sig);
+}
+
+// [v20260811] 她的话是否让某话题"实质聊过"（规则打钩）：命中关键词 + 权重话题需聊出结果
+function topicDoneByText(topic: TopicDef | undefined, text: string): boolean {
+  if (!topic || !text) return false;
+  return topicHit(topic, text) && topicResultHit(topic, text);
 }
 
 // 推进/完成攻略（规则版与 LLM 版共用；current_phase 越界视为完成）
@@ -1537,7 +1638,7 @@ function advanceGuide(card: MemoryCard, evalSummary?: string): void {
   }
 }
 
-// 每轮规则进度：里程碑型信号判定 + 安全阀（超限执行预案，不推进）
+// 每轮规则进度：话题型信号判定 + 安全阀（超限执行预案，不推进）
 function updateGuideProgress(card: MemoryCard, history: any[]): void {
   const g = card.guide;
   if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return;
@@ -1545,10 +1646,10 @@ function updateGuideProgress(card: MemoryCard, history: any[]): void {
   if (!ph) { g.status = 'done'; return; }
   ph.rounds_in_phase = (ph.rounds_in_phase || 0) + 1;
   const signals = Array.isArray(ph.signals) ? ph.signals : [];
-  // 里程碑型信号规则判定：全部信号都是里程碑型 且 全部已达成 → 直接推进
-  // （含行为型信号时规则判定不了，交给 LLM 低频评估 evalGuideSignals）
-  const msDone = new Set(Array.isArray(card.milestones) ? card.milestones : []);
-  if (signals.length > 0 && signals.every((sig) => isMilestoneSignal(sig) && milestoneIn(sig, msDone))) {
+  // 话题型信号规则判定：全部信号都是话题型 且 全部已聊过 → 直接推进
+  // （含非话题型行为信号时规则判定不了，交给 LLM 低频评估 evalGuideSignals）
+  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+  if (signals.length > 0 && signals.every((sig) => isTopicSignal(sig) && topicSignalDone(sig, done))) {
     advanceGuide(card);
     return;
   }
@@ -1579,7 +1680,7 @@ async function evalGuideSignals(
     + `成功信号（编号从 1 开始，逐条判定）：\n`
     + ph.signals.map((sig, i) => `${i + 1}. ${sig}`).join('\n')
     + `\n最近对方说的话：\n${recent || '（无）'}\n`
-    + `要求：只根据"对方已经做了什么/给出了什么"判定信号是否达成（已收集里程碑类信息、主动分享、接住调侃、答应邀约等），拿不准的不算达成；只输出 JSON：{"done":[已达成信号编号数组，无则[]],"summary":"一句话进度评估，≤40字"}，不要任何其他文字。`;
+    + `要求：只根据"对方已经做了什么/聊了什么"判定信号是否达成（话题是否已实质聊过——聊出具体内容而非提一嘴；权重话题年龄/照片/住哪需聊出结果：知道具体年龄/发过照片/知道住哪），拿不准的不算达成；只输出 JSON：{"done":[已达成信号编号数组，无则[]],"summary":"一句话进度评估，≤40字"}，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.2, maxTokens: 200, _stage: 'guide_eval',
@@ -1602,35 +1703,39 @@ async function evalGuideSignals(
 }
 
 // [v20260810 攻略] 制定作战攻略（LLM 一次性生成，信号驱动无时间表）
-//   输入：画像/目标/里程碑/最近对话 → 输出 GuideState（3-5 阶段，每阶段 mission/signals/安全阀/预案）
+//   [v20260811 话题] 输入改为话题库：LLM 按阶段/性格/目标/最近对话从 TOPIC_LIBRARY 挑话题当 signals
+//   年龄/照片/住哪（权重话题）必须排进前两个阶段（列表页可见，最容易自然聊到）
 async function extractGuide(
   llmKey: string, llmBase: string, llmModel: string,
   card: MemoryCard, history: any[]
 ): Promise<GuideState | null> {
   const p = card.profile || {};
-  const msDone = Array.isArray(card.milestones) ? card.milestones : [];
-  const msPending = MILESTONE_CHAIN.filter((m) => !msDone.includes(m));
+  const doneTopics = Array.isArray(card.topics_done) ? card.topics_done : [];
   const recent = (Array.isArray(history) ? history : [])
     .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
     .slice(-8)
     .map((h) => `对方：${truncateText(String(h.content || ''), 120)}`)
     .join('\n');
+  // 话题库按期分组喂给 LLM（短名清单，便于挑选）
+  const topicPool = TOPIC_LIBRARY.map((t) => t.short).join('/');
+  const weightTopics = TOPIC_LIBRARY.filter((t) => t.weight).map((t) => t.short).join('/');
   const prompt = `你是恋爱攻略策划师。为「用户本人」制定一份和当前这位女生聊天的作战攻略（像游戏攻略：有明确目的地和路线，军师主动推进，不靠对方踢一下动一下）。\n`
     + `当前情况：\n`
     + `- 关系阶段：${p.stage || '陌生'}\n`
     + `- 对方性格：${p.personality || '未知'}\n`
     + `- 关系背景：${p.relationship_note || '无'}\n`
     + `- 用户设定的总目标：${card.goal || '推进恋爱'}\n`
-    + `- 已收集里程碑：${msDone.join('/') || '无'}\n`
-    + `- 待收集里程碑：${msPending.join('/') || '无'}\n`
+    + `- 已聊过话题：${doneTopics.join('/') || '无'}\n`
+    + `- 话题库（short 名清单，只能从这里选）：${topicPool}\n`
     + `- 最近对方说的话：${recent || '（无）'}\n`
     + `要求（严格遵守）：\n`
     + `1. 规划 ${GUIDE_MIN_PHASES}~${GUIDE_MAX_PHASES} 个阶段，从当前状态一步步通往总目标；阶段名像攻略关卡（如"破冰建立连接"→"舒适感铺垫"→"暧昧试探"→"邀约落地"）。\n`
-    + `2. 每个阶段给出：mission（本阶段任务，≤60字，可执行的动作方向）、signals（成功信号 3~6 条，必须具体可判定：优先用里程碑型硬信号"X已收集"，其次用对方行为信号如"她主动分享3次""她接住调侃并回撩"；全部达成才进下一阶段）、stay_max_rounds（本阶段最多停留轮数 3~10，超了还没达标就按预案换打法，不硬耗不纠缠）、exit_plan（不达标预案，≤40字，如"降低推进浓度回归纯聊天3轮再试"）。\n`
-    + `3. 把「待收集里程碑」按推进顺序自然分配到各阶段 signals 里（如阶段2信号含"住哪已收集"），已收集的里程碑不用再要求。\n`
-    + `4. 信号驱动：禁止写时间/天数要求，只写可观察的达成信号；阶段之间必须有递进，最后一阶段信号全达成 = 攻略完成。\n`
-    + `5. 若总目标是挽回/修复：第一阶段必须是"稳情绪重建信任"，禁止调侃/打压类信号，且各阶段节奏都更温和。\n`
-    + `只输出 JSON：{"name":"攻略名(≤20字)","goal":"总目标(≤30字)","phases":[{"name":"阶段名","mission":"...","signals":["...","..."],"stay_max_rounds":n,"exit_plan":"..."}]}，不要任何其他文字。`;
+    + `2. 每个阶段给出：mission（本阶段任务，≤60字，可执行的动作方向）、signals（成功信号 3~6 条 = 本阶段要聊的话题 short 名，从「话题库」里选最贴合本阶段关系状态的 3~6 个；话题名原样输出，全部聊过才进下一阶段）、stay_max_rounds（本阶段最多停留轮数 3~10，超了还没达标就按预案换打法，不硬耗不纠缠）、exit_plan（不达标预案，≤40字，如"降低推进浓度回归纯聊天3轮再试"）。\n`
+    + `3. 【权重硬约束】「${weightTopics}」这三个话题必须出现在前两个阶段的 signals 里（它们在好友列表昵称旁可见，最容易自然聊到，优先拿到；已聊过的跳过）。\n`
+    + `4. 话题按关系递进分配：破冰期放轻松信息类（名字/工作/饮食/作息等），升温期放生活类（周末/宠物/旅游/家庭等），暧昧期放感情类（前任/择偶/恋爱观等），恋爱期放深关系类（约会/金钱观/未来/结婚等）；已聊过的话题不用再列。\n`
+    + `5. 信号驱动：禁止写时间/天数要求，只写可观察的达成信号；阶段之间必须有递进，最后一阶段信号全达成 = 攻略完成。\n`
+    + `6. 若总目标是挽回/修复：第一阶段必须是"稳情绪重建信任"，禁止调侃/打压类话题信号，且各阶段节奏都更温和。\n`
+    + `只输出 JSON：{"name":"攻略名(≤20字)","goal":"总目标(≤30字)","phases":[{"name":"阶段名","mission":"...","signals":["话题short名","..."],"stay_max_rounds":n,"exit_plan":"..."}]}，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.4, maxTokens: 900, _stage: 'extract_guide',
@@ -1640,6 +1745,7 @@ async function extractGuide(
     if (start === -1 || end === -1) return null;
     const g = JSON.parse(content.slice(start, end + 1));
     const name = typeof g.name === 'string' ? g.name.trim().slice(0, 20) : '恋爱推进攻略';
+    const validShorts = new Set(TOPIC_LIBRARY.map((t) => t.short));
     const phases = (Array.isArray(g.phases) ? g.phases : [])
       .filter((ph: any) => ph && typeof ph === 'object' && typeof ph.name === 'string')
       .slice(0, GUIDE_MAX_PHASES)
@@ -1648,7 +1754,9 @@ async function extractGuide(
         mission: String(ph.mission || '').trim().slice(0, 60),
         signals: (Array.isArray(ph.signals) ? ph.signals : [])
           .map((s: any) => (typeof s === 'string' ? s.trim().slice(0, 30) : ''))
-          .filter((s: string) => s.length > 0)
+          // [v20260811] 只保留话题库里的合法 short 名（LLM 偶发自创/带"聊"前缀 → 剥前缀再匹配）
+          .map((s: string) => (s.startsWith('聊') ? s.slice(1) : s))
+          .filter((s: string) => s.length > 0 && validShorts.has(s))
           .slice(0, 6),
         stay_max_rounds: Math.max(3, Math.min(10, parseInt(ph.stay_max_rounds, 10) || 6)),
         rounds_in_phase: 0,
@@ -1672,19 +1780,24 @@ async function extractGuide(
 }
 
 // [v20260810 攻略] 当前攻略注入块（buildSystemContent 用）：替代 GOAL_HINTS/ESCALATION
-function buildGuideBlock(guide: GuideState, ph: GuidePhase, msDone: string[]): string {
-  const doneSet = new Set(msDone);
+//   [v20260811 话题] signals = 话题 short 名；打钩显示"聊过"
+function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[]): string {
+  const doneSet = new Set(doneTopics);
   const sigList = (ph.signals || []).map((sig) => {
-    const hit = isMilestoneSignal(sig) ? milestoneIn(sig, doneSet) : false;
-    return `  ${hit ? '✓' : '○'} ${sig}`;
+    const t = topicDef(sig);
+    const hit = t ? topicSignalDone(sig, doneSet) : false;
+    const label = t ? `聊${sig}` : sig;
+    return `  ${hit ? '✓' : '○'} ${label}`;
   }).join('\n');
   const maxRounds = ph.stay_max_rounds || 8;
   return `\n\n【当前攻略】(战略层，最高优先级，替代目标引导)\n`
     + `- 你在执行攻略「${guide.name}」，总目标：${guide.goal}。你不是被动的应声虫——每一轮都带着攻略目的在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急。\n`
     + `- 当前阶段 ${guide.current_phase + 1}/${guide.phases.length}「${ph.name}」：${ph.mission}\n`
-    + `- 本阶段成功信号（全部达成才进入下一阶段）：\n${sigList}\n`
+    + `- 本阶段话题清单（全部聊过才进入下一阶段）：\n${sigList}\n`
     + `- 已耗 ${ph.rounds_in_phase || 0}/${maxRounds} 轮（超限未达成将按预案切换打法，不硬耗不纠缠）。\n`
-    + `- 主动引导：按阶段任务主动推进——该抛钩子抛钩子、该收集信息自然收集、该试探就试探，不要只被动接话；她接住信号就顺势推进一档，她冷淡/回避就执行预案（${ph.exit_plan || '降速换话题养氛围'}）再找机会，绝不硬推、绝不表白、绝不逼问。`;
+    + `- 主动引导：按阶段任务主动推进——优先聊本阶段话题清单里未打钩的话题（自然带入，别硬转）；她对该话题兴趣高（回应积极/话变长/主动延伸）就往深里聊、顺着延伸；她兴趣低（嗯/哦/敷衍/短回）就简单带过换下一个，不纠缠。\n`
+    + `- 权重话题「年龄/照片/住哪」要聊出结果才算完成（知道她具体年龄/拿到照片/知道她住哪），其余话题聊出实质内容即可打钩。\n`
+    + `- 她冷淡/回避就执行预案（${ph.exit_plan || '降速换话题养氛围'}）再找机会，绝不硬推、绝不表白、绝不逼问。`;
 }
 
 // [v57] 合并新事实到长期记忆：去重(互含视为同条并刷新提及时间) + 上限淘汰(按提及新旧)
@@ -1707,25 +1820,14 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 }
 
 // ============================================================
-// [v153 行动层 ActiveQuest] 攻略里程碑 → 跨轮布局执行
-//   攻略定义"要什么"（phase signals 里的里程碑型信号），quest 定义"怎么一步步拿到"
-//   核心：LLM 为当前目标现场布局 2-4 步（埋钩→升级→收网），状态机跨轮执行，
-//   达成判定（纯规则）点亮里程碑 → advanceGuide 推进攻略。
+// [v153 行动层 ActiveQuest] 攻略话题清单 → 跨轮布局执行
+//   [v20260811 话题] quest 目标 = 话题 short 名；从当前阶段话题清单里按"当前聊天内容"匹配最近话题
+//   攻略定义"聊什么"（phase signals 里的话题清单），quest 定义"怎么一步步自然聊到"
+//   核心：LLM 为当前话题现场布局 2-4 步（铺垫→引入→聊开），状态机跨轮执行，
+//   达成判定（纯规则打钩）聊过即打钩 → advanceGuide 推进攻略。
 // ============================================================
 const QUEST_MAX_STEPS = 4;
-const QUEST_MAX_ROUNDS = 6;   // 单目标布局轮次上限（防死磕；超出放弃，改日再战）
-
-// 里程碑达成判定正则（她给出该信息即达成；纯规则零成本，命中即收网点亮）
-const QUEST_ACHIEVED_RE: Record<string, RegExp> = {
-  '照片': /(发|给|传|有).{0,6}(照片|自拍|图|相册|朋友圈)|你看(看)?(我|这张)|我照片|我的照片|这是我|发个(自拍|照片)|加个(微信|好友)/,
-  '年龄': /我(今年|现在)?\s?[0-9一二三四五六七八九十]{1,2}\s?岁|我今年[0-9一二三四五六七八九十]{1,2}|属[鼠牛虎兔龙蛇马羊猴鸡狗猪]|我(是|是)[0-9]{2}年|生日是|[0-9]{2}岁/,
-  '喜好': /我(最)?(喜欢|爱|常|平时).{0,8}(吃|喝|看|听|玩|逛|追|刷|做|去)|最爱(吃|喝|看|听|玩)|我喜欢.{0,10}(店|歌|电影|书|地方|东西)/,
-  '住哪': /我(住|家在|在|是).{0,8}(区|这边|附近|那边|外地|本地|上海|北京|广州|深圳|杭州|成都)|我住[^。，]{1,12}|住在[^。，]{1,12}|上班(在|去|到)/,
-  '家庭': /我(家|爸妈|爸|妈|哥|姐|弟|妹|家里).{0,12}|独生|我家里人|家里有/,
-  '恋爱经历': /我(前任|前男友|前女友|谈过|处过|交往过|ex|对象|恋爱|单身).{0,12}|上一段|没谈过|谈过(几个|两|三)/,
-  '敏感面': /我(最近|现在|有点|挺|其实|就是).{0,10}(烦|压力|焦虑|难过|委屈|累|怕|担心|慌|失眠|emo)|最近(状态|心情)不好/,
-  '约会': /(见面|出来|约|见一见|聚一聚|什么时候).{0,10}|改天(见|约)|几点见|明天.{0,4}(见|约)|去.{0,6}(店|馆|场|公园|街)/,
-};
+const QUEST_MAX_ROUNDS = 6;   // 单话题布局轮次上限（防死磕；超出放弃，改日再战）
 
 // 她"接招/上钩"信号（quest 跨轮推进判定）：追问/反驳/接梗/打赌 = 愿意继续玩
 const QUEST_ENGAGE_RE = /怎么说|然后呢|真的假的|那么夸张|试试|来啊|来吧|赌|敢不敢|怕你|你试试|哈哈哈?|有意思|说来听听|说说看|凭什么|你确定|来就来|谁怕谁|行啊|可以啊|好呀|来吧|接着/;
@@ -1737,37 +1839,51 @@ function questEngageHit(lastUserText: string): boolean {
   return QUEST_ENGAGE_RE.test(t);
 }
 
-// [v153] 从攻略当前 phase 提取"下一个待达成里程碑"（里程碑型信号 且 未完成）
-//   返回 null = 无待达成里程碑（攻略自由模式：战术卡主导）
-function nextQuestTarget(card: MemoryCard): string | null {
+// [v153][v20260811 话题] 从攻略当前 phase 选"下一个要聊的话题"：
+//   ① 取该 phase 话题清单里第一个未聊过的话题；
+//   ② 若给了当前聊天内容（query/history），按关键词重叠度挑"最接近当前对话"的未聊话题（聊起来自然）
+//   返回 null = 本阶段无未聊话题（攻略自由模式：战术卡主导）
+function nextQuestTarget(card: MemoryCard, recentText?: string): string | null {
   const g = card.guide;
   if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
   const ph = g.phases[g.current_phase];
   if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
-  const msDone = new Set(Array.isArray(card.milestones) ? card.milestones : []);
-  for (const sig of ph.signals) {
-    for (const m of MILESTONE_CHAIN) {
-      if (sig.includes(m) && !msDone.has(m)) return m; // 取该 phase 第一个未完成里程碑
+  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+  const pending = ph.signals.filter((sig) => isTopicSignal(sig) && !done.has(sig));
+  if (pending.length === 0) return null;
+  // 权重话题优先：年龄/照片/住哪 是列表页可见信息，最先引导聊
+  const weighted = pending.filter((sig) => topicDef(sig)?.weight);
+  if (weighted.length > 0) return weighted[0];
+  // 无权重话题时：按当前对话匹配最接近的话题（关键词重叠最多者胜）
+  const text = String(recentText || '');
+  if (text.trim().length > 0) {
+    let best: string | null = null;
+    let bestHit = 0;
+    for (const sig of pending) {
+      const t = topicDef(sig);
+      if (!t) continue;
+      const hits = t.kws.filter((k) => text.includes(k)).length;
+      if (hits > bestHit) { bestHit = hits; best = sig; }
     }
+    if (best) return best;
   }
-  return null;
+  return pending[0]; // 兜底：取清单第一个未聊话题
 }
 
-// [v153] quest 达成判定：她当前这句话是否给出了目标信息（纯规则）
+// [v153][v20260811 话题] quest 达成判定：她当前这句话是否让目标话题"实质聊过"（规则打钩）
 function questAchieved(target: string, lastUserText: string): boolean {
-  const re = QUEST_ACHIEVED_RE[target];
-  if (!re || !lastUserText) return false;
-  return re.test(String(lastUserText));
+  return topicDoneByText(topicDef(target), String(lastUserText || ''));
 }
 
-// [v153] quest 布局器：LLM 为目标现场编"埋钩→升级→收网"多步计划
-//   输入：目标里程碑 + 画像 + 最近对话 + 知识库话术弹药（可选，作灵感源）
+// [v153] quest 布局器：LLM 为目标话题现场编"铺垫→引入→聊开"多步计划
+//   输入：目标话题 + 画像 + 最近对话 + 知识库话术弹药（可选，作灵感源）
 //   输出：ActiveQuest（plan 2-4 步，每步带话术思路 + 例句 + 时机）
 async function extractQuest(
   llmKey: string, llmBase: string, llmModel: string,
   target: string, card: MemoryCard, history: any[], kbMaterial: any[]
 ): Promise<ActiveQuest | null> {
-  const tip = MILESTONE_TIPS[target] || '';
+  const td = topicDef(target);
+  const tip = td ? `「${td.name}」：${td.kws.join('、')}（聊到这些就算话题聊过）` : `话题「${target}」`;
   const p = card.profile || {};
   const recent = (Array.isArray(history) ? history : [])
     .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
@@ -1777,17 +1893,21 @@ async function extractQuest(
   const kbText = (Array.isArray(kbMaterial) ? kbMaterial : [])
     .map((i) => `${i.block_title || i.title || ''}\n${String(i.content || '').slice(0, 200)}`)
     .join('\n');
-  const prompt = `你是恋爱聊天"布局策划"助手。用户正在替自己用交友APP（纯文字聊天）追求对方，目标明确：在接下来几轮对话里，通过自然布局拿到「${target}」。（"${target}"的含义与常规话术方向：${tip}）\n`
+  const weightNote = td?.weight
+    ? `（权重话题：必须聊出结果才算完成——${td.weight === 'age' ? '知道她具体年龄/生日/星座' : td.weight === 'photo' ? '她发过照片/自拍' : '知道她具体城市/区域/居住情况'}，布局要奔着结果去）`
+    : '（普通话题：聊出实质内容即可，但尽量聊深入些）';
+  const prompt = `你是恋爱聊天"话题引导"策划助手。用户正在替自己用交友APP（纯文字聊天）追求对方，目标明确：在接下来几轮对话里，通过自然布局把话题引导到「${td ? td.name : target}」上并聊开。${tip}${weightNote}\n`
     + `当前情况：\n`
     + `- 关系阶段：${p.stage || '陌生'}；对方性格：${p.personality || '未知'}\n`
     + `- 最近对方说的话：\n${recent || '（无）'}\n`
     + (kbText ? `- 知识库参考素材（可借鉴其思路/语气，不必照搬）：\n${truncateText(kbText, 1200)}\n` : '')
     + `要求（这是关键，必须做到）：\n`
-    + `1. 设计 ${'2~4'.replace('~', '~')} 步的布局，每步一个"可执行动作"，形成"埋钩→升级→收网"的递进：先制造一个理由/钩子（比如调侃、打赌、玩笑、评判），再升级张力（比如赌注、条件、悬念），最后一步自然把「${target}」收进来。\n`
-    + `2. 禁止第一步就直球要「${target}」——必须铺垫，让"要${target}"成为布局的自然结果（如：先笑她说话像小学生→再打赌猜错做深蹲→最后"发张照片我评判输赢"）。\n`
+    + `1. 设计 2~4 步的布局，每步一个"可执行动作"，形成"铺垫→引入→聊开"的递进：先制造一个自然的由头（结合当前对话语境，别生硬转话题），再顺势把话题引到目标上，最后一步引导她说出实质内容（她回应/分享/给信息）。\n`
+    + `2. 禁止第一步就直球问目标话题——必须铺垫，让话题成为自然延伸（如她想聊"最近在追剧"→ 顺势聊到"你平时还爱看什么"→ 深入兴趣话题）。\n`
     + `3. 每一步必须包含一句"可直接发送给对方"的例句（引号标注原样话术），口吻像真人、贴合当前对话语境，禁止官方腔/翻译腔；允许轻度调侃，禁止人身攻击/贬低外貌。\n`
     + `4. 每步格式：一句话动作思路 + 例句（引号内原样话术）+ 时机提示写在末尾括号内（如"她追问时用""她接茬后隔轮用"）。每步 40-70 字。\n`
-    + `5. 如果当前语境明显不适合布局（她正在表达强烈负面情绪/正在谈正事/关系过冷），输出 {"plan":[]} 放弃本轮布局。\n`
+    + `5. 兴趣适配：若她当前对话明显没兴趣（短回/敷衍/回避），布局要轻——简单带过不强推，输出 {"plan":[]} 放弃本轮布局；她兴趣高则布局可以往深聊延伸设计。\n`
+    + `6. 如果当前语境明显不适合布局（她正在表达强烈负面情绪/正在谈正事/关系过冷），输出 {"plan":[]} 放弃本轮布局。\n`
     + `只输出 JSON：{"plan":["第1步...","第2步..."]}，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1804,7 +1924,7 @@ async function extractQuest(
     if (plan.length < 2) return null; // 布局至少 2 步才有跨轮意义
     return {
       target,
-      goal_note: tip.slice(0, 40),
+      goal_note: (td ? td.name : target).slice(0, 40),
       plan,
       current_step: 0,
       hook_laid: false,
@@ -1980,7 +2100,7 @@ const INVITE_REJECT_RE = /(不去|算了|没空|改天|再说吧|别约|不想�
 //   ③ 关系阶段 = 上限闸门：陌生/朋友/追求 永不 seduce；暧昧/恋爱 才允许诱惑期
 //   修复案例：追求期聊 10+ 轮（纯回合数误判 seduce）→ 全程注入诱惑期进攻卡（制造见面理由/测试服从性），
 //   把"她分享日常/自述特质/婉拒试探"全按字面交易式接话 → 改成追求期 8 轮后仍走 comfort，先接情绪再接事
-function resolveTacticPhase(stage: string, userTurns: number, history: any[], milestones: string[]): 'attract' | 'comfort' | 'seduce' {
+function resolveTacticPhase(stage: string, userTurns: number, history: any[], doneTopics: string[]): 'attract' | 'comfort' | 'seduce' {
   const recent = (Array.isArray(history) ? history : [])
     .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
     .slice(-8);
@@ -1994,7 +2114,8 @@ function resolveTacticPhase(stage: string, userTurns: number, history: any[], mi
     if (/(我每天|我最近|我比较|我一般|我最|我挺|我有点|我其实|我平时|我就是|我这个人|我性格|我喜欢|我最爱|每天|经常|有时候|说实话)/.test(t)) warmth += 1;  // 自述/分享
     if (/[？?]|吗$|你呢|你[呢咧]|你觉得|你喜不喜欢/.test(t)) warmth += 0.5;  // 主动提问
   }
-  const hasDate = Array.isArray(milestones) && milestones.includes('约会');
+  // [v20260811 话题] "约会"话题已聊过 ≈ 原"约会"里程碑达成
+  const hasDate = Array.isArray(doneTopics) && doneTopics.includes('约会');
   const turns = userTurns;
   // 诱惑期（seduce）闸门：仅暧昧/恋爱，且已约好见面 或 聊得够多且很热
   if ((stage === '暧昧' || stage === '恋爱') && (hasDate || (turns >= 6 && warmth >= 2))) return 'seduce';
@@ -2010,8 +2131,8 @@ function resolveTacticCategory(query: string, history: any[], memoryCard: Memory
   const stage = memoryCard?.profile?.stage || '';
   // 回合数 = 对方发言次数（user 消息）
   const userTurns = (Array.isArray(history) ? history : []).filter((h) => h && h.role === 'user').length;
-  const milestones = Array.isArray(memoryCard?.milestones) ? (memoryCard!.milestones as string[]) : [];
-  const phase = resolveTacticPhase(stage, userTurns, history, milestones);
+  const doneTopics = Array.isArray(memoryCard?.topics_done) ? (memoryCard!.topics_done as string[]) : [];
+  const phase = resolveTacticPhase(stage, userTurns, history, doneTopics);
   // 挽回期：不触发防守/进攻，走共情（类别仍给 attack 但卡组内容已含安全边界）
   let category: TacticCategory = 'attack';
   const q = (query || '').trim();
@@ -2214,25 +2335,25 @@ function buildSystemContent(opts: {
 
   // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
-  // [v58/v61→v145] 关系目标 + 里程碑数据（战略层）：
-  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；milestones 仅作数据（攻略 signals 判定/生成/面板）
+  // [v58/v61→v145] 关系目标 + 已聊话题数据（战略层）：
+  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；topics_done 仅作数据（攻略 signals 判定/生成/面板）
   const goal = opts.memoryCard?.goal || '';
-  const milestones = Array.isArray(opts.memoryCard?.milestones) ? (opts.memoryCard!.milestones!) : [];
+  const doneTopics = Array.isArray(opts.memoryCard?.topics_done) ? (opts.memoryCard!.topics_done!) : [];
 
   // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块（战略层唯一驱动）：
   //   [v141] 目标引导（GOAL_HINTS）与默认推进（ESCALATION）已删除——从未见效且与攻略重复，浪费 token；
-  //   [v145] 里程碑引导块（buildMilestoneBlock）已删除——收集引导/进度点亮全部并入攻略 signals，
-  //     里程碑仅作数据留存（extractProfile 照常收集，攻略生成/推进/面板勾选读取）
+  //   [v145] 里程碑引导块（buildMilestoneBlock）已删除——收集引导/进度点亮全部并入攻略 signals；
+  //   [v20260811 话题] signals 改为话题清单，topics_done 打钩
   const guide = opts.memoryCard?.guide || null;
   const guideRunning = !!guide && guide.status === 'running'
     && Array.isArray(guide.phases) && guide.phases.length > 0
     && guide.current_phase >= 0 && guide.current_phase < guide.phases.length;
 
   if (guideRunning) {
-    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], milestones);
+    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics);
   } else if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令
-    s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新的里程碑信息；正常聊天稳住温度即可，她主动给信息自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
+    s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新话题；正常聊天稳住温度即可，她主动聊就自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
   }
   // [v145] 无攻略且非"保持当前关系"（如对话<5轮攻略未生成）：不注入任何推进/收集指令，
   //   方向完全交给攻略（默认启动，聊满 GUIDE_MIN_ROUNDS 自动生成）
@@ -2257,14 +2378,16 @@ function buildSystemContent(opts: {
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
   s += buildTacticBlock(tactic.category, tactic.phase);
 
-  // [v20260809 机会窗口] 她主动问里程碑话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
+  // [v20260809 机会窗口] 她主动聊起话题库话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
   //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
   const openWindow = detectOpenWindow(opts.lastUserText || '');
   if (openWindow) {
-    const tip = MILESTONE_TIPS[openWindow] || '';
+    const t = topicDef(openWindow);
+    const kws = t ? t.kws.join('、') : '';
+    const tip = t ? `话题「${t.name}」：${kws}（聊到这些就算话题聊过${t.weight ? '，且必须聊出结果' : ''}）` : '';
     s += `\n\n【机会窗口】(本轮最高优先级，必须接住)\n`
-      + `- 她主动问起了「${openWindow}」——这是她亲手递过来的窗口：说明她对你有兴趣，且大概率愿意等价交换信息。\n`
-      + `- 本轮动作：先自然回答她的问题（自己也交换同等信息，别有保留），然后必须顺势镜像反问（"你呢？"），把「${openWindow}」顺势完成。\n`
+      + `- 她主动问起了「${openWindow}」相关——这是她亲手递过来的窗口：说明她对你有兴趣，且大概率愿意等价交换信息。\n`
+      + `- 本轮动作：先自然回答她的问题（自己也交换同等信息，别有保留），然后必须顺势镜像反问（"你呢？"），把「${openWindow}」这个话题顺势聊开。\n`
       + `- 区分查户口：查户口 = 连环盘问、她不回应还继续追问（禁止）；她先开口后的单次镜像反问 = 社交互惠（必须做），二者性质完全不同，别把互惠当查户口。\n`
       + `- 窗口只开这一轮，错过就没了：本轮必须接住，绝不只答不问、绝不让话题滑走。\n`
       + (tip ? `- 话术方向参考：${tip}\n` : '')
@@ -2272,7 +2395,7 @@ function buildSystemContent(opts: {
   }
 
   // [v147 机会窗口扩展] 她主动袒露自我（分享日常/自述特质/经历/喜好/关心你）→ 注入【接住分享】块
-  //   与里程碑窗口互斥：她问你（detectOpenWindow）走镜像反问；她自述（detectSelfDisclosure）走接住分享
+  //   与话题窗口互斥：她问你（detectOpenWindow）走镜像反问；她自述（detectSelfDisclosure）走接住分享
   //   修复案例："我比较专一"（自述特质）被按字面接成"那我外卖请你"（交易式）；"每天睡醒就喝消水肿"（分享）
   //   被接成"先给我带杯咖啡"（索取）→ 必须先接情绪再接事
   const selfDisclosure = !openWindow ? detectSelfDisclosure(opts.lastUserText || '') : null;
@@ -2345,8 +2468,8 @@ function buildSystemContent(opts: {
   }
 
   // [v153 行动层 ActiveQuest] 当前行动任务注入（最高优先）：
-  //   攻略里程碑目标 → 跨轮布局执行。状态机（埋钩→接招→放行→收网），
-  //   布局由 extractQuest 现场生成，达成判定点亮里程碑推进攻略。
+  //   攻略话题清单目标 → 跨轮布局执行。状态机（埋钩→接招→放行→收网），
+  //   布局由 extractQuest 现场生成，达成判定（聊过话题）打钩推进攻略。
   //   注入前只读状态推导；推进在 updateMemoryCard 回写（读-写闭环）
   const quest = opts.memoryCard?.quest;
   if (quest && Array.isArray(quest.plan) && quest.plan.length > 0) {
@@ -2354,23 +2477,25 @@ function buildSystemContent(opts: {
     const qCur = typeof quest.current_step === 'number' ? quest.current_step : 0;
     const qHookLaid = !!quest.hook_laid;
     const qWaitingClose = !!quest.waiting_close;
-    // 她当前这句话是否已达成目标（给了照片/年龄/住哪等）→ 达成即收网，不再推进
+    // 她当前这句话是否已把目标话题聊过（给出实质内容）→ 达成即收网，不再推进
     const qAchieved = questAchieved(quest.target, String(opts.lastUserText || ''));
-    const qHead = `\n\n【当前行动】(最高优先，覆盖战术指令的常规出招)\n你在执行攻略目标「${quest.target}」的布局，共 ${qSteps.length} 步。\n`
-      + `- 动机：${quest.goal_note || `拿到她的${quest.target}，推进关系`}——心里装着这个目标，但嘴上永远不暴露，输出必须是自然聊天。\n`
+    const qTd = topicDef(quest.target);
+    const qLabel = qTd ? qTd.name : quest.target;
+    const qHead = `\n\n【当前行动】(最高优先，覆盖战术指令的常规出招)\n你正在把话题引向「${qLabel}」，共 ${qSteps.length} 步布局。\n`
+      + `- 动机：${quest.goal_note || `自然地聊到${qLabel}并聊开`}——心里装着这个目标，但嘴上永远不暴露，输出必须是自然聊天。\n`
       + `- 严禁向对方提及布局、步骤、第几步、目标、攻略等任何元信息。\n`
       + `- 字数：布局话术可长（不受"整条≤20字"限制，2 句以内），但要口语化、像真人。\n`;
 
     if (qAchieved) {
-      // 她已给出目标信息 → 收网：接住并确认，不追加新要求
+      // 她已把目标话题聊过（给出实质内容）→ 收网：接住并确认，不追加新要求
       s += qHead
-        + `- 状态：她已经把「${quest.target}」给你了（本轮或上轮）→ 收网。\n`
+        + `- 状态：话题「${qLabel}」已经聊开了（本轮或上轮她已给出实质内容）→ 收网。\n`
         + `- 本轮任务：自然接住、顺势确认（夸一句/接一句/记住），不要再推进任何新步骤、不要再追加要求。`;
     } else if (qWaitingClose) {
       // ④ 待收网：最后一步已发出，只接住她的回应收尾
       s += qHead
         + `- 状态：最后一步已经发出，正在等她完成最后回应（收网阶段）。\n`
-        + `- 本轮任务：接住她当前的话，顺着把结果收下来（她给/答应/接住即成功），不再抛新步骤、新悬念。\n`
+        + `- 本轮任务：接住她当前的话，顺着把话题收下来（她回应/分享/给信息即成功），不再抛新步骤、新悬念。\n`
         + `- 她冷淡/反感/拒绝 → 立即收手，正常聊天，不纠缠。`;
     } else if (qHookLaid && !questEngageHit(String(opts.lastUserText || ''))) {
       // ② 等待上钩：上一步钩子已埋，她没接 → 忍住，不推进
