@@ -455,7 +455,7 @@ Deno.serve(async (req) => {
     // [v8] 语义拆解词（if 块外声明：_debug 在块外引用，块内 let 会 ReferenceError → 500）
     let semanticKws: string[] = [];
     // [v73] 战术类别/阶段（同上：_debug 块外引用，必须顶层声明）
-    let tactic: { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce' } = { category: 'attack', phase: 'attract' };
+    let tactic: { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce'; cardIndex: number } = { category: 'attack', phase: 'attract', cardIndex: -1 };
     // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
     // [v57] 长期记忆本轮注入条数（_debug 用；同样提到顶层防作用域事故）
@@ -633,9 +633,11 @@ Deno.serve(async (req) => {
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           if (sanitizedWords) notes.push(`你刚才的回复把参考话术里的直白措辞（${sanitizedWords.join('/')}）全软化了，这是消毒不是加分。保留直白度：只许改人称、加语气词、调句序、换种说法，禁止同义软化或删掉擦边意象。`);
           const retry = await llmChat(llmKey, llmBase, llmModel, [
-            { role: 'system', content: systemContent + '\n\n注意：' + notes.join('') + ' 直接输出新的话术本体，不要解释。' },
+            // [v20260811 缓存] system 保持与主回复完全一致（不改 system → 前缀缓存整段命中）；
+            //   重试指令 notes 挪到 user 消息尾部（不污染 system 前缀）
+            { role: 'system', content: systemContent },
             ...llmHistory,
-            { role: 'user', content: '【对方说】' + query.trim() },
+            { role: 'user', content: '【对方说】' + query.trim() + '\n\n注意：' + notes.join('') + ' 直接输出新的话术本体，不要解释。' },
           ], {
             temperature: usedStageLlm.temperature,
             maxTokens: MAIN_MAX_TOKENS,
@@ -950,18 +952,17 @@ async function extractSemanticKeywords(
 ): Promise<string[]> {
   try {
     // [v75 缓存③] prompt 固定部分（角色/词表/示例/要求）前移 → 前缀稳定可缓存命中；
-    //   query/最近对话/阶段词表 挪尾部（动态内容不影响前缀）
+    //   query/最近对话 挪尾部（动态内容不影响前缀）
+    // [v20260811 降本] 词表 78 词全量 → 当前档子集（stageVocab 未命中时兜底 40 词）：
+    //   语义拆词只是"拆短词"，LLM 并不需要看完整词表；few-shot 2 组 → 1 组
+    const vocabList = (stageVocab && stageVocab.length > 0 ? stageVocab : TOPIC_VOCAB.slice(0, 40));
     const prompt = '你是恋爱话术检索助手，把"对方说的话"拆成检索恋爱话术库的短关键词。\n'
-      + `知识库词表（优先选词，可少量自创）：${TOPIC_VOCAB.join('、')}\n`
+      + `知识库词表（优先选词，可少量自创）：${vocabList.join('、')}\n`
       + '示例：\n'
       + '输入："她说今天被领导骂了很难受"\n输出：["委屈","安慰","哄","难过","关心"]\n'
-      + '输入："她两天没回我消息了"\n输出：["冷淡","高冷","忽冷忽热","追问"]\n'
       + `要求：只输出 JSON 数组，${SEMANTIC_KW_MIN}-${SEMANTIC_KW_MAX} 个词，每个 2-${KW_LEN_MAX} 字，词表优先、可加 1-2 个贴近原话的字面词，无解释。\n`
       + `对方的话：「${truncateText(query, 80)}」\n`
-      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '')
-      + (stageVocab && stageVocab.length > 0
-        ? `当前目标相关检索词（优先选，最多 2 个）：${stageVocab.join('、')}`
-        : '');
+      + (recentUserMsgs.length > 0 ? `最近对话（对方说的）：\n${recentUserMsgs.slice(-2).join('\n')}\n` : '');
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.2, maxTokens: 150, _stage: 'semantic_kws',
     });
@@ -1893,18 +1894,19 @@ interface TacticCard {
   attitude: string;  // 态度
   method: string;    // 手法
   examples: string[]; // 话术范例
+  trigger?: RegExp | null; // [v20260811] 触发词（防守/救场细分卡用；null/缺省=该卡无独立触发）
 }
 
 const TACTIC_CARDS: Record<TacticCategory, TacticCard[]> = {
   defense: [
-    { scene: '对方低兴趣（敷衍"嗯/哦/哈哈"）', attitude: '撤退 + 惩罚', method: '切断话题，贴"无趣"标签后主动离场', examples: ['看来你不擅长聊天，我先去忙了，下次翻你牌子。', '你这回复速度让我以为在跟AI客服聊天，回见。'] },
-    { scene: '对方打压/挑衅（"你好自恋""你经常这样撩妹吧"）', attitude: '放松 + 傲娇', method: '认同并夸张化（Agree & Amplify），让她拳头打棉花', examples: ['这都被你发现了，我自恋到每天被镜子帅醒，你要不要也来膜拜一下？', '对啊，我刚从海王培训班毕业，你是第一个实验对象，惊不惊喜？'] },
-    { scene: '对方废物测试（无理要求/刁难问题）', attitude: '不接招 + 幽默', method: '曲解她的动机，把质问变成"你在对我感兴趣"', examples: ['你问这么细，是想查户口还是想给我介绍对象？先说好，我要求很高。', '你这句话的逻辑，让我怀疑你是来碰瓷的。'] },
-    { scene: '对方ASD抗拒亲密（"我才不去你家""我不是随便的人"）', attitude: '完全同意 + 甩锅', method: '后退一步，把"想多了"的帽子扣回给她', examples: ['想啥呢？我家猫会后空翻我都没让你看，你别自作多情啊。', '我知道你不是随便的人，正好我也不是。既然你有防备心，那咱们还是去人多的地方吧。'] },
-    { scene: '对方服从度低（叫发照片/语音等小事不干）', attitude: '轻蔑 + 无所谓', method: '取消指令，给她贴"胆小/没意思"标签', examples: ['看来你对自己不自信，没事，保护弱者自尊是我的美德。', '发个语音都不敢？行吧，我理解，毕竟不是人人都对自己的声音有信心。'] },
-    { scene: '对方突然消失后回来（隔天/更久才回）', attitude: '冷淡 + 惩罚', method: '延迟回复（2-4小时），回应极度简短，让她感知失温', examples: ['（隔2-3小时）阅。', '（隔2小时发一张打哈欠的猫表情包）'] },
-    { scene: '对方搬出"前男友/其他追求者"', attitude: '无视 + 拉回框架', method: '不贬低对手，把焦点转回她对你的态度', examples: ['哦。有人追你说明你确实不错，不过我现在比较好奇，你理想型的男生是什么样的？', '那你觉得我跟他谁更烦人？……哈哈不开玩笑，说真的，你喜欢的男生一般什么特质？'] },
-    { scene: '对方说你"油嘴滑舌/海王"', attitude: '认可 + 反调侃', method: '认下标签，反过来指控她"你经验也很丰富嘛"', examples: ['被你识破了，我刚从海王培训班毕业，你是第一个实验对象。你呢？这么懂，怕不是培训班导师？', '我这叫幽默感，不过你警惕性这么高，该不会是被我戳中了吧？'] },
+    { scene: '对方低兴趣（敷衍"嗯/哦/哈哈"）', attitude: '撤退 + 惩罚', method: '切断话题，贴"无趣"标签后主动离场', examples: ['看来你不擅长聊天，我先去忙了，下次翻你牌子。', '你这回复速度让我以为在跟AI客服聊天，回见。'], trigger: /^(嗯|哦|呵呵|哈{2,}|随便|不知道|没意思|无聊|敷衍|不想聊)$/ },
+    { scene: '对方打压/挑衅（"你好自恋""你经常这样撩妹吧"）', attitude: '放松 + 傲娇', method: '认同并夸张化（Agree & Amplify），让她拳头打棉花', examples: ['这都被你发现了，我自恋到每天被镜子帅醒，你要不要也来膜拜一下？', '对啊，我刚从海王培训班毕业，你是第一个实验对象，惊不惊喜？'], trigger: /自恋|撩妹|这么会撩|你经验很丰富|经常这样|PUA/ },
+    { scene: '对方废物测试（无理要求/刁难问题）', attitude: '不接招 + 幽默', method: '曲解她的动机，把质问变成"你在对我感兴趣"', examples: ['你问这么细，是想查户口还是想给我介绍对象？先说好，我要求很高。', '你这句话的逻辑，让我怀疑你是来碰瓷的。'], trigger: /你帮我|你证明|你凭什么|凭什么听|给我发|必须听/ },
+    { scene: '对方ASD抗拒亲密（"我才不去你家""我不是随便的人"）', attitude: '完全同意 + 甩锅', method: '后退一步，把"想多了"的帽子扣回给她', examples: ['想啥呢？我家猫会后空翻我都没让你看，你别自作多情啊。', '我知道你不是随便的人，正好我也不是。既然你有防备心，那咱们还是去人多的地方吧。'], trigger: /我才不去|我不是随便|别想|想得美|谁要跟你|你该不会|拉黑/ },
+    { scene: '对方服从度低（叫发照片/语音等小事不干）', attitude: '轻蔑 + 无所谓', method: '取消指令，给她贴"胆小/没意思"标签', examples: ['看来你对自己不自信，没事，保护弱者自尊是我的美德。', '发个语音都不敢？行吧，我理解，毕竟不是人人都对自己的声音有信心。'], trigger: /不敢|怕了|才不要|不想发|凭什么听|你管我/ },
+    { scene: '对方突然消失后回来（隔天/更久才回）', attitude: '冷淡 + 惩罚', method: '延迟回复（2-4小时），回应极度简短，让她感知失温', examples: ['（隔2-3小时）阅。', '（隔2小时发一张打哈欠的猫表情包）'], trigger: null },
+    { scene: '对方搬出"前男友/其他追求者"', attitude: '无视 + 拉回框架', method: '不贬低对手，把焦点转回她对你的态度', examples: ['哦。有人追你说明你确实不错，不过我现在比较好奇，你理想型的男生是什么样的？', '那你觉得我跟他谁更烦人？……哈哈不开玩笑，说真的，你喜欢的男生一般什么特质？'], trigger: /前男友|追求者|别人追|有个男生|他在追|前任/ },
+    { scene: '对方说你"油嘴滑舌/海王"', attitude: '认可 + 反调侃', method: '认下标签，反过来指控她"你经验也很丰富嘛"', examples: ['被你识破了，我刚从海王培训班毕业，你是第一个实验对象。你呢？这么懂，怕不是培训班导师？', '我这叫幽默感，不过你警惕性这么高，该不会是被我戳中了吧？'], trigger: /海王|油嘴|渣男|套路深|油嘴滑舌|对多少女生|对每个女生/ },
   ],
   attack: [
     { scene: '主动推进话题', attitude: '自信 + 控场', method: '植入"假性时间限制"，让她放松警惕', examples: ['我朋友在那边催了，不过还有5分钟，我想听听你对刚才那件事的看法……', '待会儿要开个线上会，趁现在有空，我想问你一个特别奇葩的问题……'] },
@@ -1972,7 +1974,7 @@ function resolveTacticPhase(stage: string, userTurns: number, history: any[], do
   return 'attract';
 }
 
-function resolveTacticCategory(query: string, history: any[], memoryCard: MemoryCard | null): { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce' } {
+function resolveTacticCategory(query: string, history: any[], memoryCard: MemoryCard | null): { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce'; cardIndex: number } {
   const stage = memoryCard?.profile?.stage || '';
   // 回合数 = 对方发言次数（user 消息）
   const userTurns = (Array.isArray(history) ? history : []).filter((h) => h && h.role === 'user').length;
@@ -1981,9 +1983,22 @@ function resolveTacticCategory(query: string, history: any[], memoryCard: Memory
   // 挽回期：不触发防守/进攻，走共情（类别仍给 attack 但卡组内容已含安全边界）
   let category: TacticCategory = 'attack';
   const q = (query || '').trim();
+  const lastSelf = (Array.isArray(history) ? history : []).filter((h) => h.role === 'assistant').slice(-1).map((h) => String(h.content || '')).join('');
   if (stage !== '挽回' && (DEFENSE_STRONG_RE.test(q) || (q.length <= 4 && DEFENSE_WEAK_RE.test(q)))) category = 'defense';
-  else if (SELF_NEED_RE.test((Array.isArray(history) ? history : []).filter((h) => h.role === 'assistant').slice(-1).map((h) => String(h.content || '')).join('')) || INVITE_REJECT_RE.test(q)) category = 'rescue';
-  return { category, phase };
+  else if (SELF_NEED_RE.test(lastSelf) || INVITE_REJECT_RE.test(q)) category = 'rescue';
+  // [v20260811 降本] 命中具体卡 → 只注入该卡（防守/救场按触发词细分；-1=未细分，全组精简注入）
+  let cardIndex = -1;
+  if (category === 'defense') {
+    for (let i = 0; i < TACTIC_CARDS.defense.length; i++) {
+      const tr = (TACTIC_CARDS.defense[i] as any).trigger;
+      if (tr && tr.test(q)) { cardIndex = i; break; }
+    }
+    if (cardIndex === -1 && q.length <= 4 && DEFENSE_WEAK_RE.test(q)) cardIndex = 0; // 敷衍 → 低兴趣卡
+  } else if (category === 'rescue') {
+    if (INVITE_REJECT_RE.test(q)) cardIndex = 2; // 邀约被拒
+    else if (SELF_NEED_RE.test(lastSelf)) cardIndex = 1; // 暴露需求感
+  }
+  return { category, phase, cardIndex };
 }
 
 // [v148 弹药按阶段加权] 文档级阶段映射：kb_blocks.title = 源文件名（52 个类别文档），
@@ -2021,11 +2036,18 @@ const GLOBAL_TACTIC_PREAMBLE = `\n\n【战术指令】(本轮最高优先，先�
 // [v75] 战术变化部分（每轮按类别/阶段变化 → 放后缀不破坏前缀缓存）：阶段卡 + 命中类别卡组
 // [v79.2 瘦身] 卡组只输出"场景→态度→手法"规则；examples 范例已由知识库参考弹药承担
 //   （切块后弹药精准，无需卡组自带范例，每轮省 ~200-400 字）
-function buildTacticBlock(category: TacticCategory, phase: 'attract' | 'comfort' | 'seduce'): string {
+// [v20260811 降本] 只注入命中的那张卡（cardIndex≥0，防守/救场细分触发词）；
+//   攻击类常态无触发词（cardIndex=-1）→ 精简注入全组（合并场景+手法一行，去态度列）
+function buildTacticBlock(category: TacticCategory, phase: 'attract' | 'comfort' | 'seduce', cardIndex = -1): string {
   const cards = TACTIC_CARDS[category];
-  const cardText = cards.map((c) =>
-    `场景：${c.scene}\n态度：${c.attitude}｜手法：${c.method}`
-  ).join('\n\n');
+  let cardText: string;
+  if (cardIndex >= 0 && cards[cardIndex]) {
+    const c = cards[cardIndex];
+    cardText = `场景：${c.scene}\n态度：${c.attitude}｜手法：${c.method}`;
+  } else {
+    // 攻击/未细分：每卡一行（场景→手法），省态度列与换行
+    cardText = cards.map((c) => `- ${c.scene} → ${c.method}`).join('\n');
+  }
   return `\n\n【当前阶段】${TACTIC_PHASE_CARDS[phase]}\n\n`
     + `【${category === 'defense' ? '防守' : category === 'attack' ? '进攻' : '救场'}类战术卡】（本轮命中，严格按卡执行）\n${cardText}`;
 }
@@ -2045,8 +2067,8 @@ function buildSystemContent(opts: {
   hasRecentHistory?: boolean;
   // [v62 切换话题] 用户一键换话题：不延续旧话题，主动抛一个新话题开场
   switchTopic?: boolean;
-  // [v73 迷男精髓] 本轮战术：类别（防守/进攻/救场）+ 阶段（吸引/舒适/诱惑），主流程 resolveTacticCategory 产出
-  tactic?: { category: 'defense' | 'attack' | 'rescue'; phase: 'attract' | 'comfort' | 'seduce' };
+  // [v73 迷男精髓] 本轮战术：类别（防守/进攻/救场）+ 阶段（吸引/舒适/诱惑）+ 命中卡索引，主流程 resolveTacticCategory 产出
+  tactic?: { category: 'defense' | 'attack' | 'rescue'; phase: 'attract' | 'comfort' | 'seduce'; cardIndex?: number };
   // [v76] 距上次聊天的人类可读间隔（如"2天3小时前"），空=不注入；放后缀变化区
   lastGapText?: string;
   // [v78→v81 回退] 本轮思考档（off/low/high/max）：v78 曾用于注入【思考预算】压缩思考链，
@@ -2068,12 +2090,11 @@ function buildSystemContent(opts: {
   // [v20260809 归属加固] 显式声明对话记录的角色归属（历史每条已带【对方说】/【我发的】前缀；
   //   此处重申规则，杜绝"把自己说过的话当成对方说的"错位）
   // [v117b 标签泄露] 补充输出约束：LLM 偶发把【我发的】/【对方说】前缀复制进回复（模仿历史消息格式），严禁
+  // [v20260811 降本] 精简：五条并三条，去重复表述
   s += `\n\n【对话记录角色说明】(最高优先级，防归属错位)\n`
-    + `- 对话记录里以【对方说】开头的内容，都是对方（她）说的话；以【我发的】开头的内容，都是你自己（用户本人）之前发出的。\n`
-    + `- 严格区分谁说的：分析她的意图时只看【对方说】；回顾自己说过的话时只看【我发的】。\n`
-    + `- 绝不把【我发的】内容当成她说的，也绝不把【对方说】内容当成你自己说的。\n`
-    + `- 当前待回复的这最后一句话是对方（她）说的。\n`
-    + `- 【对方说】/【我发的】只是上下文里的标注符号，你输出的回复是发给她的消息本体：直接写话术内容，严禁在输出中携带或仿写【对方说】【我发的】等任何标注前缀。`;
+    + `- 对话记录里【对方说】=她的话；【我发的】=你自己（用户本人）之前发出的。分析她的意图只看【对方说】，回顾自己说过的话只看【我发的】，严禁把两者混淆。\n`
+    + `- 当前待回复的最后一句话是对方（她）说的。\n`
+    + `- 输出是发给她的消息本体：直接写话术内容，严禁在输出中携带或仿写【对方说】【我发的】等任何标注前缀。`;
 
   // [v56 意图优先] 先解读潜台词再回复：解决"盯字面回字面"（她哈哈→你回"笑得好"这种废话）
   // [v73 精简] 三问保留，正反例/信号段删除（敷衍/借口信号已由防守类战术卡覆盖）
@@ -2081,23 +2102,21 @@ function buildSystemContent(opts: {
     + `动手前先想三件事：①她这句话的真实意图（试探/调情/拒绝/分享情绪/考验/寒暄）；②她为什么这么说（多是我上一句的某个点触发的）；③她期待我什么反应（接住/推进/化解/换话题）。\n`
     + `铁律：绝不盯字面回字面。她发"哈哈"不是要你夸她笑得好，而是你上一句戳中了她——找到"她为什么笑"，基于原因强化那个点或顺势推进，禁止回应笑本身。`;
 
-  // [v15] 当前时间（小时级稳定，TTL 内不变，留在固定区）
-  //   [v75 缓存②] 【我的位置】已挪到后缀（用户相关，会破坏跨用户前缀一致性）
-  s += `\n\n【当前时间】（严格遵守，所有时刻/时段表述以此为准）\n${formatCurrentTime()}\n`
-    + `- 严禁编造或猜错时刻；"今晚/明天/周末/这么晚"等词必须与时间一致；判断这个点适不适合约人/打电话/聊深夜话题以此为准，别半夜答应见面或约人。`;
+  // [v15] 当前时间：已从固定前缀区移出（[v20260811 缓存] 每小时变一次，放固定区会打断其后所有块的前缀缓存，
+  //   38% 命中率元凶）→ 挪到变化区尾部注入（见文末 buildCurrentTimeBlock）
 
   // [v73] 【语气与态度】已删除：被战术卡组（防守/进攻类）+ 全局原则（含安全边界）覆盖
 
   // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
-  // [v73] 硬字数上限：整条 ≤20 字（用户定稿），通常 1 句
+  // [v73] 硬字数上限：整条 ≤20 字（用户定稿），通常 1 句（已并入战术前导全局原则）
   // [P0-3] 固定块前移（前缀稳定）
   // [2026-08-06 降本] 范例 3→1
   // [v79.2 去重] 删"第一句必须正面回答"（与防守/救场战术卡冲突：防守要求不接招/离场）；
   //   删"≤20字"硬字数（战术前导 GLOBAL_TACTIC_PREAMBLE 已含完整字数规则）
+  // [v20260811 降本] 精简：删重复表述（保味原则与措辞底线/参考资料引导重复）
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 你是同一个人，逻辑自洽：严禁自相矛盾、推翻自己说过的话、答非所问。\n`
     + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
-    + `- 保味总原则：直白、擦边、带攻击性的措辞是你的风格（见【角色定位】），不是需要改正的错误；参考句里的直白措辞优先保留，禁止软化成礼貌/文明腔。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲？我有个消磨时间的绝招"（17字）。`;
 
@@ -2220,8 +2239,8 @@ function buildSystemContent(opts: {
   //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
   // [v80 缓存优化] 后置到稳定块（位置/锚点/阶段/简介/画像/目标）之后：
   //   战术切换不再打断稳定块的前缀缓存
-  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const };
-  s += buildTacticBlock(tactic.category, tactic.phase);
+  const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const, cardIndex: -1 };
+  s += buildTacticBlock(tactic.category, tactic.phase, typeof tactic.cardIndex === 'number' ? tactic.cardIndex : -1);
 
   // [v20260809 机会窗口] 她主动聊起话题库话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
   //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
@@ -2332,6 +2351,12 @@ function buildSystemContent(opts: {
   } else {
     s += `\n\n【节奏】按正常聊天节奏回复即可，不用刻意延后，也不必秒回。`;
   }
+
+  // [v15] 当前时间（[v20260811 缓存] 挪到全部块的最后：每小时变一次，只要放中间就会打断
+  //   其后所有稳定块的 DeepSeek 前缀缓存——这是缓存命中率 38% 的元凶，现在放末尾，
+  //   前面 1200+ 字固定/低频块全部可稳定命中）
+  s += `\n\n【当前时间】（严格遵守，所有时刻/时段表述以此为准）\n${formatCurrentTime()}\n`
+    + `- 严禁编造或猜错时刻；"今晚/明天/周末/这么晚"等词必须与时间一致；判断这个点适不适合约人/打电话/聊深夜话题以此为准，别半夜答应见面或约人。`;
 
   return { systemContent: s, pulseAdvice, factsInjected };
 }
