@@ -793,6 +793,49 @@ textarea.input {
     color: rgba(255, 255, 255, 0.55);
     font-size: 11px;
 }
+/* [v153 行动层] 当前行动任务行（攻略目标正在执行的布局步骤） */
+.guide-quest {
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 215, 0, 0.08);
+    border: 1px solid rgba(255, 215, 0, 0.25);
+}
+.guide-quest-head {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.85);
+}
+.guide-quest-head b {
+    color: #FFD54F;
+}
+.guide-qstatus {
+    font-size: 11px;
+    color: #FFD54F;
+    margin-left: 4px;
+}
+.guide-qpos {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.5);
+    margin-left: 6px;
+}
+.guide-qsteps {
+    margin-top: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.guide-qstep {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.55);
+    padding-left: 2px;
+}
+.guide-qstep.done {
+    color: #7CFC9A;
+}
+.guide-qstep.cur {
+    color: #FFD54F;
+    font-weight: 500;
+}
 .guide-actions {
     margin-top: 8px;
     display: flex;
