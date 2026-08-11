@@ -516,30 +516,9 @@ Deno.serve(async (req) => {
         //   保证"嗯"在吸引期拿到冷读/打压类弹药、舒适期拿到联系感/共鸣类弹药
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
 
-        // [v153 行动层 ActiveQuest] 攻略 → 行动任务调度（semanticKws 已就绪）：
-        //   攻略 running 且当前 phase 有未聊话题 → 生成/恢复 quest（跨轮布局执行）
-        //   达成判定统一在 updateMemoryCard 回写（本轮她已聊到该话题 → 本轮就打钩+清空 quest，
-        //   主流程不清空——避免"清了 quest 但话题没打钩"的断链）
-        //   [2026-08-11] 素材源由套路块改为话术弹药（套路机制已移除）
-        if (memoryCard && llmKey && memoryCard.guide && memoryCard.guide.status === 'running') {
-          try {
-            // [v20260811 话题] 传 query 让 nextQuestTarget 按当前对话匹配最近话题（聊起来自然）
-            const qTarget = nextQuestTarget(memoryCard, switchTopic ? '' : query);
-            const existing = memoryCard.quest;
-            if (qTarget && (!existing || existing.target !== qTarget)) {
-              // 目标变化或 quest 缺失 → 布局新 quest（检索话术弹药作灵感源）
-              const questMaterial = await recallBlocks(
-                supabaseUrl, serviceRoleKey,
-                semanticKws, [qTarget],
-                { ...quotaOpts, pickCount: 2, type: '话术' }
-              ).catch(() => []);
-              const quest = await extractQuest(llmKey, llmBase, llmModel, qTarget, memoryCard, history, questMaterial);
-              if (quest) memoryCard.quest = quest;
-            }
-          } catch (e: any) {
-            console.warn('quest 调度失败:', e.message);
-          }
-        }
+        // [v20260811 行动机制已移除] 攻略话题清单即行动指南：
+        //   每轮"聊哪个话题"由 buildGuideBlock 注入的本轮话题建议（pickNearestTopic 纯规则）承担，
+        //   不再需要 quest 跨轮布局器（extract_quest LLM 调用已删，省成本）
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
         kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
@@ -695,7 +674,7 @@ Deno.serve(async (req) => {
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
           // [v127] 掉线信号不入库：避免"掉线了"污染 recent_self_messages 防重复窗口
           currentReply: (reply && reply !== '掉线了') ? reply : null,
-          // [v153 quest] 本轮对方原话（达成判定用：她本轮刚给照片/年龄 → 本轮就点亮，不滞后一轮）
+          // [v20260811 话题] 本轮对方原话（打钩判定用：她本轮刚聊到话题 → 本轮就打钩，不滞后一轮）
           currentQuery: query,
         });
       } catch (e: any) {
@@ -719,8 +698,12 @@ Deno.serve(async (req) => {
       } : null,
       // [v20260810 攻略] 攻略状态透传（前端攻略面板渲染；null=无攻略）
       guide: memoryCard?.guide || null,
-      // [v153 行动层] 当前行动任务透传（前端攻略面板显示"军师正在布局什么"；null=无行动）
-      quest: memoryCard?.quest || null,
+      // [v20260811 行动机制移除] 本轮建议话题透传（前端折叠态显示"聊XX"；null=无攻略/清单聊完）
+      pick_topic: (() => {
+        const g = memoryCard?.guide;
+        if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+        return pickNearestTopic(memoryCard, switchTopic ? '' : query);
+      })(),
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
         offline: reply === '掉线了',
@@ -808,10 +791,12 @@ Deno.serve(async (req) => {
           return ph ? `${ph.rounds_in_phase || 0}/${ph.stay_max_rounds || 8}` : null;
         })(),
         guide_eval: memoryCard?.guide?.last_eval || null,
-        // [v153 quest] 行动任务状态（验证布局/推进/达成）
-        quest_target: memoryCard?.quest?.target || null,
-        quest_step: memoryCard?.quest ? `${(memoryCard.quest.current_step || 0) + 1}/${memoryCard.quest.plan.length} hook=${memoryCard.quest.hook_laid ? 1 : 0} close=${memoryCard.quest.waiting_close ? 1 : 0}` : null,
-        quest_rounds: memoryCard?.quest?.rounds_used ?? null,
+        // [v20260811 话题] 本轮建议话题（验证每轮话题引导；null=无攻略/清单已聊完）
+        pick_topic: (() => {
+          const g = memoryCard?.guide;
+          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+          return pickNearestTopic(memoryCard, switchTopic ? '' : query);
+        })(),
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
         // [vB] LLM token 用量（token 测量用）
@@ -1016,24 +1001,6 @@ async function extractSemanticKeywords(
 //   [2026-08-11] strategy 套路字段已随套路机制移除
 // ============================================================
 
-// [v153 行动层] ActiveQuest：把攻略里的话题清单目标转成"跨轮执行的多步布局"
-//   [v20260811 话题] 战略层（攻略定义"聊什么"）→ 行动层（quest 定义"怎么一步步自然聊到"）→ 执行（状态机逐步兑现）
-//   [2026-08-11] 素材源由知识库套路改为话术弹药（套路机制已移除）
-type ActiveQuest = {
-  target: string;             // 目标话题 short 名，如 '年龄'（TOPIC_LIBRARY 之一）
-  goal_note: string;          // 目标说明（≤40字）：为什么聊/怎么聊，供 LLM 把握动机
-  plan: string[];             // LLM 布局的 2-4 步（每步 = 话术思路 + 可直接发的例句 + 时机），如
-                              //   ["铺垫：笑她说话像小学生，为话题引入做引子（'你说话跟小学生似的，想证明一下'）",
-                              //    "引入：自然把话题引到目标上（'赌一把，猜错的人做10个深蹲，敢不敢'）",
-                              //    "聊开：引导她说出实质内容（'发张照片来，我亲眼评判输赢，输了别耍赖'）"]
-  current_step: number;       // 当前执行到第几步（0-based）
-  hook_laid: boolean;         // 上一步钩子已发出，等她接
-  waiting_close: boolean;     // 待收网：最后一步已发出，只等收尾
-  rounds_used: number;        // 已用轮次（每次回复后 +1）
-  max_rounds: number;         // 轮次上限（超限放弃，防死磕）
-  started_at: string;
-};
-
 // [v11 迷男OS 引擎层] 节奏引擎（线上"假性时间限制"量化）
 type PulseState = {
   delay_count?: number;   // 连续建议延迟回复的轮数（≥2 触发礼貌阈值，强制恢复正常）
@@ -1094,8 +1061,6 @@ type MemoryCard = {
   pulse?: PulseState;
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
-  // [v153 行动层] 当前执行的行动任务（攻略话题清单 → 跨轮布局）
-  quest?: ActiveQuest | null;
   // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
   guide?: GuideState | null;
   updated_at?: string;
@@ -1113,10 +1078,10 @@ const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
 // [v20260811 话题清单] 话题库（攻略清单素材库，源文件 话题.txt，共 50 个）
 //   4 期分组：破冰15 / 升温15 / 暧昧10 / 恋爱10；每话题带打钩关键词 kws
 //   weight：'age'|'photo'|'region' = 权重话题（年龄/照片/住哪，好友列表昵称旁可见，
-//   信息最容易自然拿到）——生成攻略时强制排进前阶段、quest 优先引导、且必须"聊出结果"才打钩
+//   信息最容易自然拿到）——生成攻略时强制排进前阶段、每轮话题建议优先、且必须"聊出结果"才打钩
 type TopicDef = {
   name: string;         // 话题名（攻略信号/面板显示用，如 '聊名字'）
-  short: string;        // 短名（quest/打钩引用用，如 '名字'）
+  short: string;        // 短名（话题建议/打钩引用用，如 '名字'）
   stage: 'break' | 'warm' | 'flirt' | 'love';  // 所属期
   kws: string[];        // 打钩预检关键词（她的话命中任一即视为"聊过"）
   weight?: 'age' | 'photo' | 'region';          // 权重话题标记
@@ -1334,7 +1299,7 @@ async function updateMemoryCard(ctx: {
   //   导致它在"重生请求"和下一轮防重复判定时不在 recent_self_messages 防重复窗口内
   //   → 重生时仍可能生成同一句。生成后立即写入。
   currentReply?: string | null;
-  // [v153 quest] 本轮对方原话（达成判定用：她本轮刚给照片/年龄 → 本轮就点亮，不滞后一轮）
+  // [v20260811] 本轮对方原话（打钩判定用：她本轮刚聊到话题 → 本轮就打钩，不滞后一轮）
   currentQuery?: string;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
@@ -1471,7 +1436,7 @@ async function updateMemoryCard(ctx: {
 
   // [v20260811 话题打钩] 每轮规则打钩：她本轮的话命中当前阶段未完成话题 → 打钩
   //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
-  //   与 quest 达成共用同一判定（话题命中 = 该话题实质聊过）
+  //   话题命中 = 该话题实质聊过（打钩判定）
   {
     const g = card.guide;
     const gph = g && g.status === 'running' ? g.phases[g.current_phase] : null;
@@ -1494,50 +1459,6 @@ async function updateMemoryCard(ctx: {
           advanceGuide(card, `本阶段话题已全部聊过，攻略推进`);
         }
       }
-    }
-  }
-
-  // [v153 行动层 ActiveQuest] 回写推进（读-写闭环）：
-  //   推进规则：
-  //   - 目标话题已聊过（本轮规则打钩或上轮）→ 打钩已完成 + quest 清空（下轮按对话重新匹配最近话题）
-  //   - 收网态（waiting_close）：上轮最后一步已发出，本轮她已回应 → 任务完成清空
-  //   - 坑已埋（hook_laid）：她接招（questEngageHit 命中）→ 放行下一步（current_step++），
-  //     到末步 → 进入收网；没接 → 忍住不推进
-  //   - 刚启动（!hook_laid）：本轮执行了当前步（埋钩）→ hook_laid=true；当前步是末步 → 进入收网
-  //   - 轮次上限兜底：非收网态且超限 → 放弃清空（改日再布局）
-  if (card.quest) {
-    const q = card.quest;
-    const lastUser = [...(Array.isArray(ctx.history) ? ctx.history : [])]
-      .reverse().find((h) => h && h.role === 'user' && typeof h.content === 'string');
-    const lastUserText = String((lastUser as any)?.content || '');
-    // [v20260811] 目标话题已聊过 = quest 达成（本轮 herText 命中，或已打钩记录在册）
-    const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
-    const qDone = done.has(q.target)
-      || topicDoneByText(topicDef(q.target), ctx.currentQuery || lastUserText);
-    if (qDone) {
-      // 达成：目标话题打钩 + 清空 quest（推进已由每轮打钩块处理）
-      if (!done.has(q.target)) {
-        done.add(q.target);
-        card.topics_done = [...done];
-      }
-      card.quest = null;
-    } else if (q.waiting_close) {
-      // 收网轮：上轮最后一步已发出，本轮她已回应 → 任务完成，恢复正常聊天
-      card.quest = null;
-    } else if (q.hook_laid) {
-      if (questEngageHit(lastUserText)) {
-        q.current_step = (q.current_step || 0) + 1; // 放行下一步
-        if (q.current_step >= q.plan.length - 1) q.waiting_close = true; // 下一步是末步 → 发完收网
-      }
-      // 没接招 → 忍住，current_step 不动
-    } else {
-      // 刚启动：本轮执行了当前步（埋钩）→ 钩已埋
-      q.hook_laid = true;
-      if ((q.current_step || 0) >= q.plan.length - 1) q.waiting_close = true;
-    }
-    q.rounds_used = (q.rounds_used || 0) + 1;
-    if (card.quest && !q.waiting_close && q.rounds_used >= (q.max_rounds || QUEST_MAX_ROUNDS)) {
-      card.quest = null; // 轮次上限：放弃本次布局，改日再战
     }
   }
 
@@ -1780,8 +1701,8 @@ async function extractGuide(
 }
 
 // [v20260810 攻略] 当前攻略注入块（buildSystemContent 用）：替代 GOAL_HINTS/ESCALATION
-//   [v20260811 话题] signals = 话题 short 名；打钩显示"聊过"
-function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[]): string {
+//   [v20260811 话题] signals = 话题 short 名；打钩显示"聊过"；本轮话题建议（纯规则）
+function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[], card?: MemoryCard | null, recentText?: string): string {
   const doneSet = new Set(doneTopics);
   const sigList = (ph.signals || []).map((sig) => {
     const t = topicDef(sig);
@@ -1789,11 +1710,16 @@ function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[]
     const label = t ? `聊${sig}` : sig;
     return `  ${hit ? '✓' : '○'} ${label}`;
   }).join('\n');
+  // [v20260811 行动机制移除] 本轮建议话题（纯规则）：未聊清单里最接近当前对话的一个
+  const pick = card ? pickNearestTopic(card, recentText) : null;
+  const pickLine = pick
+    ? `\n- 【本轮话题建议】优先自然把话题往「聊${pick}」上带（结合当前对话顺势引出，别生硬；她聊到相关就直接深入）。\n`
+    : '';
   const maxRounds = ph.stay_max_rounds || 8;
   return `\n\n【当前攻略】(战略层，最高优先级，替代目标引导)\n`
     + `- 你在执行攻略「${guide.name}」，总目标：${guide.goal}。你不是被动的应声虫——每一轮都带着攻略目的在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急。\n`
     + `- 当前阶段 ${guide.current_phase + 1}/${guide.phases.length}「${ph.name}」：${ph.mission}\n`
-    + `- 本阶段话题清单（全部聊过才进入下一阶段）：\n${sigList}\n`
+    + `- 本阶段话题清单（全部聊过才进入下一阶段）：\n${sigList}\n${pickLine}`
     + `- 已耗 ${ph.rounds_in_phase || 0}/${maxRounds} 轮（超限未达成将按预案切换打法，不硬耗不纠缠）。\n`
     + `- 主动引导：按阶段任务主动推进——优先聊本阶段话题清单里未打钩的话题（自然带入，别硬转）；她对该话题兴趣高（回应积极/话变长/主动延伸）就往深里聊、顺着延伸；她兴趣低（嗯/哦/敷衍/短回）就简单带过换下一个，不纠缠。\n`
     + `- 权重话题「年龄/照片/住哪」要聊出结果才算完成（知道她具体年龄/拿到照片/知道她住哪），其余话题聊出实质内容即可打钩。\n`
@@ -1820,30 +1746,18 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 }
 
 // ============================================================
-// [v153 行动层 ActiveQuest] 攻略话题清单 → 跨轮布局执行
-//   [v20260811 话题] quest 目标 = 话题 short 名；从当前阶段话题清单里按"当前聊天内容"匹配最近话题
-//   攻略定义"聊什么"（phase signals 里的话题清单），quest 定义"怎么一步步自然聊到"
-//   核心：LLM 为当前话题现场布局 2-4 步（铺垫→引入→聊开），状态机跨轮执行，
-//   达成判定（纯规则打钩）聊过即打钩 → advanceGuide 推进攻略。
+// [v20260811 行动机制已移除] 每轮话题建议（纯规则零 LLM）
+//   攻略话题清单即行动指南：每轮按当前对话从当前阶段未聊话题里挑"最接近"的一个
+//   注入 buildGuideBlock 供主回复"优先聊它"；聊过即打钩，清单聊完自动推进攻略
+//   不再需要 quest 跨轮布局器（extract_quest LLM 调用已删，省成本）
 // ============================================================
-const QUEST_MAX_STEPS = 4;
-const QUEST_MAX_ROUNDS = 6;   // 单话题布局轮次上限（防死磕；超出放弃，改日再战）
 
-// 她"接招/上钩"信号（quest 跨轮推进判定）：追问/反驳/接梗/打赌 = 愿意继续玩
-const QUEST_ENGAGE_RE = /怎么说|然后呢|真的假的|那么夸张|试试|来啊|来吧|赌|敢不敢|怕你|你试试|哈哈哈?|有意思|说来听听|说说看|凭什么|你确定|来就来|谁怕谁|行啊|可以啊|好呀|来吧|接着/;
-
-// [v153] 她是否接招（quest 推进判定）：命中 = 愿意继续玩，可放行下一步
-function questEngageHit(lastUserText: string): boolean {
-  const t = String(lastUserText || '').trim();
-  if (!t) return false;
-  return QUEST_ENGAGE_RE.test(t);
-}
-
-// [v153][v20260811 话题] 从攻略当前 phase 选"下一个要聊的话题"：
-//   ① 取该 phase 话题清单里第一个未聊过的话题；
-//   ② 若给了当前聊天内容（query/history），按关键词重叠度挑"最接近当前对话"的未聊话题（聊起来自然）
-//   返回 null = 本阶段无未聊话题（攻略自由模式：战术卡主导）
-function nextQuestTarget(card: MemoryCard, recentText?: string): string | null {
+// [v20260811] 从攻略当前 phase 选"本轮建议话题"：
+//   ① 权重话题（年龄/照片/住哪）优先（列表页可见，最先引导聊）
+//   ② 其次按当前对话关键词重叠度挑最接近的未聊话题（聊起来自然）
+//   ③ 兜底取清单第一个未聊话题
+//   返回 null = 无未聊话题（本阶段清单聊完，等推进下一阶段）
+function pickNearestTopic(card: MemoryCard, recentText?: string): string | null {
   const g = card.guide;
   if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
   const ph = g.phases[g.current_phase];
@@ -1868,75 +1782,6 @@ function nextQuestTarget(card: MemoryCard, recentText?: string): string | null {
     if (best) return best;
   }
   return pending[0]; // 兜底：取清单第一个未聊话题
-}
-
-// [v153][v20260811 话题] quest 达成判定：她当前这句话是否让目标话题"实质聊过"（规则打钩）
-function questAchieved(target: string, lastUserText: string): boolean {
-  return topicDoneByText(topicDef(target), String(lastUserText || ''));
-}
-
-// [v153] quest 布局器：LLM 为目标话题现场编"铺垫→引入→聊开"多步计划
-//   输入：目标话题 + 画像 + 最近对话 + 知识库话术弹药（可选，作灵感源）
-//   输出：ActiveQuest（plan 2-4 步，每步带话术思路 + 例句 + 时机）
-async function extractQuest(
-  llmKey: string, llmBase: string, llmModel: string,
-  target: string, card: MemoryCard, history: any[], kbMaterial: any[]
-): Promise<ActiveQuest | null> {
-  const td = topicDef(target);
-  const tip = td ? `「${td.name}」：${td.kws.join('、')}（聊到这些就算话题聊过）` : `话题「${target}」`;
-  const p = card.profile || {};
-  const recent = (Array.isArray(history) ? history : [])
-    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
-    .slice(-6)
-    .map((h) => `对方：${truncateText(String(h.content || ''), 80)}`)
-    .join('\n');
-  const kbText = (Array.isArray(kbMaterial) ? kbMaterial : [])
-    .map((i) => `${i.block_title || i.title || ''}\n${String(i.content || '').slice(0, 200)}`)
-    .join('\n');
-  const weightNote = td?.weight
-    ? `（权重话题：必须聊出结果才算完成——${td.weight === 'age' ? '知道她具体年龄/生日/星座' : td.weight === 'photo' ? '她发过照片/自拍' : '知道她具体城市/区域/居住情况'}，布局要奔着结果去）`
-    : '（普通话题：聊出实质内容即可，但尽量聊深入些）';
-  const prompt = `你是恋爱聊天"话题引导"策划助手。用户正在替自己用交友APP（纯文字聊天）追求对方，目标明确：在接下来几轮对话里，通过自然布局把话题引导到「${td ? td.name : target}」上并聊开。${tip}${weightNote}\n`
-    + `当前情况：\n`
-    + `- 关系阶段：${p.stage || '陌生'}；对方性格：${p.personality || '未知'}\n`
-    + `- 最近对方说的话：\n${recent || '（无）'}\n`
-    + (kbText ? `- 知识库参考素材（可借鉴其思路/语气，不必照搬）：\n${truncateText(kbText, 1200)}\n` : '')
-    + `要求（这是关键，必须做到）：\n`
-    + `1. 设计 2~4 步的布局，每步一个"可执行动作"，形成"铺垫→引入→聊开"的递进：先制造一个自然的由头（结合当前对话语境，别生硬转话题），再顺势把话题引到目标上，最后一步引导她说出实质内容（她回应/分享/给信息）。\n`
-    + `2. 禁止第一步就直球问目标话题——必须铺垫，让话题成为自然延伸（如她想聊"最近在追剧"→ 顺势聊到"你平时还爱看什么"→ 深入兴趣话题）。\n`
-    + `3. 每一步必须包含一句"可直接发送给对方"的例句（引号标注原样话术），口吻像真人、贴合当前对话语境，禁止官方腔/翻译腔；允许轻度调侃，禁止人身攻击/贬低外貌。\n`
-    + `4. 每步格式：一句话动作思路 + 例句（引号内原样话术）+ 时机提示写在末尾括号内（如"她追问时用""她接茬后隔轮用"）。每步 40-70 字。\n`
-    + `5. 兴趣适配：若她当前对话明显没兴趣（短回/敷衍/回避），布局要轻——简单带过不强推，输出 {"plan":[]} 放弃本轮布局；她兴趣高则布局可以往深聊延伸设计。\n`
-    + `6. 如果当前语境明显不适合布局（她正在表达强烈负面情绪/正在谈正事/关系过冷），输出 {"plan":[]} 放弃本轮布局。\n`
-    + `只输出 JSON：{"plan":["第1步...","第2步..."]}，不要任何其他文字。`;
-  try {
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.4, maxTokens: 600, _stage: 'extract_quest',
-    });
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
-    const pj = JSON.parse(content.slice(start, end + 1));
-    const plan = (Array.isArray(pj.plan) ? pj.plan : [])
-      .map((s: any) => (typeof s === 'string' ? s.trim() : ''))
-      .filter((s: string) => s.length > 0)
-      .slice(0, QUEST_MAX_STEPS);
-    if (plan.length < 2) return null; // 布局至少 2 步才有跨轮意义
-    return {
-      target,
-      goal_note: (td ? td.name : target).slice(0, 40),
-      plan,
-      current_step: 0,
-      hook_laid: false,
-      waiting_close: false,
-      rounds_used: 0,
-      max_rounds: Math.max(plan.length + 1, QUEST_MAX_ROUNDS),
-      started_at: new Date().toISOString(),
-    };
-  } catch (e: any) {
-    console.warn('extractQuest failed:', e.message);
-    return null;
-  }
 }
 
 // ============================================================
@@ -2350,7 +2195,7 @@ function buildSystemContent(opts: {
     && guide.current_phase >= 0 && guide.current_phase < guide.phases.length;
 
   if (guideRunning) {
-    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics);
+    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics, opts.memoryCard, opts.lastUserText);
   } else if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新话题；正常聊天稳住温度即可，她主动聊就自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
@@ -2464,59 +2309,6 @@ function buildSystemContent(opts: {
         + `- 安全线（绝不越过）：不涉及未成年、不涉及真实伤害、不编造事实。边界内怎么大胆怎么来。\n`
         + `- 保味范例：参考句"想不想来我床上聊聊人生"→"聊人生？我这只有床，来不来你定"——直白保留、软化禁止。\n`
         + `- 输出前自检：核心意象和直白度保留了吗？觉得"太过了"的时候，回到参考句的措辞水准再发。`;
-    }
-  }
-
-  // [v153 行动层 ActiveQuest] 当前行动任务注入（最高优先）：
-  //   攻略话题清单目标 → 跨轮布局执行。状态机（埋钩→接招→放行→收网），
-  //   布局由 extractQuest 现场生成，达成判定（聊过话题）打钩推进攻略。
-  //   注入前只读状态推导；推进在 updateMemoryCard 回写（读-写闭环）
-  const quest = opts.memoryCard?.quest;
-  if (quest && Array.isArray(quest.plan) && quest.plan.length > 0) {
-    const qSteps = quest.plan;
-    const qCur = typeof quest.current_step === 'number' ? quest.current_step : 0;
-    const qHookLaid = !!quest.hook_laid;
-    const qWaitingClose = !!quest.waiting_close;
-    // 她当前这句话是否已把目标话题聊过（给出实质内容）→ 达成即收网，不再推进
-    const qAchieved = questAchieved(quest.target, String(opts.lastUserText || ''));
-    const qTd = topicDef(quest.target);
-    const qLabel = qTd ? qTd.name : quest.target;
-    const qHead = `\n\n【当前行动】(最高优先，覆盖战术指令的常规出招)\n你正在把话题引向「${qLabel}」，共 ${qSteps.length} 步布局。\n`
-      + `- 动机：${quest.goal_note || `自然地聊到${qLabel}并聊开`}——心里装着这个目标，但嘴上永远不暴露，输出必须是自然聊天。\n`
-      + `- 严禁向对方提及布局、步骤、第几步、目标、攻略等任何元信息。\n`
-      + `- 字数：布局话术可长（不受"整条≤20字"限制，2 句以内），但要口语化、像真人。\n`;
-
-    if (qAchieved) {
-      // 她已把目标话题聊过（给出实质内容）→ 收网：接住并确认，不追加新要求
-      s += qHead
-        + `- 状态：话题「${qLabel}」已经聊开了（本轮或上轮她已给出实质内容）→ 收网。\n`
-        + `- 本轮任务：自然接住、顺势确认（夸一句/接一句/记住），不要再推进任何新步骤、不要再追加要求。`;
-    } else if (qWaitingClose) {
-      // ④ 待收网：最后一步已发出，只接住她的回应收尾
-      s += qHead
-        + `- 状态：最后一步已经发出，正在等她完成最后回应（收网阶段）。\n`
-        + `- 本轮任务：接住她当前的话，顺着把话题收下来（她回应/分享/给信息即成功），不再抛新步骤、新悬念。\n`
-        + `- 她冷淡/反感/拒绝 → 立即收手，正常聊天，不纠缠。`;
-    } else if (qHookLaid && !questEngageHit(String(opts.lastUserText || ''))) {
-      // ② 等待上钩：上一步钩子已埋，她没接 → 忍住，不推进
-      s += qHead
-        + `- 状态：第 ${qCur + 1}/${qSteps.length} 步的钩子已发出，她还没接招。\n`
-        + `- 本轮硬约束：绝对忍住！不推进下一步、不自问自答、不自己揭穿布局。只自然接住她当前的话（可绕、可打岔、可继续吊胃口），把铺垫保持住。\n`
-        + `- 判断依据：她追问/反驳/接梗/打赌（"怎么说/真的假的/来啊/赌"）→ 才是接招信号，接了才轮到下一步；她现在没接，绝不放行。\n`
-        + `- 她明确冷淡/反感/敷衍 → 立即放弃布局，正常回应，绝不强行拉回。`;
-    } else {
-      // ①执行步（坑未埋或刚放行）或 ③放行（她接招了）
-      const qStepIdx = Math.min(qCur + (qHookLaid ? 1 : 0), qSteps.length - 1);
-      const qStep = qSteps[qStepIdx] || '';
-      const qStepIsLast = qStepIdx >= qSteps.length - 1;
-      s += qHead
-        + `- 当前执行第 ${qStepIdx + 1}/${qSteps.length} 步（这是本轮唯一任务，只做这一步，禁止跳步/合并/提前做完）：\n${qStep}\n`
-        + (qHookLaid && questEngageHit(String(opts.lastUserText || ''))
-          ? `- 她接招了（追问/反驳/接梗）→ 顺势推进这一步，接住她的节奏，把铺垫做到这一步的钩子上。\n`
-          : `- 这一步把钩子埋好（结尾留个引子/赌注/悬念勾她接），但严禁把后续步骤提前说出来。\n`)
-        + (qStepIsLast
-          ? `- 注意：这是最后一步，发出后进入收网，等她完成最后回应即可。\n`
-          : `- 例句是参考话术：优先采用，可按当前语境微调语气措辞，保留韵味和节奏。\n`);
     }
   }
 

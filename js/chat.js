@@ -54,9 +54,9 @@ const Chat = {
             this._prevStage = '';
         }
         // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
-        // [v20260811 折叠] 每次进会话默认折叠（只显示当前行动框），用户展开过则保持
+        // [v20260811 折叠] 每次进会话默认折叠（只显示本轮建议话题），用户展开过则保持
         if (typeof this._guideExpanded !== 'boolean') this._guideExpanded = false;
-        this._updateGuidePanel((mc && mc.guide) || null, (mc && mc.quest) || null);
+        this._updateGuidePanel((mc && mc.guide) || null, null);
 
         // [多窗口会话] 记录当前窗口正在对话的好友，
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
@@ -752,7 +752,8 @@ const Chat = {
                     : null;
                 if (mcObj) { mcObj.guide = data.guide; this.memoryCard = mcObj; }
             }
-            this._updateGuidePanel((data && data.guide) || null, (data && data.quest) || null);
+            // [v20260811 行动机制移除] pick_topic = 本轮建议话题（折叠态显示）
+            this._updateGuidePanel((data && data.guide) || null, (data && data.pick_topic) || null);
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
@@ -764,11 +765,10 @@ const Chat = {
     // [v20260810 攻略] 攻略面板：聊天页顶部显示当前作战攻略（目标/阶段/信号/进度/控制按钮）
     //   输入：guide 对象（后端响应 data.guide，形态 {name,goal,status,current_phase,phases,last_eval}）
     //   或 memory_card 对象（打开会话时，取 .guide 字段，兼容字符串）
-    //   [v153 行动层] 第二参数 quest：当前行动任务（{target,plan,current_step,hook_laid,waiting_close}），
-    //     有则面板显示"当前行动"行（军师正在布局什么、第几步）；无则保持原攻略信息
-    //   [v20260811 折叠] 默认只显示黄色"当前行动"框（避免面板太大挡屏幕），
+    //   [v20260811 行动机制移除] 第二参数改 pickTopic（本轮建议话题 short，后端 pick_topic 透传）：
+    //     折叠态默认只显示"🎯 本轮建议话题：聊XX"（避免面板太大挡屏幕），
     //     点"展开完整攻略"才显示阶段/信号/控制按钮；再点收起
-    _updateGuidePanel(src, quest) {
+    _updateGuidePanel(src, pickTopic) {
         const el = document.getElementById('chat-guide');
         if (!el) return;
         let guide = null;
@@ -833,15 +833,18 @@ const Chat = {
             + '<div class="guide-sigs">' + sigHtml + '</div>'
             + (guide.last_eval ? '<div class="guide-eval">' + this._escapeHtml(guide.last_eval) + '</div>' : '')
             + '<div class="guide-actions">' + btnHtml + '</div>';
-        const questHtml = this._questHtml(quest);
         const expanded = !!this._guideExpanded;
-        // 折叠态主体：优先只显示黄色"当前行动"框；无行动时给一行极简攻略状态
+        // [v20260811 行动机制移除] 折叠态主体：显示"本轮建议话题"；无建议时给一行极简攻略状态
+        const pickKnown = pickTopic && TOPIC_LIBRARY_SHORTS.indexOf(pickTopic) > -1;
+        const pickHtml = pickKnown
+            ? '<div class="guide-mini" style="display:flex;align-items:center;gap:6px;"><span style="font-size:12px;">🎯</span><span>本轮建议话题：<b style="color:#FFD54F;">聊' + this._escapeHtml(pickTopic) + '</b></span></div>'
+            : '';
         let mainHtml;
         if (expanded) {
-            mainHtml = questHtml + fullHtml;
+            mainHtml = fullHtml;
         } else {
-            mainHtml = questHtml
-                ? questHtml
+            mainHtml = pickHtml
+                ? pickHtml
                 : '<div class="guide-mini">攻略「' + this._escapeHtml(guide.name) + '」运行中 · 阶段「' + this._escapeHtml(ph.name) + '」</div>';
         }
         const toggleHtml = '<button class="guide-toggle" data-toggle="1">' + (expanded ? '收起完整攻略 ▴' : '展开完整攻略 ▾') + '</button>';
@@ -851,41 +854,12 @@ const Chat = {
         const tb = el.querySelector('.guide-toggle');
         if (tb) tb.onclick = () => {
             this._guideExpanded = !this._guideExpanded;
-            this._updateGuidePanel(src, quest);
+            this._updateGuidePanel(src, pickTopic);
         };
         // 绑定控制按钮（暂停/继续/终止/重制；仅展开态渲染）
         el.querySelectorAll('.guide-btn').forEach(b => {
             b.onclick = () => this._guideAction(b.dataset.act);
         });
-    },
-
-    // [v153 行动层] 当前行动任务渲染：攻略目标正在被"执行"的具体步骤
-    //   quest = {target, plan[], current_step, hook_laid, waiting_close, rounds_used, max_rounds}
-    //   无 quest → 返回空串（攻略面板不显示行动行）；有 → 显示"正在布局什么+第几步+状态"
-    _questHtml(quest) {
-        if (!quest || typeof quest !== 'object') return '';
-        const target = quest.target || '';
-        const plan = Array.isArray(quest.plan) ? quest.plan : [];
-        if (!target || plan.length === 0) return '';
-        const cur = (typeof quest.current_step === 'number' ? quest.current_step : 0) + 1;
-        const total = plan.length;
-        let status = '布局中';
-        if (quest.waiting_close) status = '收网中';
-        else if (quest.hook_laid) status = '等她接招';
-        const stepsText = plan.map((st, i) => {
-            const done = i < cur - 1;
-            return '<span class="guide-qstep' + (done ? ' done' : (i === cur - 1 ? ' cur' : '')) + '">'
-                + (done ? '✓' : (i === cur - 1 ? '▶' : '○')) + ' ' + this._escapeHtml(String(st).slice(0, 18)) + (String(st).length > 18 ? '…' : '')
-                + '</span>';
-        }).join('');
-        return '<div class="guide-quest" title="行动步骤：' + this._escapeHtml(plan.join(' → ')) + '">'
-            + '<div class="guide-quest-head">🎯 当前行动：<b>'
-            + this._escapeHtml(TOPIC_LIBRARY_SHORTS.indexOf(target) > -1 ? '聊' + target : target)
-            + '</b>'
-            + ' <span class="guide-qstatus">' + status + '</span>'
-            + ' <span class="guide-qpos">' + cur + '/' + total + ' 步</span></div>'
-            + '<div class="guide-qsteps">' + stepsText + '</div>'
-            + '</div>';
     },
 
     // [v20260810 攻略] 控制按钮：暂停/继续/终止/重制
@@ -919,7 +893,7 @@ const Chat = {
                 return;
             }
             this.memoryCard = mc;
-            this._updateGuidePanel(mc, mc.quest || null);
+            this._updateGuidePanel(mc, null);
             Utils.toast({ pause: '攻略已暂停', resume: '攻略已继续', abort: '攻略已终止', reset: '攻略已清除，下轮对话自动重新制定' }[action] || 'ok');
         } catch (e) {
             console.error('[军师] 攻略控制异常:', e);
