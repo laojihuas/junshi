@@ -42,15 +42,6 @@ const Chat = {
         } catch (e) {
             this._prevStage = '';
         }
-        // [v20260805] 策略徽标：打开会话时从 memory_card 读初始套路状态（已 select *，零额外请求）
-        this._updateStrategyBadge(session.memory_card || null);
-        // [v143 套路爽感] 记录打开时的策略名（套路结束时 toast 用）
-        try {
-            const smc = session.memory_card
-                ? (typeof session.memory_card === 'string' ? JSON.parse(session.memory_card) : session.memory_card)
-                : null;
-            this._prevStrategyName = (smc && smc.strategy && smc.strategy.name) || '';
-        } catch (e) { this._prevStrategyName = ''; }
         // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
         this._updateGuidePanel((mc && mc.guide) || null, (mc && mc.quest) || null);
 
@@ -447,7 +438,7 @@ const Chat = {
     },
 
     // [v62 一键换话题] 军师聊偏/答非所问时，用户点按钮强制换新话题：
-    //   不发 user 消息、不污染对话，直接让军师抛一句新话题开场（清套路由后端处理）
+    //   不发 user 消息、不污染对话，直接让军师抛一句新话题开场
     async switchTopic() {
         if (!this.currentSessionId) {
             Utils.toast('请先进入一个好友会话');
@@ -471,7 +462,7 @@ const Chat = {
         try {
             const systemPrompt = await this._getSystemPrompt();
             const history = WindowSession.getHistory(this.currentSessionId);
-            // query 用 "/换话题" 指令（后端识别 → 清套路 + 注入【切换话题】），不落库为 user 消息
+            // query 用 "/换话题" 指令（后端识别 → 注入【切换话题】），不落库为 user 消息
             const reply = await this._callIMA('/换话题', { history, system_prompt: systemPrompt });
             if (loadingEl.parentNode) container.removeChild(loadingEl);
 
@@ -727,10 +718,9 @@ const Chat = {
             }
 
             const data = await response.json();
-            // [v20260805] 保存 _debug 供策略徽标渲染（后端零成本白送字段，非 LLM 内容）
+            // [v20260805] 保存 _debug 供阶段提示/攻略渲染（后端零成本白送字段，非 LLM 内容）
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
-                this._updateStrategyBadge(this.lastDebug);
                 // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/陌生不提示）
                 const ns = this.lastDebug.memory_stage;
                 if (ns && ns !== '陌生' && this._prevStage && ns !== this._prevStage) {
@@ -743,16 +733,6 @@ const Chat = {
                 }
                 this._prevStage = ns || this._prevStage;
             }
-            // [v143 套路爽感] 她踩坑了：套路执行期间她追问/好奇 = 上钩，提示用户顺势收网
-            if (this.lastDebug.trap_caught) {
-                Utils.toast('她上钩了，顺着套路收网');
-            }
-            // [v143 套路爽感] 套路走完：上轮还在执行、本轮已清除（非用户手动 / 打断）→ 收工提示
-            if (this._prevStrategyName && !this.lastDebug.strategy_name && !this.lastDebug.strategy_clear) {
-                Utils.toast('套路走完：' + this._prevStrategyName + ' 收工');
-            }
-            if (this.lastDebug.strategy_name) this._prevStrategyName = this.lastDebug.strategy_name;
-            else if (!this.lastDebug.strategy_clear) this._prevStrategyName = '';
             // [v20260810 攻略] 攻略状态（后端透传 guide 对象）→ 渲染面板 + 同步缓存
             if (data && data.guide) {
                 const mcObj = this.memoryCard
@@ -766,51 +746,6 @@ const Chat = {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
             // [v20260802] API 调用失败/未接入 AI：直接回复"掉线了"，不再返回模拟回复
             return '掉线了';
-        }
-    },
-
-    // [v20260805] 策略徽标：好友名下方显示当前执行套路/关系阶段（仅用户可见，纯前端 UI）
-    // 兼容两种输入：
-    //   memory_card 对象（打开会话时）：{ profile:{stage}, strategy:{name,rounds_used,max_rounds} }
-    //   _debug 对象（每次回复后）：{ strategy_name, strategy_rounds, strategy_max_rounds, strategy_clear, memory_stage }
-    _updateStrategyBadge(src) {
-        const el = document.getElementById('chat-strategy');
-        if (!el) return;
-        try {
-            let name = '', rounds = null, max = null, cleared = false, stage = '';
-            if (src && src.strategy_name !== undefined) {
-                // _debug 形态
-                name = src.strategy_name || '';
-                rounds = src.strategy_rounds;
-                max = src.strategy_max_rounds;
-                cleared = !!src.strategy_clear;
-                stage = src.memory_stage || '';
-            } else if (src && src.strategy) {
-                // memory_card 形态
-                const st = src.strategy;
-                if (st && st.name) {
-                    name = st.name;
-                    rounds = st.rounds_used;
-                    max = st.max_rounds;
-                }
-                const p = src.profile || {};
-                stage = p.stage || '';
-            }
-            if (cleared || !name) {
-                el.classList.remove('show');
-                el.innerHTML = '';
-                return;
-            }
-            // [v20260805c] 摘除关系词（隐私）：不再显示"朋友/追求/暧昧"等标签，只保留策略名+进度
-            const prog = (typeof rounds === 'number' && typeof max === 'number')
-                ? `（${rounds}/${max}）`
-                : (typeof rounds === 'number' ? `（第${rounds}轮）` : '');
-            el.innerHTML = '策略「' + this._escapeHtml(name) + '」' + prog;
-            el.classList.add('show');
-        } catch (e) {
-            console.error('[军师] 策略徽标渲染失败:', e);
-            el.classList.remove('show');
-            el.innerHTML = '';
         }
     },
 

@@ -8,7 +8,8 @@
 //   - 检索：kb_blocks_recall RPC（bigrams GIN 粗筛 + 块内词频加权打分）
 //   - 命中块 ≤700 字直接原文进上下文 → summarizeRef 下线（省 44% token）
 //   - 移除：search_knowledge / get_media_info / get_knowledge_list / kb_docs
-//   - 保留：语义拆解(v8) + 套路启动(v7) + 状态配额(v7)
+//   - 保留：语义拆解(v8) + 状态配额(v7)
+//   - [2026-08-11] 套路机制整体移除（v7→v151 全链路清除）：仅保留弹药(话术)检索
 //   - [2026-08-06] 知识库瘦身为恋爱话术 739 块（教学/实战删库）：
 //     整句压缩(v12) 移除（话术库无问题语域，LLM 整句短语命中 0-37 块 vs bigram 270-596），
 //     语义词表按话术库命中校准（20 个教学理论词零命中已移除）
@@ -67,11 +68,11 @@
 //   - 战略驱动唯一来源 = 攻略 guide（自动生成，见 extractGuide；聊满 GUIDE_MIN_ROUNDS 且非"保持当前关系"）
 //   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 追求→暧昧→恋爱
 //     最多升一级；冷淡/回避可降级；拿不准保持
-//   - 战略层(攻略) > 战术层(套路) > 弹药层(锚点/幽默/IOI) 三层叠加
+//   - 战略层(攻略) > 弹药层(锚点/幽默/IOI) 两层叠加（战术层套路已于 2026-08-11 移除）
 //
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
-//   - 三层架构：战略层(记忆卡 stage 定基调) > 战术层(strategy 套路定方向)
-//     > 引擎层(pulse/balance/emotion_tone 实时输入)
+//   - 架构：战略层(记忆卡 stage 定基调) + 引擎层(pulse/balance/emotion_tone 实时输入)
+//     （战术层 strategy 套路已于 2026-08-11 移除）
 //   - STAGE_VOCAB：91 词表按 M3 四阶段(meet/attract/comfort/seduction)打标分组，
 //     语义拆解按"当前目标"加权：目标词 > 语义词 > bigram > 原句
 //   - memory_card 新增 pulse(节奏)/balance(话题主权)/emotion_tone(情绪基线)：
@@ -79,8 +80,7 @@
 //   - buildSystemContent 新增【节奏】(礼貌阈值+延后计数) 与
 //     【线上语境与轻度否定】(Neg 轻度化：只调侃行为措辞、禁人身攻击、
 //     推拉结构=先回应再调侃再留钩子) 两个硬约束块
-//   - extractStrategy 线上化：步骤须纯文字可发送、标注发送时机、
-//     过滤肢体/眼神/现场类、禁人身攻击
+//   - [2026-08-11] extractStrategy 线上化已随套路机制整体移除
 //
 // [v10 思考模式]（DeepSeek V4，2026-08）
 //   - 模型升级 deepseek-chat → deepseek-v4-flash（旧名 2026-07-24 已弃用）
@@ -91,7 +91,7 @@
 //     temperature/惩罚系数，官方强制不生效；max_tokens 自动提到 2000+ 防思维链挤占）
 //   - 优先级：仅 app_config.llm_params.thinking_mode（后台默认档）；请求体 thinking_mode
 //     一律忽略 —— 防止用户构造请求刷最高档 max 造成成本失控
-//   - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取/套路提炼）保持显式
+//   - 内部辅助调用（rewriteQuery/语义拆解/定向摘要/画像提取）保持显式
 //     disabled：检索辅助任务开思考只会变慢变贵
 //   - _debug 新增 thinking_mode 便于验证
 //
@@ -201,8 +201,7 @@ const TOPIC_VOCAB: string[] = [
 ];
 
 // [v11 迷男OS] M3 战术阶段 → 词表子集映射（词表按话术库命中校准）
-//   语义拆解与套路启动检索按"当前目标"加权：
-//   有套路 → strategy.goal 推断；无套路 → profile.stage 推断；都没有 → 全词表
+//   语义拆解按"当前关系阶段"加权：profile.stage 推断；无 → 全词表
 const STAGE_VOCAB: Record<string, string[]> = {
   'meet': ['开场白', '搭讪', '惯例', '聊天', '邀约', '约会', '见面', '幽默', '游戏', '互动'],
   'attract': ['推拉', '框架', '冷读', '冷读术', '废物测试', '打压', '欲擒故纵', '调戏',
@@ -226,30 +225,12 @@ function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
       .slice(0, 5);
     if (fromPhase.length >= 2) return fromPhase; // 阶段任务词 ≥2 个才接管（否则回落目标/阶段推断）
   }
-  const goal = memoryCard?.strategy?.goal || '';
   const stage = memoryCard?.profile?.stage || '';
   let phase: keyof typeof STAGE_VOCAB = 'attract';
-  if (/邀约|约会|见面|约出|约/.test(goal)) phase = 'meet';
-  else if (/挽回|安抚|共情|信任|稳定|舒适|聊天|倾听/.test(goal)) phase = 'comfort';
-  else if (/试探|暧昧|升级|推进|表白|升温|试探性/.test(goal)) phase = 'seduction';
-  else if (/吸引|推拉|框架|调情|逗|挑逗|地位/.test(goal)) phase = 'attract';
-  else if (stage === '挽回' || stage === '恋爱') phase = 'comfort';
+  if (stage === '挽回' || stage === '恋爱') phase = 'comfort';
   else if (stage === '暧昧') phase = 'seduction';
   else if (stage === '追求') phase = 'attract';
   return STAGE_VOCAB[phase] || [];
-}
-
-// [v11] 套路启动检索词：按当前目标动态取（话术库命中词校准版）
-function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
-  const goal = memoryCard?.strategy?.goal || '';
-  const stage = memoryCard?.profile?.stage || '';
-  if (/邀约|约会|见面/.test(goal)) return ['邀约', '约会', '见面', '搭讪', '开场白'];
-  if (/暧昧|升级|推进|表白/.test(goal)) return ['暧昧', '升级关系', '进挪', '兴趣指标', '撩'];
-  if (/挽回|安抚|共情|信任/.test(goal)) return ['挽回', '安慰', '哄', '关心', '道歉'];
-  if (stage === '暧昧') return ['推拉', '暧昧', '冷读', '进挪', '撩'];
-  if (stage === '挽回') return ['挽回', '安慰', '哄', '冷冻', '道歉'];
-  if (stage === '恋爱') return ['推拉', '角色扮演', '关心', '互动', '幽默'];
-  return ['惯例', '冷读', '开场白', '搭讪', '互动'];
 }
 
 // [v6 L0] 知识库参考条数与原文截断长度
@@ -257,12 +238,11 @@ function resolveStrategySearchKws(memoryCard: MemoryCard | null): string[] {
 // [2026-08-06 降本] 话术块普遍 650+ 字（p50=651），核心话术在前 400 字（后段为提示/来源/铺垫）：
 //   KB_CONTENT_MAX 500→400 且真正启用截断（此前常量未被使用，3 条 ≈2000 字全量注入）
 // [v79 语义切块] 知识库已重切为 4551 小块（话术 30-100 字/套路整块）
-// [v79.4 简化] 主回复统一纯弹药：套路外/套路内都是 5 块话术弹药。
-//   套路块不再注入主回复——套路启动/执行由独立通道（extract_strategy + 记忆卡 strategy）负责，
-//   主回复里的"碰运气 top1 套路块"要么场景不匹配白占 token、要么与启动通道重复，纯冗余。
+// [v79.4 简化] 主回复统一纯弹药 5 块话术
+// [2026-08-11] 套路机制整体移除：只检索话术(弹药)块，套路块不再检索
 const KB_REF_COUNT = 3;                       // 兜底默认（旧逻辑兼容）
-const KB_AMMO_COUNT = 5;                      // [v79.4] 主回复统一弹药块数（套路外/套路内一致）
-const KB_CONTENT_MAX = 2000;                  // [v79] 完整注入兜底（最长套路 1812 字，实际不触发截断）
+const KB_AMMO_COUNT = 5;                      // 主回复统一弹药块数
+const KB_CONTENT_MAX = 2000;                  // 完整注入兜底（实际不触发截断）
 const HISTORY_ITEM_MAX = 800;   // 单条历史上限
 const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本）
 const RECENT_FULL = 8;          // 近详远略：最近 N 条全文（v70 10→8，回复 ≤30 字衔接够用）
@@ -409,14 +389,9 @@ Deno.serve(async (req) => {
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
 
-    // [v7] 套路打断："/" 开头 = 用户指令（如 /换策略 /停止 /不按套路），清除执行中的套路
     const rawQuery = typeof query === 'string' ? query.trim() : '';
-    const strategyClear = rawQuery.startsWith('/');
-    if (strategyClear && memoryCard?.strategy) {
-      memoryCard.strategy = null;
-    }
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
-    const switchTopic = strategyClear && (rawQuery === '/换话题' || rawQuery.startsWith('/换话题 '));
+    const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
 
     // [v20260810 攻略] 自动制定/重制作战攻略（战略层）：
     //   有目标 && 无攻略 && 对话轮数足够 → 自动生成（一次性 ~900 token，写入记忆卡由 updateMemoryCard 落库）
@@ -489,12 +464,6 @@ Deno.serve(async (req) => {
     let lastTimeConflict: string | null = null;
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
-    // [v79.4] 套路启动通道素材块数（_debug 用；0=未探测）
-    let lastStratMaterialCount: number | null = null;
-    // [v143 套路爽感] 本轮她踩坑（套路激活 && 追问/好奇词命中；顶层声明防作用域事故）
-    let trapCaught = false;
-    // [v143] 套路启动前快照（防"本轮刚启动套路"误判成"她已踩坑"：只有上一轮就激活的套路才算）
-    let strategyAtStart = false;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -507,7 +476,6 @@ Deno.serve(async (req) => {
         const quotaOpts = {
           hsFolder: kbFolders.hs,
           jxFolder: kbFolders.jx,
-          strategyActive: !!memoryCard?.strategy,
         };
 
         // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 检索词（语义路）
@@ -541,16 +509,45 @@ Deno.serve(async (req) => {
         }
         // [B] 3. 检索词序列：语义词(语义路) > bigram/规则词 > 原句垫底
         //   统一走本地 kb_blocks_recall 块级召回（块内词频加权）
-        // [v79 语义切块] 主回复统一纯弹药检索（v79.4）：套路外/套路内都是 5 块话术弹药。
-        //   套路块由独立启动通道（下方 extract_strategy）负责，不再混入主回复参考。
+        // [v79 语义切块] 主回复统一纯弹药检索（v79.4）：5 块话术弹药
+        //   [2026-08-11] 套路机制已移除，不再有独立启动通道，仅话术弹药
+        // [v148 弹药阶段加权] 战术判定提前到检索前（纯规则零 LLM）：
+        //   phase 参与 recallBlocks 排序（同阶段文档加权、异阶段降权），
+        //   保证"嗯"在吸引期拿到冷读/打压类弹药、舒适期拿到联系感/共鸣类弹药
+        tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
+
+        // [v153 行动层 ActiveQuest] 攻略 → 行动任务调度（semanticKws 已就绪）：
+        //   攻略 running 且当前 phase 有待达成里程碑 → 生成/恢复 quest（跨轮布局执行）
+        //   达成判定统一在 updateMemoryCard 回写（本轮她已给目标信息 → 本轮就点亮里程碑+清空 quest，
+        //   主流程不清空——避免"清了 quest 但里程碑没点亮"的断链）
+        //   [2026-08-11] 素材源由套路块改为话术弹药（套路机制已移除）
+        if (memoryCard && llmKey && memoryCard.guide && memoryCard.guide.status === 'running') {
+          try {
+            const qTarget = nextQuestTarget(memoryCard);
+            const existing = memoryCard.quest;
+            if (qTarget && (!existing || existing.target !== qTarget)) {
+              // 目标变化或 quest 缺失 → 布局新 quest（检索话术弹药作灵感源）
+              const questMaterial = await recallBlocks(
+                supabaseUrl, serviceRoleKey,
+                semanticKws, [qTarget],
+                { ...quotaOpts, pickCount: 2, type: '话术' }
+              ).catch(() => []);
+              const quest = await extractQuest(llmKey, llmBase, llmModel, qTarget, memoryCard, history, questMaterial);
+              if (quest) memoryCard.quest = quest;
+            }
+          } catch (e: any) {
+            console.warn('quest 调度失败:', e.message);
+          }
+        }
+
         const searchQueries = [...semanticKws, ...kw, searchQuery];
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术' });
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
         mark('kb1');
         // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术' });
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_AMMO_COUNT);
             if (merged.length > kbItems.length) kbItems = merged;
           }
@@ -566,52 +563,6 @@ Deno.serve(async (req) => {
         mark('kbft');
         hitKnowledge = kbItems.length > 0;
 
-        // [v143 踩坑时序] 套路启动前快照：只有"上一轮已激活"的套路才算踩坑语境
-        //   （本轮刚由 query 触发的套路启动，坑还没埋，她当前的追问不算上钩）
-        strategyAtStart = !!memoryCard?.strategy;
-
-        // [v7] 套路启动（独立惯例检索通道）：当前无套路 + 用户未打断 → 专门检索惯例/魔术/玩法类内容，
-        //   LLM 提炼步骤启动套路；结果仅用于启动，不混入主回复参考（话术加权不影响套路启动素材）
-        //   [v11] 检索词按当前目标动态取（resolveStrategySearchKws）
-        //   [v79] 只取套路块（语义切块类型标记），不再混入话术块
-        //   [v79.4 降本] 素材 5→3：提炼只需 1 个匹配惯例，3 块 top 套路已够，prompt 省 ~400-800 tokens
-        //   [v79.5] 素材 3→2 + 删除 usable≥2 门槛：套路块已按 calcStratScore 精品精排，
-        //     前 2 块即精品；素材≥1 即尝试提炼（STRATEGY_HINT_RE + LLM 判断兜底，无用素材自然返回空）
-        //   [v20260809] ① 检索词 = 语义词(query 相关，×2) + 固定套路词(保底，×1.5)，防止固定词表
-        //     与当前话题脱节（对方发网名也能命中是因为纯固定词，现在语义相关性优先）
-        //   [v20260809] ② 历史不足 2 条（第一句话/刚加上好友）不启动套路：先正常聊，聊开再给套路
-        if (llmKey && !strategyClear && !memoryCard?.strategy) {
-          try {
-            // [v20260809] 历史条数门槛：至少 1 个完整对话回合（对方+己方 ≥2 条）才允许启动套路，
-            //   第一句话（对方刚发网名/寒暄）先正常聊，聊开再给套路
-            const histCount = (Array.isArray(history) ? history : [])
-              .filter((h: any) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string' && String(h.content).trim().length > 0)
-              .length;
-            // [v20260809] 检索词 = query 语义词（×2，相关性主导）+ 固定套路词（×1.5，保底）；
-            //   语义词为空（LLM 拆词失败）时退回固定词表，不阻断套路通道
-            const stratKws = resolveStrategySearchKws(memoryCard);
-            const stratSemantic = semanticKws.length > 0 ? semanticKws : stratKws;
-            const convItems = histCount < 2
-              ? [] // 历史不足：跳过套路启动，先正常聊
-              : await recallBlocks(
-                  supabaseUrl, serviceRoleKey,
-                  stratSemantic, stratKws,
-                  { ...quotaOpts, pickCount: 2, type: '套路' }
-                );
-            lastStratMaterialCount = (Array.isArray(convItems) ? convItems : []).length;
-            if ((Array.isArray(convItems) ? convItems : []).length > 0) {
-              // [v18] 传入 memoryCard → extractStrategy 在 prompt 里注入里程碑可选融合段
-              const st = await extractStrategy(llmKey, llmBase, llmModel, convItems, query);
-              if (st) {
-                memoryCard = { ...(memoryCard || {}), strategy: st };
-                quotaOpts.strategyActive = true; // 本轮起按执行期配额
-              }
-            }
-          } catch (e: any) {
-            console.warn('strategy bootstrap failed:', e.message);
-          }
-        }
-        mark('strategy');
       } catch (e: any) {
         console.error('知识库检索失败:', e.message);
       }
@@ -640,8 +591,7 @@ Deno.serve(async (req) => {
         lastRiskHit = kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
         lastSanitizeHit = false;
         if (!reply) {
-        // [v73 迷男精髓] 本轮战术判定（纯规则零 LLM）：防守/进攻/救场 + 吸引/舒适/诱惑阶段
-        tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
+        // [v148] 战术判定已提前到检索前（549 行，phase 供弹药加权），此处直接复用
         // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
         const built = buildSystemContent({
           systemPrompt: effectivePrompt,
@@ -744,16 +694,14 @@ Deno.serve(async (req) => {
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
           // [v127] 掉线信号不入库：避免"掉线了"污染 recent_self_messages 防重复窗口
           currentReply: (reply && reply !== '掉线了') ? reply : null,
+          // [v153 quest] 本轮对方原话（达成判定用：她本轮刚给照片/年龄 → 本轮就点亮，不滞后一轮）
+          currentQuery: query,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
       }
     }
     mark('memory');
-
-    // [v143 套路爽感] 她踩坑检测（上一轮已激活的套路 && 当前对方的话命中追问/好奇词 = 上钩信号）
-    //   strategyAtStart 保证"本轮刚启动"不误判；switchTopic 时 query 是"/换话题"，天然不命中
-    trapCaught = strategyAtStart && TRAP_CAUGHT_RE.test(String(query || ''));
 
     // [v129 消毒观测] 每轮记录高危词预检 + 消毒检测结果，跑几天用 grep "[sanitize]" 统计消毒率
     console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
@@ -770,6 +718,8 @@ Deno.serve(async (req) => {
       } : null,
       // [v20260810 攻略] 攻略状态透传（前端攻略面板渲染；null=无攻略）
       guide: memoryCard?.guide || null,
+      // [v153 行动层] 当前行动任务透传（前端攻略面板显示"军师正在布局什么"；null=无行动）
+      quest: memoryCard?.quest || null,
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
         offline: reply === '掉线了',
@@ -781,10 +731,6 @@ Deno.serve(async (req) => {
         // [v129] 消毒观测（替换已删除的选句通道字段）：本轮参考弹药是否含敏感词 + 生成后是否检出消毒
         risk_hit: lastRiskHit,
         sanitize_hit: lastSanitizeHit,
-        // [v79.4] 主回复已统一纯弹药（套路块不再注入），该字段恒为 0，保留兼容
-        kb_strat_blocks: kbItems.filter((it: any) => isStratBlock(it)).length,
-        // [v79.4] 套路启动通道素材（本轮启动探测取了几块套路，0=未探测）
-        kb_strat_material: typeof lastStratMaterialCount === 'number' ? lastStratMaterialCount : null,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         // [2026-08-06] 整句路已移除，仅剩语义路命中统计
@@ -805,7 +751,7 @@ Deno.serve(async (req) => {
         // [v57] 长期记忆统计：facts 总量 + 本轮命中注入数（验证选择性回忆）
         facts_len: Array.isArray(memoryCard?.facts) ? memoryCard.facts.length : 0,
         facts_injected: factsInjected,
-        // [v13] 阶段耗时（ms）：start/ready/semantic/sentence/kb1/kbft/strategy/llm_reply/memory
+        // [v13] 阶段耗时（ms）：start/ready/semantic/sentence/kb1/kbft/llm_reply/memory
         perf: (() => {
           const o: Record<string, number> = {};
           for (let i = 1; i < perfMark.length; i++) o[perfMark[i][0]] = perfMark[i][1] - perfMark[i - 1][1];
@@ -846,8 +792,6 @@ Deno.serve(async (req) => {
         balance_direction: memoryCard?.balance?.direction || null,
         emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
-        strategy_name: memoryCard?.strategy?.name || null,
-        strategy_rounds: memoryCard?.strategy?.rounds_used ?? null,
         // [v20260810 攻略] 攻略状态（验证攻略注入/推进）：status + 当前阶段 + 已耗轮次
         guide_status: memoryCard?.guide?.status || null,
         guide_phase: (() => {
@@ -863,11 +807,10 @@ Deno.serve(async (req) => {
           return ph ? `${ph.rounds_in_phase || 0}/${ph.stay_max_rounds || 8}` : null;
         })(),
         guide_eval: memoryCard?.guide?.last_eval || null,
-        // [v143 套路爽感] 她踩坑信号（验证"上钩"提示；true=套路激活且她追问/好奇）
-        trap_caught: trapCaught,
-        // [v20260805] 套路总轮数上限（前端策略徽标显示进度 x/y 用；零成本，随 _debug 返回）
-        strategy_max_rounds: memoryCard?.strategy?.max_rounds ?? null,
-        strategy_clear: strategyClear,
+        // [v153 quest] 行动任务状态（验证布局/推进/达成）
+        quest_target: memoryCard?.quest?.target || null,
+        quest_step: memoryCard?.quest ? `${(memoryCard.quest.current_step || 0) + 1}/${memoryCard.quest.plan.length} hook=${memoryCard.quest.hook_laid ? 1 : 0} close=${memoryCard.quest.waiting_close ? 1 : 0}` : null,
+        quest_rounds: memoryCard?.quest?.rounds_used ?? null,
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
         // [vB] LLM token 用量（token 测量用）
@@ -1068,18 +1011,25 @@ async function extractSemanticKeywords(
 // [v6] 记忆卡类型与读写
 //   chat_sessions.memory_card 存 JSON 字符串：
 //   { profile:{stage,personality,relationship_note,recent_events},
-//     recent_user_messages:[...], strategy:{...}, updated_at }
+//     recent_user_messages:[...], updated_at }
+//   [2026-08-11] strategy 套路字段已随套路机制移除
 // ============================================================
-// [v7] strategy：执行中的聊天惯例（跨轮次"方向盘"）
-//   从检索到的惯例/魔术/玩法类资料提炼步骤序列，逐轮注入执行
-// [v17] essence：核心原理/节奏/分寸（提炼时 LLM 总结，注入 system 供临场发挥，防"只剩骨架"）
-type StrategyState = {
-  name: string;         // 惯例名称
-  goal: string;         // 套路目标
-  essence?: string;     // [v17] 核心原理（≤60字）：节奏/分寸/判断口诀，执行时按此临场发挥
-  steps: string[];      // 步骤序列（2-6 步，每步 = 话术思路 + 直接可发的例句 + 时机提示）
-  rounds_used: number;  // 已使用轮次（每次回复后 +1）
-  max_rounds: number;   // 轮次上限（自动终止，防止无限跑）
+
+// [v153 行动层] ActiveQuest：把攻略里的里程碑目标转成"跨轮执行的多步布局"
+//   战略层（攻略定义"要什么"）→ 行动层（quest 定义"怎么一步步拿到"）→ 执行（状态机逐步兑现）
+//   [2026-08-11] 素材源由知识库套路改为话术弹药（套路机制已移除）
+type ActiveQuest = {
+  target: string;             // 目标里程碑，如 '照片'（MILESTONE_CHAIN 之一）
+  goal_note: string;          // 目标说明（≤40字）：为什么拿/怎么用，供 LLM 把握动机
+  plan: string[];             // LLM 布局的 2-4 步（每步 = 话术思路 + 可直接发的例句 + 时机），如
+                              //   ["埋钩：笑她说话像小学生，为打赌铺垫（'你说话跟小学生似的，想证明一下'）",
+                              //    "升级：打赌（'赌一把，猜错的人做10个深蹲，敢不敢'）",
+                              //    "收网：要照片评判（'发张照片来，我亲眼评判输赢，输了别耍赖'）"]
+  current_step: number;       // 当前执行到第几步（0-based）
+  hook_laid: boolean;         // 上一步钩子已发出，等她接
+  waiting_close: boolean;     // 待收网：最后一步已发出，只等收尾
+  rounds_used: number;        // 已用轮次（每次回复后 +1）
+  max_rounds: number;         // 轮次上限（超限放弃，防死磕）
   started_at: string;
 };
 
@@ -1090,7 +1040,7 @@ type PulseState = {
 };
 
 // [v20260810 攻略] 作战攻略（战略层）：把"皮球式被动应答"升级为"带剧本的主动推进"
-//   三层结构：攻略(总目标) → 阶段(任务/信号/安全阀/预案) → 战术(复用 strategy + 知识库套路)
+//   三层结构：攻略(总目标) → 阶段(任务/信号/安全阀/预案) → 战术(弹药)
 //   信号驱动推进：无时间表/无 deadline——阶段全部成功信号达成才进下一阶段；
 //   stay_max_rounds 仅作安全阀（不达标超限 → 执行 exit_plan 切换打法，绝不作为推进条件）；
 //   里程碑（MILESTONE_CHAIN）已融入各阶段 signals（如"喜好已收集"），不再单独注入
@@ -1144,7 +1094,8 @@ type MemoryCard = {
   pulse?: PulseState;
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
-  strategy?: StrategyState | null;
+  // [v153 行动层] 当前执行的行动任务（攻略里程碑 → 跨轮布局）
+  quest?: ActiveQuest | null;
   // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
   guide?: GuideState | null;
   updated_at?: string;
@@ -1236,6 +1187,30 @@ function detectOpenWindow(query: string): string | null {
   return null;
 }
 
+// [v147 机会窗口扩展] 她主动"袒露自我"（分享日常/自述特质/分享经历/表达喜好/关心你/分享心情）
+//   = 舒适期窗口：她信任你、想拉近距离，主动递了"了解我"的钥匙
+//   与里程碑窗口（她问你）互补：她问你 → 镜像反问等价交换；她自述 → 先接住再升级
+//   命中 → buildSystemContent 注入【接住分享】块：①先接情绪（认可/共鸣）②再深挖一句 ③可轻升级，禁止交易式接话
+//   数组顺序 = 匹配优先级（自述特质 > 日常习惯 > 分享经历 > 表达喜好 > 关心对方 > 分享心情）
+const SELF_DISCLOSURE_PATTERNS: Array<[string, RegExp]> = [
+  ['自述特质', /我(比较|挺|很|有点|其实|就是|这个人|属于|性格|自认|觉得|特别|真.{0,2}|更|也).{0,14}(专一|内向|外向|慢热|宅|懒|随性|固执|认真|简单|直接|念旧|爱笑|爱哭|怕|喜欢|讨厌|接受不了|受不了|不习惯|不愿意)/],
+  ['日常习惯', /(?:我)?(每天|经常|习惯|平时|一般|总是|每周|最近|睡前|早起).{1,16}(喝|吃|睡|看|玩|做|去|爱|买|听|逛|聊|追|刷|运动|跑步|健身|做饭)/],
+  ['分享经历', /我(最近|上周|昨天|前天|以前|小时候|之前|上个月|那天|今天).{1,18}(去了|遇到|干了|做|发现|买了|看了|吃了|玩了|见了|试了|学了|参加|错过|丢|摔|哭|笑)/],
+  ['表达喜好', /我最喜欢|我最爱|我超爱|我好喜欢|我特别喜欢|我的最爱|我只爱|我就爱|超喜欢|特别喜欢|最爱(吃|喝|看|听|玩|逛)/],
+  ['关心对方', /你(要|记得|别|一定|最近|今天|明天|该|多|早点|少).{0,12}(注意|照顾好|早点休息|休息|吃饭|忙|累|睡|热|冷|熬夜|饿|感冒|吃药)/],
+  ['分享心情', /我(今天|最近|现在|这两天|有点|好|挺|特别|真的|莫名).{1,12}(开心|烦|累|难过|兴奋|纠结|焦虑|无聊|郁闷|委屈|生气|emo|破防|上头|心累)/],
+];
+
+// [v147] 检测"她主动袒露自我"：命中返回类型名（如'自述特质'），否则 null
+function detectSelfDisclosure(query: string): string | null {
+  const q = String(query || '').trim();
+  if (!q) return null;
+  for (const [name, re] of SELF_DISCLOSURE_PATTERNS) {
+    if (re.test(q)) return name;
+  }
+  return null;
+}
+
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
   try {
     if (!sessionId) return null;
@@ -1248,7 +1223,12 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
     const raw = rows?.[0]?.memory_card;
     if (!raw) return null;
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    if (parsed && typeof parsed === 'object') {
+      // [2026-08-11] 存量清洗：旧套路字段 strategy 已废弃，读入即剥离，写回时自然消失
+      delete parsed.strategy;
+      return parsed;
+    }
+    return null;
   } catch (e: any) {
     console.warn('readMemoryCard failed:', e.message);
     return null;
@@ -1281,6 +1261,8 @@ async function updateMemoryCard(ctx: {
   //   导致它在"重生请求"和下一轮防重复判定时不在 recent_self_messages 防重复窗口内
   //   → 重生时仍可能生成同一句。生成后立即写入。
   currentReply?: string | null;
+  // [v153 quest] 本轮对方原话（达成判定用：她本轮刚给照片/年龄 → 本轮就点亮，不滞后一轮）
+  currentQuery?: string;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
 
@@ -1414,11 +1396,51 @@ async function updateMemoryCard(ctx: {
     updateGuideProgress(card, ctx.history);
   }
 
-  // [v7] 套路轮次回写：每轮 +1，达到上限自动终止（用户在 "/" 打断时 strategy 已被置空）
-  if (card.strategy) {
-    card.strategy.rounds_used = (card.strategy.rounds_used || 0) + 1;
-    if (card.strategy.rounds_used >= (card.strategy.max_rounds || 6)) {
-      card.strategy = null; // 轮次上限：套路自然结束，恢复正常聊天
+  // [v153 行动层 ActiveQuest] 回写推进（读-写闭环）：
+  //   推进规则：
+  //   - 她已达成目标（本轮或上轮给了照片/年龄等）→ 里程碑点亮 + quest 清空 + 攻略推进
+  //   - 收网态（waiting_close）：上轮最后一步已发出，本轮她已回应 → 任务完成清空
+  //   - 坑已埋（hook_laid）：她接招（questEngageHit 命中）→ 放行下一步（current_step++），
+  //     到末步 → 进入收网；没接 → 忍住不推进
+  //   - 刚启动（!hook_laid）：本轮执行了当前步（埋钩）→ hook_laid=true；当前步是末步 → 进入收网
+  //   - 轮次上限兜底：非收网态且超限 → 放弃清空（不点亮里程碑，改日再布局）
+  if (card.quest) {
+    const q = card.quest;
+    const lastUser = [...(Array.isArray(ctx.history) ? ctx.history : [])]
+      .reverse().find((h) => h && h.role === 'user' && typeof h.content === 'string');
+    const lastUserText = String((lastUser as any)?.content || '');
+    // [v153] 达成判定优先看本轮 query（她本轮刚给目标信息 → 本轮就点亮，不滞后一轮）
+    const qAchieved = questAchieved(q.target, ctx.currentQuery || lastUserText);
+    if (qAchieved) {
+      // 达成：点亮里程碑 + 清空 quest + 推进攻略（该 phase 全信号达成则自动推进）
+      const ms = Array.isArray(card.milestones) ? card.milestones.slice() : [];
+      if (!ms.includes(q.target)) ms.push(q.target);
+      card.milestones = ms;
+      card.quest = null;
+      if (card.guide && card.guide.status === 'running') {
+        const gph = card.guide.phases[card.guide.current_phase];
+        if (gph && Array.isArray(gph.signals) && gph.signals.length > 0
+          && gph.signals.every((sig) => isMilestoneSignal(sig) && milestoneIn(sig, new Set(ms)))) {
+          advanceGuide(card, `里程碑「${q.target}」已达成，本阶段全部信号完成`);
+        }
+      }
+    } else if (q.waiting_close) {
+      // 收网轮：上轮最后一步已发出，本轮她已回应 → 任务完成，恢复正常聊天
+      card.quest = null;
+    } else if (q.hook_laid) {
+      if (questEngageHit(lastUserText)) {
+        q.current_step = (q.current_step || 0) + 1; // 放行下一步
+        if (q.current_step >= q.plan.length - 1) q.waiting_close = true; // 下一步是末步 → 发完收网
+      }
+      // 没接招 → 忍住，current_step 不动
+    } else {
+      // 刚启动：本轮执行了当前步（埋钩）→ 钩已埋
+      q.hook_laid = true;
+      if ((q.current_step || 0) >= q.plan.length - 1) q.waiting_close = true;
+    }
+    q.rounds_used = (q.rounds_used || 0) + 1;
+    if (card.quest && !q.waiting_close && q.rounds_used >= (q.max_rounds || QUEST_MAX_ROUNDS)) {
+      card.quest = null; // 轮次上限：放弃本次布局，改日再战（不点亮里程碑）
     }
   }
 
@@ -1685,68 +1707,114 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 }
 
 // ============================================================
-// [v7] 套路提炼：从检索到的惯例/魔术/玩法类资料中解析可执行步骤
-//   特征预检（含惯例/魔术/玩法/步骤等词）→ LLM 输出 JSON {name,goal,steps}
-//   steps < 2 或未命中特征 → 返回 null（不启动套路）
-// [v17] 灵魂保留：新增 essence（核心原理/节奏/分寸）+ 每步强制带原文例句 + maxTokens 800
-//   目标：从"操作手册翻译"升级为"精髓提炼"，防 4:1 压缩把节奏/分寸/例句全丢光
+// [v153 行动层 ActiveQuest] 攻略里程碑 → 跨轮布局执行
+//   攻略定义"要什么"（phase signals 里的里程碑型信号），quest 定义"怎么一步步拿到"
+//   核心：LLM 为当前目标现场布局 2-4 步（埋钩→升级→收网），状态机跨轮执行，
+//   达成判定（纯规则）点亮里程碑 → advanceGuide 推进攻略。
 // ============================================================
-const STRATEGY_HINT_RE = /惯例|魔术|玩法|套路|步骤|操作|流程|布局|开场|进阶|收尾|推拉|框架|冷读/;
-const STRATEGY_MAX_STEPS = 6;
+const QUEST_MAX_STEPS = 4;
+const QUEST_MAX_ROUNDS = 6;   // 单目标布局轮次上限（防死磕；超出放弃，改日再战）
 
-// [v143 套路爽感] 她踩坑信号（套路激活时检测）：她追问/好奇/接梗 = 上钩
-//   收紧为正例：明确追问/好奇词，不含"哈哈/嗯"等高频词（防每轮误报刷屏）
-const TRAP_CAUGHT_RE = /为什么|然后呢|后来呢|真的假的|怎么说|说来听听|说说看|继续说|接着呢|快说|想听|好奇|展开说说|细说|你倒是说|然后\?|然后呐/;
+// 里程碑达成判定正则（她给出该信息即达成；纯规则零成本，命中即收网点亮）
+const QUEST_ACHIEVED_RE: Record<string, RegExp> = {
+  '照片': /(发|给|传|有).{0,6}(照片|自拍|图|相册|朋友圈)|你看(看)?(我|这张)|我照片|我的照片|这是我|发个(自拍|照片)|加个(微信|好友)/,
+  '年龄': /我(今年|现在)?\s?[0-9一二三四五六七八九十]{1,2}\s?岁|我今年[0-9一二三四五六七八九十]{1,2}|属[鼠牛虎兔龙蛇马羊猴鸡狗猪]|我(是|是)[0-9]{2}年|生日是|[0-9]{2}岁/,
+  '喜好': /我(最)?(喜欢|爱|常|平时).{0,8}(吃|喝|看|听|玩|逛|追|刷|做|去)|最爱(吃|喝|看|听|玩)|我喜欢.{0,10}(店|歌|电影|书|地方|东西)/,
+  '住哪': /我(住|家在|在|是).{0,8}(区|这边|附近|那边|外地|本地|上海|北京|广州|深圳|杭州|成都)|我住[^。，]{1,12}|住在[^。，]{1,12}|上班(在|去|到)/,
+  '家庭': /我(家|爸妈|爸|妈|哥|姐|弟|妹|家里).{0,12}|独生|我家里人|家里有/,
+  '恋爱经历': /我(前任|前男友|前女友|谈过|处过|交往过|ex|对象|恋爱|单身).{0,12}|上一段|没谈过|谈过(几个|两|三)/,
+  '敏感面': /我(最近|现在|有点|挺|其实|就是).{0,10}(烦|压力|焦虑|难过|委屈|累|怕|担心|慌|失眠|emo)|最近(状态|心情)不好/,
+  '约会': /(见面|出来|约|见一见|聚一聚|什么时候).{0,10}|改天(见|约)|几点见|明天.{0,4}(见|约)|去.{0,6}(店|馆|场|公园|街)/,
+};
 
-async function extractStrategy(
+// 她"接招/上钩"信号（quest 跨轮推进判定）：追问/反驳/接梗/打赌 = 愿意继续玩
+const QUEST_ENGAGE_RE = /怎么说|然后呢|真的假的|那么夸张|试试|来啊|来吧|赌|敢不敢|怕你|你试试|哈哈哈?|有意思|说来听听|说说看|凭什么|你确定|来就来|谁怕谁|行啊|可以啊|好呀|来吧|接着/;
+
+// [v153] 她是否接招（quest 推进判定）：命中 = 愿意继续玩，可放行下一步
+function questEngageHit(lastUserText: string): boolean {
+  const t = String(lastUserText || '').trim();
+  if (!t) return false;
+  return QUEST_ENGAGE_RE.test(t);
+}
+
+// [v153] 从攻略当前 phase 提取"下一个待达成里程碑"（里程碑型信号 且 未完成）
+//   返回 null = 无待达成里程碑（攻略自由模式：战术卡主导）
+function nextQuestTarget(card: MemoryCard): string | null {
+  const g = card.guide;
+  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+  const ph = g.phases[g.current_phase];
+  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
+  const msDone = new Set(Array.isArray(card.milestones) ? card.milestones : []);
+  for (const sig of ph.signals) {
+    for (const m of MILESTONE_CHAIN) {
+      if (sig.includes(m) && !msDone.has(m)) return m; // 取该 phase 第一个未完成里程碑
+    }
+  }
+  return null;
+}
+
+// [v153] quest 达成判定：她当前这句话是否给出了目标信息（纯规则）
+function questAchieved(target: string, lastUserText: string): boolean {
+  const re = QUEST_ACHIEVED_RE[target];
+  if (!re || !lastUserText) return false;
+  return re.test(String(lastUserText));
+}
+
+// [v153] quest 布局器：LLM 为目标现场编"埋钩→升级→收网"多步计划
+//   输入：目标里程碑 + 画像 + 最近对话 + 知识库话术弹药（可选，作灵感源）
+//   输出：ActiveQuest（plan 2-4 步，每步带话术思路 + 例句 + 时机）
+async function extractQuest(
   llmKey: string, llmBase: string, llmModel: string,
-  kbItems: any[], query: string
-): Promise<StrategyState | null> {
-  const texts = (Array.isArray(kbItems) ? kbItems : [])
-    .map((i) => `${i.title || ''}\n${i.content || ''}`)
+  target: string, card: MemoryCard, history: any[], kbMaterial: any[]
+): Promise<ActiveQuest | null> {
+  const tip = MILESTONE_TIPS[target] || '';
+  const p = card.profile || {};
+  const recent = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .slice(-6)
+    .map((h) => `对方：${truncateText(String(h.content || ''), 80)}`)
     .join('\n');
-  if (!texts || !STRATEGY_HINT_RE.test(texts)) return null;
-
-  const prompt = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己用交友APP（纯文字聊天）回复对方，当前对方的话：「${truncateText(query, 60)}」。\n`
-    + `以下是检索到的资料：\n${truncateText(texts, 2400)}\n`
-    + `要求：如果资料中存在"分步骤、可执行"的聊天惯例/魔术/玩法（例如推拉、冷读、惯例开场、邀约流程等），提炼成步骤序列。\n`
-    + `输出 JSON：{"name":"惯例名称(≤10字)","goal":"目标(≤30字)","essence":"核心原理(≤60字)","steps":["第1步...","第2步..."]}，steps 2-6 步。\n`
-    + `提炼要求（必须遵守）：\n`
-    + `- essence：用一句话总结这个惯例的"灵魂"——核心机制/节奏/分寸/判断口诀（例如"先给预期再打破，转要突然但不出格""先共情再转，急不得"）。这是执行时最重要的部分，要具体、有画面感，不要写成官方总结。\n`
-    + `- 每一步必须包含至少一个"可直接发送给对方"的具体例句，用引号标注原样话术；尽量直接引用资料原文例句、保留原文的韵味和语气，禁止改写成官方腔/翻译腔/书面语。\n`
-    + `- 每步格式：一句话话术思路 + 例句（引号内原样话术）+ 时机提示写在该步末尾括号内（如"对方回复后隔20-40分钟再发""对方主动追问时用"）。每步可写到50-80字，不必追求简短。\n`
-    + `- 涉及肢体接触、眼神、当面魔术、现场气氛等线下动作的步骤，一律改写为文字版或删除；\n`
-    + `- 允许轻度调侃/轻度否定（Neg），但禁止人身攻击、外貌否定、价值贬低。\n`
-    + `- [v20260809 场景契合] 提炼前先判断：该惯例必须与"当前对方的话"和对话场景契合（她刚发网名/寒暄/闲聊时，推拉/冷读/打压类惯例就明显不适用，应返回空）。只提炼当下真正用得上的，宁缺毋滥。\n`
-    + `\n如果资料中没有可执行的惯例，只输出 {"name":"","steps":[]}。只输出 JSON，不要任何其他文字。`;
+  const kbText = (Array.isArray(kbMaterial) ? kbMaterial : [])
+    .map((i) => `${i.block_title || i.title || ''}\n${String(i.content || '').slice(0, 200)}`)
+    .join('\n');
+  const prompt = `你是恋爱聊天"布局策划"助手。用户正在替自己用交友APP（纯文字聊天）追求对方，目标明确：在接下来几轮对话里，通过自然布局拿到「${target}」。（"${target}"的含义与常规话术方向：${tip}）\n`
+    + `当前情况：\n`
+    + `- 关系阶段：${p.stage || '陌生'}；对方性格：${p.personality || '未知'}\n`
+    + `- 最近对方说的话：\n${recent || '（无）'}\n`
+    + (kbText ? `- 知识库参考素材（可借鉴其思路/语气，不必照搬）：\n${truncateText(kbText, 1200)}\n` : '')
+    + `要求（这是关键，必须做到）：\n`
+    + `1. 设计 ${'2~4'.replace('~', '~')} 步的布局，每步一个"可执行动作"，形成"埋钩→升级→收网"的递进：先制造一个理由/钩子（比如调侃、打赌、玩笑、评判），再升级张力（比如赌注、条件、悬念），最后一步自然把「${target}」收进来。\n`
+    + `2. 禁止第一步就直球要「${target}」——必须铺垫，让"要${target}"成为布局的自然结果（如：先笑她说话像小学生→再打赌猜错做深蹲→最后"发张照片我评判输赢"）。\n`
+    + `3. 每一步必须包含一句"可直接发送给对方"的例句（引号标注原样话术），口吻像真人、贴合当前对话语境，禁止官方腔/翻译腔；允许轻度调侃，禁止人身攻击/贬低外貌。\n`
+    + `4. 每步格式：一句话动作思路 + 例句（引号内原样话术）+ 时机提示写在末尾括号内（如"她追问时用""她接茬后隔轮用"）。每步 40-70 字。\n`
+    + `5. 如果当前语境明显不适合布局（她正在表达强烈负面情绪/正在谈正事/关系过冷），输出 {"plan":[]} 放弃本轮布局。\n`
+    + `只输出 JSON：{"plan":["第1步...","第2步..."]}，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 800, _stage: 'extract_strategy',
+      temperature: 0.4, maxTokens: 600, _stage: 'extract_quest',
     });
     const start = content.indexOf('{');
     const end = content.lastIndexOf('}');
     if (start === -1 || end === -1) return null;
-    const p = JSON.parse(content.slice(start, end + 1));
-    const steps = (Array.isArray(p.steps) ? p.steps : [])
+    const pj = JSON.parse(content.slice(start, end + 1));
+    const plan = (Array.isArray(pj.plan) ? pj.plan : [])
       .map((s: any) => (typeof s === 'string' ? s.trim() : ''))
       .filter((s: string) => s.length > 0)
-      .slice(0, STRATEGY_MAX_STEPS);
-    const name = typeof p.name === 'string' ? p.name.slice(0, 10) : '';
-    const goal = typeof p.goal === 'string' ? p.goal.slice(0, 30) : '';
-    const essence = typeof p.essence === 'string' ? p.essence.slice(0, 60) : '';
-    if (!name || steps.length < 2) return null;
+      .slice(0, QUEST_MAX_STEPS);
+    if (plan.length < 2) return null; // 布局至少 2 步才有跨轮意义
     return {
-      name, goal, steps,
-      // [v17] essence 可空：兼容旧提炼结果（无 essence 时注入跳过该行即可）
-      ...(essence ? { essence } : {}),
+      target,
+      goal_note: tip.slice(0, 40),
+      plan,
+      current_step: 0,
+      hook_laid: false,
+      waiting_close: false,
       rounds_used: 0,
-      // [v16] 轮数收紧：一个惯例通常一答一问两三步就完成，不再挂 6 轮下限
-      //   （原 Math.max(steps.length*2,6) 导致套路对象迟迟不清空、压制其他话题）
-      max_rounds: Math.max(steps.length + 1, 3),
+      max_rounds: Math.max(plan.length + 1, QUEST_MAX_ROUNDS),
       started_at: new Date().toISOString(),
     };
   } catch (e: any) {
-    console.warn('extractStrategy failed:', e.message);
+    console.warn('extractQuest failed:', e.message);
     return null;
   }
 }
@@ -1891,9 +1959,9 @@ const TACTIC_CARDS: Record<TacticCategory, TacticCard[]> = {
 
 // 阶段卡（场景19-21：按对方发言回合数判定）
 const TACTIC_PHASE_CARDS: Record<'attract' | 'comfort' | 'seduce', string> = {
-  attract: '前3回合（吸引期）：只做DHV（展示价值）和筛选，不暴露任何兴趣；禁用一切提问，禁用未来邀约；多用"我"少用"你"，陈述句为主、冷读为主。范例："看你头像，我有90%把握你是个表面安静、内心极其有主见的人。"',
-  comfort: '4-8回合（舒适期）：建立信任和情感纽带，制造"我们是一类人"的感觉；她分享经历后立刻连接你的相似故事；多用"咱们"、"看来我们都……"。范例："你也有过那种时候？我也是！我记得有一次……"',
-  seduce: '9回合后（诱惑期）：制造见面理由、测试服从性；开始植入模糊邀约、种心锚；遇ASD立刻退回舒适期，绝不纠缠。范例："下次有机会带你见识一下什么叫真正的……"',
+  attract: '吸引期（本轮判定：关系刚起步/对方投入少或降温）：只做DHV（展示价值）和筛选，不暴露任何兴趣；禁用一切提问，禁用未来邀约；多用"我"少用"你"，陈述句为主、冷读为主。范例："看你头像，我有90%把握你是个表面安静、内心极其有主见的人。"',
+  comfort: '舒适期（本轮判定：已有熟悉感/她愿意分享，或关系到暧昧/恋爱）：建立信任和情感纽带，制造"我们是一类人"的感觉；她分享经历后立刻连接你的相似故事；多用"咱们"、"看来我们都……"。范例："你也有过那种时候？我也是！我记得有一次……"',
+  seduce: '诱惑期（本轮判定：暧昧/恋爱且已约好见面或聊得够热）：制造见面理由、测试服从性；开始植入模糊邀约、种心锚；遇ASD立刻退回舒适期，绝不纠缠。范例："下次有机会带你见识一下什么叫真正的……"',
 };
 
 // 防守类触发词（v73 强/弱分级防误伤）：
@@ -1906,17 +1974,72 @@ const SELF_NEED_RE = /(想你|喜欢你|很想你|舍不得|爱你|好想|离不
 const INVITE_REJECT_RE = /(不去|算了|没空|改天|再说吧|别约|不想见|拒绝|呵呵不了)/;
 
 // [v73] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
+// [v147 阶段判定修复] phase 不再只看回合数：
+//   ① 回合数 = 基础下限（防刚认识就误进舒适/诱惑）
+//   ② 情感温度 = 最近 8 条对方消息的投入度（长消息/语气词/自述分享/主动提问加分，短敷衍减分）
+//   ③ 关系阶段 = 上限闸门：陌生/朋友/追求 永不 seduce；暧昧/恋爱 才允许诱惑期
+//   修复案例：追求期聊 10+ 轮（纯回合数误判 seduce）→ 全程注入诱惑期进攻卡（制造见面理由/测试服从性），
+//   把"她分享日常/自述特质/婉拒试探"全按字面交易式接话 → 改成追求期 8 轮后仍走 comfort，先接情绪再接事
+function resolveTacticPhase(stage: string, userTurns: number, history: any[], milestones: string[]): 'attract' | 'comfort' | 'seduce' {
+  const recent = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .slice(-8);
+  let warmth = 0;
+  for (const h of recent) {
+    const t = String(h.content || '').trim();
+    const len = [...t].length;
+    if (len >= 12) warmth += 1;            // 愿意说长句 = 投入
+    else if (len <= 4) warmth -= 1;        // 短敷衍 = 降温
+    if (/[哈哈啊呢呀嘛呗啦哦嗯]{1,}|\[.{1,6}\]/.test(t)) warmth += 0.5;  // 语气词/emoji
+    if (/(我每天|我最近|我比较|我一般|我最|我挺|我有点|我其实|我平时|我就是|我这个人|我性格|我喜欢|我最爱|每天|经常|有时候|说实话)/.test(t)) warmth += 1;  // 自述/分享
+    if (/[？?]|吗$|你呢|你[呢咧]|你觉得|你喜不喜欢/.test(t)) warmth += 0.5;  // 主动提问
+  }
+  const hasDate = Array.isArray(milestones) && milestones.includes('约会');
+  const turns = userTurns;
+  // 诱惑期（seduce）闸门：仅暧昧/恋爱，且已约好见面 或 聊得够多且很热
+  if ((stage === '暧昧' || stage === '恋爱') && (hasDate || (turns >= 6 && warmth >= 2))) return 'seduce';
+  // 恋爱/挽回：默认舒适期（维护亲密/共情重建），不再用吸引卡
+  if (stage === '恋爱' || stage === '挽回') return 'comfort';
+  // 舒适期：聊得久且对方没在降温（warmth≥0）或 温度够 或 回合够+有温度
+  //   （聊得久但全程短敷衍 = 她在降温，不升级，保持吸引/防守姿态）
+  if ((turns >= 8 && warmth >= 0) || warmth >= 2 || (turns >= 4 && warmth >= 1)) return 'comfort';
+  return 'attract';
+}
+
 function resolveTacticCategory(query: string, history: any[], memoryCard: MemoryCard | null): { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce' } {
   const stage = memoryCard?.profile?.stage || '';
   // 回合数 = 对方发言次数（user 消息）
   const userTurns = (Array.isArray(history) ? history : []).filter((h) => h && h.role === 'user').length;
-  const phase: 'attract' | 'comfort' | 'seduce' = userTurns <= 3 ? 'attract' : userTurns <= 8 ? 'comfort' : 'seduce';
+  const milestones = Array.isArray(memoryCard?.milestones) ? (memoryCard!.milestones as string[]) : [];
+  const phase = resolveTacticPhase(stage, userTurns, history, milestones);
   // 挽回期：不触发防守/进攻，走共情（类别仍给 attack 但卡组内容已含安全边界）
   let category: TacticCategory = 'attack';
   const q = (query || '').trim();
   if (stage !== '挽回' && (DEFENSE_STRONG_RE.test(q) || (q.length <= 4 && DEFENSE_WEAK_RE.test(q)))) category = 'defense';
   else if (SELF_NEED_RE.test((Array.isArray(history) ? history : []).filter((h) => h.role === 'assistant').slice(-1).map((h) => String(h.content || '')).join('')) || INVITE_REJECT_RE.test(q)) category = 'rescue';
   return { category, phase };
+}
+
+// [v148 弹药按阶段加权] 文档级阶段映射：kb_blocks.title = 源文件名（52 个类别文档），
+//   天然蕴含 M3 阶段语义（搭讪/冷读/打压/框架=吸引；联系感/共谋/共鸣/情感链接=舒适；
+//   进挪/调情/邀约/约会=诱惑；异议/废物测试=防守；其余=通用）。
+//   目的：同一句"嗯"，吸引期应接冷读/打压类弹药，舒适期应接联系感/共鸣类弹药——
+//   而不是检索出 5 块阶段混杂的话术让 LLM 自己猜。
+//   匹配顺序 = 优先级（seduce 优先，防"搭讪与邀约"这类跨组文档被 attract 提前截走）
+const TITLE_STAGE_RULES: Array<[string[], 'attract' | 'comfort' | 'seduce' | 'general' | 'defense']> = [
+  [['进挪', '关系升高', '恋爱调情', '隐性诱惑', '约会', '合约恋人', '打情骂俏', '游戏与陷阱', '表达兴趣', '搭讪与邀约'], 'seduce'],
+  [['搭讪', '冷读', '打压', '高价值', '框架', '勾起好奇', '初聊', '开场白', '颜色星座', '趣味搭讪'], 'attract'],
+  [['联系感', '共谋', '共鸣', '价值型', '情感链接', '情感波动', '聊天话题', '聊天对白', '聊天交流', '聊天模板', '话块连情'], 'comfort'],
+  [['异议', '化解IOD', '废物测试'], 'defense'],
+];
+
+// [v148] 文档 title → M3 阶段（未命中 = general，三阶段通用：幽默/语录/表情/趣味问答等）
+function titleStage(title: string): 'attract' | 'comfort' | 'seduce' | 'general' | 'defense' {
+  const t = title || '';
+  for (const [kws, stage] of TITLE_STAGE_RULES) {
+    if (kws.some((k) => t.includes(k))) return stage;
+  }
+  return 'general';
 }
 
 // [v75 缓存白捡①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 进固定前缀可缓存命中）
@@ -1954,7 +2077,7 @@ function buildSystemContent(opts: {
   //   true → 不注入【对方近期话】/【自己发过话】（llmHistory 已含，避免冗余）
   //   false/undefined → 注入（窗口恢复等 llmHistory 缺失场景兜底）
   hasRecentHistory?: boolean;
-  // [v62 切换话题] 用户一键换话题：不延续旧话题，主动抛一个新话题开场（清套路已由外层处理）
+  // [v62 切换话题] 用户一键换话题：不延续旧话题，主动抛一个新话题开场
   switchTopic?: boolean;
   // [v73 迷男精髓] 本轮战术：类别（防守/进攻/救场）+ 阶段（吸引/舒适/诱惑），主流程 resolveTacticCategory 产出
   tactic?: { category: 'defense' | 'attack' | 'rescue'; phase: 'attract' | 'comfort' | 'seduce' };
@@ -1968,7 +2091,7 @@ function buildSystemContent(opts: {
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [P0-3] system 组装顺序优化：固定块全部前移 → DeepSeek 前缀缓存命中
   //   （角色定位/当前时间/自洽输出 每轮不变 → 前缀稳定）
-  //   变化块（战术指令/画像/近期话/自己话/摘要/知识库/套路/节奏）后移 → 后缀变化不影响缓存
+  //   变化块（战术指令/画像/近期话/自己话/摘要/知识库/节奏）后移 → 后缀变化不影响缓存
   // [v9] 角色定位硬编码"本人"（最高优先级，覆盖后台提示词的顾问视角）
   // [v73] 删除旧"有脾气/敢调情"硬编码（已被战术卡组+全局原则覆盖），后台提示词可大幅精简
   let s = '【角色定位】(最高优先级)\n'
@@ -2148,6 +2271,19 @@ function buildSystemContent(opts: {
       + `- 例外：若她以责备/挑衅语气问（如"你多大的人了还这样"）→ 语境不适用，正常回应即可，不强求反问。`;
   }
 
+  // [v147 机会窗口扩展] 她主动袒露自我（分享日常/自述特质/经历/喜好/关心你）→ 注入【接住分享】块
+  //   与里程碑窗口互斥：她问你（detectOpenWindow）走镜像反问；她自述（detectSelfDisclosure）走接住分享
+  //   修复案例："我比较专一"（自述特质）被按字面接成"那我外卖请你"（交易式）；"每天睡醒就喝消水肿"（分享）
+  //   被接成"先给我带杯咖啡"（索取）→ 必须先接情绪再接事
+  const selfDisclosure = !openWindow ? detectSelfDisclosure(opts.lastUserText || '') : null;
+  if (selfDisclosure) {
+    s += `\n\n【接住分享】(本轮最高优先级，必须接住)\n`
+      + `- 她在主动向你分享/袒露自己（「${selfDisclosure}」类）——这不是闲聊，是她信任你、想拉近距离的信号：她给你递了"了解我"的钥匙。\n`
+      + `- 本轮动作（三步，一步都不能省）：①先接住她的分享——认可/共鸣/顺着她的点回应（如"你这也太自律了吧""看得出来你是个讲究人"），先给情绪价值，绝不急着谈条件、不急着邀约、不急着拉回自己身上；②自然深挖一句——围绕她分享的点追问细节或关联一个你自己的相似经历（"我最近也在研究…""那你是不是…"），让她愿意继续讲；③可以轻升级——把话题往"咱俩"方向带（如"那以后我的咖啡也归你管了"这种，但只作收尾点缀，不喧宾夺主）。\n`
+      + `- 铁律：她分享生活/特质时，回复绝不能是交易式接话（带咖啡/请客/点外卖/多少钱/几点了这类谈条件），必须先接情绪再接事；禁止只回"确实/厉害/哈哈"这种无内容附和。\n`
+      + `- 区分查户口：她讲完你追问细节 = 关心；连环盘问不回应 = 查户口（禁止）。`;
+  }
+
   // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
   //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
   // [v80 缓存优化] 后置到变化区尾部（按 query 选 → 每轮变，不打断前面稳定块缓存）
@@ -2208,25 +2344,55 @@ function buildSystemContent(opts: {
     }
   }
 
-  // [v7] 套路执行指令：方向盘优先，检索为弹药，输出不提步骤/进度
-  // [v17] 注入 essence（核心原理/节奏/分寸）+ 例句按语境微调，防"只剩骨架"
-  // [v143 套路爽感] 执行优先级调整：按剧本走 > 自然跟随；只有她明确冷淡/反感才放弃；
-  //   她追问/好奇 = 踩坑信号，必须接住顺势推进，绝不提前揭晓（悬念是坑的灵魂）
-  const strategy = opts.memoryCard?.strategy;
-  if (strategy && Array.isArray(strategy.steps) && strategy.steps.length > 0) {
-    const stepText = strategy.steps.map((st, i) => `${i + 1}. ${st}`).join('\n');
-    s += `\n\n【当前执行套路】(按剧本走，最高优先)\n你正在执行「${strategy.name}」惯例，目标：${strategy.goal}\n`
-      + (strategy.essence
-        ? `核心原理：${strategy.essence}（这是本套路的灵魂：按此原则临场发挥节奏和分寸，不要机械照搬步骤）\n`
-        : '')
-      + `执行步骤：\n${stepText}\n`
-      + `执行规则（严格遵守）：\n`
-      + `- 套路激活期间，按剧本执行是最高优先：每一步照做，把钩子埋好、悬念留足，按节奏推进；不要因为"更自然""她抛了别的话题"就搁置套路。\n`
-      + `- 她正常回应（接梗/好奇/追问）→ 继续按套路走。她追问"为什么/然后呢/真的假的"就是踩坑信号：接住并顺势推进下一步，绝不提前把答案揭晓（悬念是坑的灵魂，忍住）。\n`
-      + `- 她明确冷淡/反感/拒绝/敷衍（"不想聊这个/别这样/哦/嗯"）→ 立即放弃套路，正常回应即可，绝不强行拉回、不纠缠。\n`
-      + `- 步骤中的例句是参考话术：优先采用，可按当前语境微调语气措辞，保留韵味和节奏，禁止官方腔/翻译腔。\n`
-      + `- 严禁向对方提及套路、步骤、进度、惯例、第几步等任何元信息，输出必须是可直接发送的自然消息。\n`
-      + `- 套路目标达成（她踩完坑、收网成功）或她明确抗拒时，套路自然结束，过渡到正常聊天。`;
+  // [v153 行动层 ActiveQuest] 当前行动任务注入（最高优先）：
+  //   攻略里程碑目标 → 跨轮布局执行。状态机（埋钩→接招→放行→收网），
+  //   布局由 extractQuest 现场生成，达成判定点亮里程碑推进攻略。
+  //   注入前只读状态推导；推进在 updateMemoryCard 回写（读-写闭环）
+  const quest = opts.memoryCard?.quest;
+  if (quest && Array.isArray(quest.plan) && quest.plan.length > 0) {
+    const qSteps = quest.plan;
+    const qCur = typeof quest.current_step === 'number' ? quest.current_step : 0;
+    const qHookLaid = !!quest.hook_laid;
+    const qWaitingClose = !!quest.waiting_close;
+    // 她当前这句话是否已达成目标（给了照片/年龄/住哪等）→ 达成即收网，不再推进
+    const qAchieved = questAchieved(quest.target, String(opts.lastUserText || ''));
+    const qHead = `\n\n【当前行动】(最高优先，覆盖战术指令的常规出招)\n你在执行攻略目标「${quest.target}」的布局，共 ${qSteps.length} 步。\n`
+      + `- 动机：${quest.goal_note || `拿到她的${quest.target}，推进关系`}——心里装着这个目标，但嘴上永远不暴露，输出必须是自然聊天。\n`
+      + `- 严禁向对方提及布局、步骤、第几步、目标、攻略等任何元信息。\n`
+      + `- 字数：布局话术可长（不受"整条≤20字"限制，2 句以内），但要口语化、像真人。\n`;
+
+    if (qAchieved) {
+      // 她已给出目标信息 → 收网：接住并确认，不追加新要求
+      s += qHead
+        + `- 状态：她已经把「${quest.target}」给你了（本轮或上轮）→ 收网。\n`
+        + `- 本轮任务：自然接住、顺势确认（夸一句/接一句/记住），不要再推进任何新步骤、不要再追加要求。`;
+    } else if (qWaitingClose) {
+      // ④ 待收网：最后一步已发出，只接住她的回应收尾
+      s += qHead
+        + `- 状态：最后一步已经发出，正在等她完成最后回应（收网阶段）。\n`
+        + `- 本轮任务：接住她当前的话，顺着把结果收下来（她给/答应/接住即成功），不再抛新步骤、新悬念。\n`
+        + `- 她冷淡/反感/拒绝 → 立即收手，正常聊天，不纠缠。`;
+    } else if (qHookLaid && !questEngageHit(String(opts.lastUserText || ''))) {
+      // ② 等待上钩：上一步钩子已埋，她没接 → 忍住，不推进
+      s += qHead
+        + `- 状态：第 ${qCur + 1}/${qSteps.length} 步的钩子已发出，她还没接招。\n`
+        + `- 本轮硬约束：绝对忍住！不推进下一步、不自问自答、不自己揭穿布局。只自然接住她当前的话（可绕、可打岔、可继续吊胃口），把铺垫保持住。\n`
+        + `- 判断依据：她追问/反驳/接梗/打赌（"怎么说/真的假的/来啊/赌"）→ 才是接招信号，接了才轮到下一步；她现在没接，绝不放行。\n`
+        + `- 她明确冷淡/反感/敷衍 → 立即放弃布局，正常回应，绝不强行拉回。`;
+    } else {
+      // ①执行步（坑未埋或刚放行）或 ③放行（她接招了）
+      const qStepIdx = Math.min(qCur + (qHookLaid ? 1 : 0), qSteps.length - 1);
+      const qStep = qSteps[qStepIdx] || '';
+      const qStepIsLast = qStepIdx >= qSteps.length - 1;
+      s += qHead
+        + `- 当前执行第 ${qStepIdx + 1}/${qSteps.length} 步（这是本轮唯一任务，只做这一步，禁止跳步/合并/提前做完）：\n${qStep}\n`
+        + (qHookLaid && questEngageHit(String(opts.lastUserText || ''))
+          ? `- 她接招了（追问/反驳/接梗）→ 顺势推进这一步，接住她的节奏，把铺垫做到这一步的钩子上。\n`
+          : `- 这一步把钩子埋好（结尾留个引子/赌注/悬念勾她接），但严禁把后续步骤提前说出来。\n`)
+        + (qStepIsLast
+          ? `- 注意：这是最后一步，发出后进入收网，等她完成最后回应即可。\n`
+          : `- 例句是参考话术：优先采用，可按当前语境微调语气措辞，保留韵味和节奏。\n`);
+    }
   }
 
   // [v11 迷男OS] 节奏建议（引擎层 → 线上"假性时间限制"）：delay 建议回写记忆卡
@@ -2451,73 +2617,18 @@ function calcGemScore(content: string, blockTitle: string): number {
 }
 
 // ============================================================
-// [v79.5] 套路块专属打分（零 LLM，规则驱动）——替代 gem 用于套路启动通道
-//   背景：gem 按"话术弹药"设计（短句/金句/引号），套路块是几百上千字的完整流程，
-//   长句/连接词天然多会被 gem 误伤（好套路被压到后面）。套路精品化需要专属规则：
-//   加分 = 惯例结构信号（标题惯例词/编号步骤/对话例句/目的情景提示/长度适中完整套路）
-//   减分 = 碎片化（像话术误标）/超长注水（提示废话多）/无结构散句堆
-// ============================================================
-const STRAT_WEIGHT = 0.8;                    // 套路分合并权重（相关分仍为主序）
-// [v20260809] STRAT_MIN 0→1.0：过滤"只有标题像套路、内容无步骤无对话"的低质块
-//   计算参考：标题含惯例词 +1.5 / 有步骤 +1.0 / 有对话 +0.8 / 长度 150-1200 +0.6
-//   → ≥1.0 意味着必须有"标题像套路 + 至少一个结构信号"或"步骤+对话双信号"，纯标题党被挡
-const STRAT_MIN = 1.0;
-const STRAT_TITLE_RE = /惯例|玩法|魔术|流程|套路|开场|收尾|推拉|冷读|测试|游戏|模型/; // 标题惯例词
-const STRAT_STEP_RE = /(^|\n)\s*([0-9０-９]{1,2}|[一二三四五六七八九十]+|[①②③④⑤⑥⑦⑧⑨⑩])([\.、．。）)])|第一步|第二步|步骤|环节|流程|目的|情景|提示|其他答案|变体/; // 步骤/结构信号
-const STRAT_DIALOG_RE = /[男女他她]：|【[男女]|你说|你就|女说|男说/;                 // 对话例句信号
-const STRAT_META_RE = /目的|情景|提示|适合|注意|慎用|非原创|玩法|说明/;             // 结构元信息
-const STRAT_FLUFF_RE = /我觉得|其实呢|我们要知道|废话|以下|总结|综上/;               // 注水信号
-
-function calcStratScore(content: string, blockTitle: string): number {
-  const c = content || '';
-  if (!c) return 0;
-  let s = 0;
-  const len = c.replace(/\s/g, '').length;
-  const hasSteps = STRAT_STEP_RE.test(c);
-  const hasDialog = STRAT_DIALOG_RE.test(c);
-  const fluffCount = (c.match(STRAT_FLUFF_RE) || []).length;
-  // 加分：标题含惯例/玩法/流程词（最强信号：命名即套路）
-  if (blockTitle && STRAT_TITLE_RE.test(blockTitle)) s += 1.5;
-  // 加分：内容有编号步骤/结构信号（1. 2. 3. / 第一步 / 目的 / 提示 / 其他答案）
-  if (hasSteps) s += 1.0;
-  // 加分：含对话例句（可执行的完整对白回合）
-  if (hasDialog) s += 0.8;
-  // [v79.5 补强] 纯对话式惯例（有对话回合但无编号步骤）——"女生不听话/合约恋人"类
-  //   本身就是完整对话脚本，是强套路信号，额外补强
-  if (hasDialog && !hasSteps) s += 0.7;
-  // 加分：含"目的/情景/提示/适合"等套路元信息（说明是完整编排过的惯例）
-  if (STRAT_META_RE.test(c)) s += 0.5;
-  // 长度分：150-1200 字 = 完整长套路；60-150 字 = 对话式惯例正常区间（不扣分）
-  //   无对话的纯短块（碎片）才扣分
-  if (len >= 150 && len <= 1200) s += 0.6;
-  else if (len > 1500) s -= 1.0;
-  else if (len < 60 && !hasDialog) s -= 1.0;
-  // 减分：注水信号（说教连接词堆砌 = 教学口水）
-  if (fluffCount >= 3) s -= 1.0;
-  // [v79.5 强罚] 纯口水教学文：连接词堆砌 + 无步骤无对话 = 说教文不是可执行套路，重罚
-  if (fluffCount >= 3 && !hasSteps && !hasDialog) s -= 0.8;
-  // 减分：完全无结构的长散句（无编号、无对话、无元信息 = 教学口水文）
-  if (!hasSteps && !hasDialog && len > 300) s -= 0.5;
-  return Math.max(-2, Math.min(3, s));
-}
-
-// ============================================================
 // [B方案] 本地块级召回（唯一检索入口，完全移除 IMA）
 //   kb_blocks 表（[v79] 4551 块，语义切块）：bigrams GIN 粗筛 + 块内词频加权打分（RPC kb_blocks_recall）
 //   [2026-08-06] 权重：语义词×2 / 规则词与原文×1.5（整句路已移除）
-//   [v79] 块类型（话术/套路）写于 block_title 前缀 [话术]/[套路]，检索双档按类型过滤
+//   [v79] 块类型（话术/套路）写于 block_title 前缀 [话术]/[套路]
+//   [2026-08-11] 套路机制移除：仅检索话术(弹药)块，套路块不再检索
 //   返回 items 带 _fulltext 标记与 _ft_score；同文档最多 2 块（RPC 内去重）
 //   失败/空缓存 → 返回 []，不影响主链路
 // ============================================================
-// [v79] 套路块判定（block_title 以 [套路] 开头）
-function isStratBlock(it: any): boolean {
-  return !!(it && typeof it.block_title === 'string' && it.block_title.startsWith('[套路]'));
-}
-
 async function recallBlocks(
   supabaseUrl: string, serviceRoleKey: string,
   semanticKws: string[], extraQueries: string[],
-  opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean; type?: '话术' | '套路' }
+  opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; type?: '话术'; phase?: 'attract' | 'comfort' | 'seduce' }
 ): Promise<any[]> {
   try {
     // 查询词集：语义词 + 额外词（规则词/原句 bigram 垫底）
@@ -2573,7 +2684,7 @@ async function recallBlocks(
       _hits: 1, _semanticHits: 0, _fulltext: true, _ft_score: Number(r.score) || 0,
     }));
 
-    // [v79] 类型过滤：block_title 前缀 [话术]/[套路]（检索双档：弹药只取话术块，套路通道只取套路块）
+    // [v79] 类型过滤：block_title 前缀 [话术]（弹药检索只取话术块；套路块不检索）
     if (opts?.type) {
       const prefix = `[${opts.type}]`;
       items = items.filter((it) => (it.block_title || '').startsWith(prefix));
@@ -2581,31 +2692,30 @@ async function recallBlocks(
     if (items.length === 0) return [];
 
     // [v53] 内存精排：算质量分 → 剔低质块 → 按 相关分+质量分×权重 重排
-    //   [v79.5] 按类型分流打分：套路通道用 calcStratScore（套路块专属规则，
-    //   长句/连接词不再被话术 gem 规则误伤）；话术/其他走 calcGemScore
     //   全被剔光时退回原始列表（保证有弹药可用）；排序后 applyQuota 从精排池里挑
-    //   [v20260809] 套路通道叠加结构信号门槛：STRAT_MIN≥1.0 之外，内容必须含
-    //   步骤/对话/元信息之一——纯"标题像套路、内容无结构"的标题党直接挡掉
-    const isStratRoute = opts?.type === '套路';
+    // [v148 弹药阶段加权] 当前战术阶段 phase → 同阶段文档加权、异阶段降权、通用/防守不偏不倚
+    //   实现：排序分 = 相关分 + 质量分×权重 + 阶段修正
+    //   权重设计：同阶段 +3（显著优先）、异阶段 -2（降权不剔出，防候选池空/误伤）、general/defense 0
+    const stageAdj = (it: any): number => {
+      if (!opts?.phase) return 0;
+      const st = titleStage(it.title || '');
+      if (st === opts.phase) return 3;
+      if (st === 'general' || st === 'defense') return 0;
+      return -2;
+    };
     const scored = items
       .map((it) => {
-        const q = isStratRoute ? calcStratScore(it.content || '', it.block_title || '') : calcGemScore(it.content || '', it.block_title || '');
-        return { ...it, _gem: q };
+        const q = calcGemScore(it.content || '', it.block_title || '');
+        return { ...it, _gem: q, _stageAdj: stageAdj(it) };
       })
-      .filter((it) => {
-        if (!isStratRoute) return it._gem >= GEM_MIN;
-        if (it._gem < STRAT_MIN) return false;
-        const c = it.content || '';
-        return STRAT_STEP_RE.test(c) || STRAT_DIALOG_RE.test(c) || STRAT_META_RE.test(c);
-      })
-      .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)) - ((a._ft_score || 0) + (a._gem || 0) * (isStratRoute ? STRAT_WEIGHT : GEM_WEIGHT)));
+      .filter((it) => it._gem >= GEM_MIN)
+      .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * GEM_WEIGHT + (b._stageAdj || 0)) - ((a._ft_score || 0) + (a._gem || 0) * GEM_WEIGHT + (a._stageAdj || 0)));
     if (scored.length > 0) items = scored;
 
     // 4. 状态感知配额（仅剩恋爱话术一类；jx 空时 hs 吃满，见 applyQuota）
     return opts ? applyQuota(items, {
       hsFolder: opts.hsFolder,
       jxFolder: opts.jxFolder,
-      strategyActive: !!opts.strategyActive,
       pickCount: target,
     }) : items.slice(0, target);
   } catch (e: any) {
@@ -2620,7 +2730,7 @@ async function recallBlocks(
 // ============================================================
 async function browseBlocksByTitle(
   supabaseUrl: string, serviceRoleKey: string,
-  query: string, opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean }
+  query: string, opts?: { pickCount?: number; hsFolder?: string | null; jxFolder?: string | null }
 ): Promise<any[]> {
   try {
     const keywords = extractKeywords(query);
@@ -2657,14 +2767,13 @@ async function browseBlocksByTitle(
 }
 
 // ============================================================
-// [v7] 状态感知配额：话术/教学两类内容按 strategy 状态分桶选取，
-//   保证"话术加权"不消灭策略素材——两类始终同在上下文，LLM 自行取舍
-//   执行期：话术 ≤3 + 教学 ≤2；未启动期：教学 ≤3 + 话术 ≤2
+// [v7] 状态感知配额：话术/教学两类内容分桶选取
 //   [B方案] hs/jx 判定改用 folder_id（本地 kb_blocks：恋爱话术=hs，恋爱教学/聊天实战=jx）
 //   [2026-08-06] 教学/实战已删库：jx 为空时 hs 直接吃满 pickCount
 //     （否则上下文弹药从 5 条缩水到 2-3 条，务必保留 !jx 分支）
+//   [2026-08-11] strategyActive 分桶已随套路机制移除
 // ============================================================
-function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: string | null; strategyActive?: boolean; pickCount?: number }): any[] {
+function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: string | null; pickCount?: number }): any[] {
   const count = opts.pickCount || KB_REF_COUNT;
   const hs = opts.hsFolder;
   const jx = opts.jxFolder;
@@ -2680,8 +2789,8 @@ function applyQuota(items: any[], opts: { hsFolder?: string | null; jxFolder?: s
     else otherList.push(it);
   }
 
-  const hsQuota = !jx ? count : (opts.strategyActive ? 3 : 2);
-  const jxQuota = !jx ? 0 : (opts.strategyActive ? 2 : 3);
+  const hsQuota = !jx ? count : 3;
+  const jxQuota = !jx ? 0 : 2;
   const picked = [
     ...hsList.slice(0, Math.min(hsQuota, count)),
     ...jxList.slice(0, Math.min(jxQuota, count)),

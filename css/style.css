@@ -652,29 +652,6 @@ textarea.input {
     color: #fff;
 }
 
-/* [v20260805] 策略徽标：好友名下方一行小字，显示当前执行套路/关系阶段（仅用户可见，纯前端 UI） */
-.chat-strategy {
-    position: absolute;
-    bottom: 3px;
-    left: 50%;
-    transform: translateX(-50%);
-    max-width: calc(100% - 110px);
-    font-size: 12px;
-    line-height: 1.3;
-    color: rgba(255, 214, 140, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    pointer-events: none;
-    display: none;
-}
-.chat-strategy.show {
-    display: block;
-}
-.chat-strategy .cs-stage {
-    color: rgba(180, 200, 255, 0.75);
-}
-
 /* ============================================================
    [v20260810 攻略] 攻略面板：聊天页顶部常驻卡片
    暗色主题：深底卡片 + 亮色进度条 + 信号勾选清单 + 控制按钮
