@@ -63,16 +63,7 @@ const p2 = `你是恋爱话术检索助手，负责把"对方说的话"压缩成
 const r2 = await llm([{ role: 'user', content: p2 }], { temperature: 0.2, maxTokens: 150 });
 console.log(`整句压缩: 输入 ${r2.in} / 输出 ${r2.out} token`);
 
-// ---- 3. 套路提炼(首轮,2400 字资料) ----
-const sampleDoc = ('如何安抚被领导批评的女生：先共情再给建议。共情安抚的核心是承接情绪，不要急着讲道理。可以这样说："被领导骂肯定很难受，换我我也憋屈，说说咋回事？" 然后引导她说出细节，全程不评判只倾听。\n').repeat(40).slice(0, 2400);
-const p3 = `你是恋爱聊天"惯例/玩法"提炼助手。用户正在替自己回复对方，当前对方的话：「${QUERY.slice(0, 60)}」。
-以下是检索到的资料：
-${sampleDoc}
-要求：如果资料中存在"分步骤、可执行"的聊天惯例，提炼成 JSON：{"name":"...","goal":"...","steps":["第1步..."]} steps 2-6 步；没有则输出 {"name":"","steps":[]}。只输出 JSON。`;
-const r3 = await llm([{ role: 'user', content: p3 }], { temperature: 0.2, maxTokens: 400 });
-console.log(`套路提炼(首轮): 输入 ${r3.in} / 输出 ${r3.out} token`);
-
-// ---- 4. 画像提取(首轮) ----
+// ---- 3. 画像提取(首轮) ----
 const p4 = `你是情感分析助手。根据对话提炼对方画像，输出 JSON：{"stage":"阶段","personality":"性格","relationship_note":"关系备注","recent_events":"近期事件"}。
 最近对话：
 对方：${QUERY}
@@ -82,7 +73,7 @@ const p4 = `你是情感分析助手。根据对话提炼对方画像，输出 J
 const r4 = await llm([{ role: 'user', content: p4 }], { temperature: 0.2, maxTokens: 300 });
 console.log(`画像提取(首轮): 输入 ${r4.in} / 输出 ${r4.out} token`);
 
-// ---- 5. 定向摘要 ×5(新场景才有;旧场景 content 空不触发) ----
+// ---- 4. 定向摘要 ×5(新场景才有;旧场景 content 空不触发) ----
 let sumIn = 0, sumOut = 0, sumCount = 0;
 const docFull = ('先共情再给建议。共情安抚的核心是承接情绪，不要急着讲道理。可以这样说："被领导骂肯定很难受，换我我也憋屈，说说咋回事？" 然后引导她说出细节，全程不评判只倾听。最后给一个简单的安慰话术。\n').repeat(60).slice(0, 3500);
 for (let i = 0; i < 5; i++) {
@@ -110,12 +101,12 @@ console.log(`主回复(旧/标题参考): 输入 ${r6old.in} / 输出 ${r6old.ou
 console.log(`主回复(新/含摘要):   输入 ${r6new.in} / 输出 ${r6new.out} token`);
 
 // ---- 汇总对比 ----
-const oldIn = r1.in + r2.in + r3.in + r4.in + r6old.in;
-const oldOut = r1.out + r2.out + r3.out + r4.out + r6old.out;
-const newIn = r1.in + r2.in + r3.in + r4.in + sumIn + r6new.in;
-const newOut = r1.out + r2.out + r3.out + r4.out + sumOut + r6new.out;
+const oldIn = r1.in + r2.in + r4.in + r6old.in;
+const oldOut = r1.out + r2.out + r4.out + r6old.out;
+const newIn = r1.in + r2.in + r4.in + sumIn + r6new.in;
+const newOut = r1.out + r2.out + r4.out + sumOut + r6new.out;
 console.log('\n===== 对比 =====');
 console.log(`旧场景(无正文,首轮): 输入 ${oldIn} / 输出 ${oldOut} / 合计 ${oldIn + oldOut} token`);
 console.log(`新场景(有正文,首轮): 输入 ${newIn} / 输出 ${newOut} / 合计 ${newIn + newOut} token`);
 console.log(`增量: 输入 +${newIn - oldIn} / 输出 +${newOut - oldOut} / 合计 +${newIn + newOut - oldIn - oldOut}`);
-console.log('\n注: 后续轮次(非首轮)无套路提炼+画像提取,每轮约减 ' + (r3.in + r3.out + r4.in + r4.out) + ' token');
+console.log('\n注: 后续轮次(非首轮)无画像提取,每轮约减 ' + (r4.in + r4.out) + ' token');

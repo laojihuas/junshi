@@ -148,7 +148,7 @@ const scored = items
   .map(it => ({ ...it, _gem: it._gem }))
   .filter(it => it._gem >= -1)
   .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * 0.8) - ((a._ft_score || 0) + (a._gem || 0) * 0.8));
-const kbItems = api.applyQuota(scored, { hsFolder: '恋爱话术', jxFolder: null, strategyActive: false, pickCount: 3 });
+const kbItems = api.applyQuota(scored, { hsFolder: '恋爱话术', jxFolder: null, pickCount: 3 });
 
 // ---- 重建 system ----
 const llmHistory = history.slice(-8);
