@@ -836,6 +836,29 @@ textarea.input {
 }
 .guide-btn:active { opacity: 0.7; }
 
+/* [v20260811 折叠] 攻略面板折叠态：默认只显示黄色"当前行动"框 + 展开按钮 */
+.guide-mini {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+.guide-toggle {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 3px 0 1px;
+    font-size: 11px;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.45);
+    background: transparent;
+    border: none;
+    border-top: 0.5px solid rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+}
+.guide-toggle:active { opacity: 0.6; }
+
 /* [v20260805] 聊天头部右上角"记忆"按钮 */
 .chat-memory-btn {
     position: absolute;

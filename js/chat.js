@@ -43,6 +43,8 @@ const Chat = {
             this._prevStage = '';
         }
         // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
+        // [v20260811 折叠] 每次进会话默认折叠（只显示当前行动框），用户展开过则保持
+        if (typeof this._guideExpanded !== 'boolean') this._guideExpanded = false;
         this._updateGuidePanel((mc && mc.guide) || null, (mc && mc.quest) || null);
 
         // [多窗口会话] 记录当前窗口正在对话的好友，
@@ -754,6 +756,8 @@ const Chat = {
     //   或 memory_card 对象（打开会话时，取 .guide 字段，兼容字符串）
     //   [v153 行动层] 第二参数 quest：当前行动任务（{target,plan,current_step,hook_laid,waiting_close}），
     //     有则面板显示"当前行动"行（军师正在布局什么、第几步）；无则保持原攻略信息
+    //   [v20260811 折叠] 默认只显示黄色"当前行动"框（避免面板太大挡屏幕），
+    //     点"展开完整攻略"才显示阶段/信号/控制按钮；再点收起
     _updateGuidePanel(src, quest) {
         const el = document.getElementById('chat-guide');
         if (!el) return;
@@ -803,7 +807,8 @@ const Chat = {
             : (guide.status === 'paused'
                 ? '<button class="guide-btn primary" data-act="resume">继续</button><button class="guide-btn" data-act="abort">终止</button><button class="guide-btn" data-act="reset">重制</button>'
                 : '<button class="guide-btn primary" data-act="reset">重新制定</button>');
-        el.innerHTML =
+        // [v20260811 折叠] 完整攻略内容（默认收起；展开才渲染）
+        const fullHtml =
             '<div class="guide-head"><span class="guide-name">攻略「' + this._escapeHtml(guide.name) + '」</span>'
             + '<span class="guide-status ' + guide.status + '">' + (ST[guide.status] || guide.status) + '</span></div>'
             + '<div class="guide-goal">目标：' + this._escapeHtml(guide.goal) + '</div>'
@@ -814,12 +819,30 @@ const Chat = {
             + '<div class="guide-phase"><span class="guide-phase-name">' + this._escapeHtml(ph.name) + '</span>'
             + '<span class="guide-rounds">' + rounds + ' 轮</span></div>'
             + '<div class="guide-mission">' + this._escapeHtml(ph.mission) + '</div>'
-            + this._questHtml(quest)
             + '<div class="guide-sigs">' + sigHtml + '</div>'
             + (guide.last_eval ? '<div class="guide-eval">' + this._escapeHtml(guide.last_eval) + '</div>' : '')
             + '<div class="guide-actions">' + btnHtml + '</div>';
+        const questHtml = this._questHtml(quest);
+        const expanded = !!this._guideExpanded;
+        // 折叠态主体：优先只显示黄色"当前行动"框；无行动时给一行极简攻略状态
+        let mainHtml;
+        if (expanded) {
+            mainHtml = questHtml + fullHtml;
+        } else {
+            mainHtml = questHtml
+                ? questHtml
+                : '<div class="guide-mini">攻略「' + this._escapeHtml(guide.name) + '」运行中 · 阶段「' + this._escapeHtml(ph.name) + '」</div>';
+        }
+        const toggleHtml = '<button class="guide-toggle" data-toggle="1">' + (expanded ? '收起完整攻略 ▴' : '展开完整攻略 ▾') + '</button>';
+        el.innerHTML = mainHtml + toggleHtml;
         el.classList.add('show');
-        // 绑定控制按钮（暂停/继续/终止/重制）
+        // [v20260811 折叠] 展开/收起切换（重渲染保持状态）
+        const tb = el.querySelector('.guide-toggle');
+        if (tb) tb.onclick = () => {
+            this._guideExpanded = !this._guideExpanded;
+            this._updateGuidePanel(src, quest);
+        };
+        // 绑定控制按钮（暂停/继续/终止/重制；仅展开态渲染）
         el.querySelectorAll('.guide-btn').forEach(b => {
             b.onclick = () => this._guideAction(b.dataset.act);
         });
