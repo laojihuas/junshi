@@ -16,8 +16,6 @@ const Friends = {
         if (this._batchMode) {
             this._batchMode = false;
             this._selectedIds = new Set();
-            const btn = document.getElementById('batch-del-btn');
-            if (btn) btn.classList.remove('active');
             const bar = document.getElementById('batch-bar');
             if (bar) bar.style.display = 'none';
             const fab = document.getElementById('fab-add-friend');
@@ -164,7 +162,7 @@ const Friends = {
         });
     },
 
-    // [批量删除] 进入多选模式
+    // [批量删除] 进入多选模式（长按菜单"批量删除"入口）
     enterBatchMode() {
         if (!this.sessions || this.sessions.length === 0) {
             Utils.toast('暂无好友可管理');
@@ -172,8 +170,6 @@ const Friends = {
         }
         this._batchMode = true;
         this._selectedIds = new Set();
-        const btn = document.getElementById('batch-del-btn');
-        if (btn) btn.classList.add('active');
         const bar = document.getElementById('batch-bar');
         if (bar) bar.style.display = '';
         const fab = document.getElementById('fab-add-friend');
@@ -186,8 +182,6 @@ const Friends = {
     exitBatchMode() {
         this._batchMode = false;
         this._selectedIds = new Set();
-        const btn = document.getElementById('batch-del-btn');
-        if (btn) btn.classList.remove('active');
         const bar = document.getElementById('batch-bar');
         if (bar) bar.style.display = 'none';
         const fab = document.getElementById('fab-add-friend');
@@ -357,6 +351,10 @@ const Friends = {
             case 'delete':
                 this._hideActionSheet();
                 setTimeout(() => this._confirmDelete(session.id), 200);
+                break;
+            case 'batch-delete':
+                this._hideActionSheet();
+                setTimeout(() => this.enterBatchMode(), 200);
                 break;
             case 'cancel':
             default:

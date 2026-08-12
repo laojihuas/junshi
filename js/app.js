@@ -136,11 +136,7 @@ const App = {
             Friends.showCreateModal();
         });
 
-        // [批量删除] 好友列表：头部入口 + 底部操作栏
-        const batchDelBtn = document.getElementById('batch-del-btn');
-        if (batchDelBtn) {
-            batchDelBtn.addEventListener('click', () => Friends.enterBatchMode());
-        }
+        // [批量删除] 好友列表：底部操作栏（入口在长按菜单"批量删除"）
         const batchSelectAll = document.getElementById('batch-select-all');
         if (batchSelectAll) {
             batchSelectAll.addEventListener('click', () => Friends.toggleSelectAll());
