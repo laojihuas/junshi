@@ -710,7 +710,8 @@ Deno.serve(async (req) => {
     // [v20260812 兴趣引擎] 本轮建议话题回写 interest.topic（供下轮"继续聊/切换"判定；
     //   buildGuideBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
     if (memoryCard && memoryCard.interest) {
-      const pickTopic = pickNearestTopic(memoryCard, switchTopic ? '' : query);
+      // [v20260812 换话题优先攻略] 换话题模式用 pickSwitchTopic（攻略未聊话题），普通轮用 pickNearestTopic
+      const pickTopic = switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
       if (pickTopic) memoryCard.interest.topic = pickTopic;
     }
 
@@ -754,7 +755,8 @@ Deno.serve(async (req) => {
       pick_topic: (() => {
         const g = memoryCard?.guide;
         if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-        return pickNearestTopic(memoryCard, switchTopic ? '' : query);
+        // [v20260812 换话题优先攻略] 换话题模式与【切换话题】注入保持一致
+        return switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
       })(),
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
@@ -857,7 +859,8 @@ Deno.serve(async (req) => {
         pick_topic: (() => {
           const g = memoryCard?.guide;
           if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-          return pickNearestTopic(memoryCard, switchTopic ? '' : query);
+          // [v20260812 换话题优先攻略] 换话题模式与【切换话题】注入保持一致
+          return switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
         })(),
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
@@ -1934,7 +1937,7 @@ async function extractGuide(
 
 // [v20260810 攻略] 当前攻略注入块（buildSystemContent 用）：替代 GOAL_HINTS/ESCALATION
 //   [v20260811 话题] signals = 话题 short 名；打钩显示"聊过"；本轮话题建议（纯规则）
-function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[], card?: MemoryCard | null, recentText?: string): string {
+function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[], card?: MemoryCard | null, recentText?: string, switchTopic?: boolean): string {
   const doneSet = new Set(doneTopics);
   const sigList = (ph.signals || []).map((sig) => {
     const t = topicDef(sig);
@@ -1943,7 +1946,8 @@ function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[]
     return `  ${hit ? '✓' : '○'} ${label}`;
   }).join('\n');
   // [v20260811 行动机制移除] 本轮建议话题（纯规则）：未聊清单里最接近当前对话的一个
-  const pick = card ? pickNearestTopic(card, recentText) : null;
+  //   [v20260812 换话题优先攻略] 换话题模式 → 用 pickSwitchTopic 定的攻略话题（与【切换话题】一致）
+  const pick = card ? (switchTopic ? pickSwitchTopic(card) : pickNearestTopic(card, recentText)) : null;
   const pickLine = pick
     ? `\n- 【本轮话题建议】优先自然把话题往「聊${pick}」上带（结合当前对话顺势引出，别生硬；她聊到相关就直接深入）。\n`
     : '';
@@ -2022,6 +2026,28 @@ function pickNearestTopic(card: MemoryCard, recentText?: string): string | null 
     if (best) return best;
   }
   return candidates[0]; // 兜底：取候选第一个未聊话题
+}
+
+// [v20260812 换话题优先攻略] 用户点"换话题"按钮（/换话题）时专用选话题：
+//   优先从攻略当前阶段"未聊过"的话题里定一个（排除正在聊的，权重话题优先，兜底第一个），
+//   让【切换话题】开场白围绕攻略话题抛，而不是 LLM 自由发挥；无攻略/清单聊完 → 退回原逻辑
+function pickSwitchTopic(card: MemoryCard | null | undefined): string | null {
+  if (!card) return null;
+  const g = card.guide;
+  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+  const ph = g.phases[g.current_phase];
+  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
+  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+  const cur = card.interest?.topic || null;
+  // 未聊 + 排除正在聊的（用户点换话题=不想聊当前这个）
+  const pending = ph.signals.filter((sig) => isTopicSignal(sig) && !done.has(sig) && sig !== cur);
+  if (pending.length === 0) {
+    // 没别的可换（只剩当前/清单已聊完）→ 退回 pickNearestTopic 原逻辑（可能继续聊或 null）
+    return pickNearestTopic(card, '');
+  }
+  // 权重话题优先（年龄/照片/住哪），再兜底第一个
+  const weighted = pending.filter((sig) => topicDef(sig)?.weight);
+  return weighted.length > 0 ? weighted[0] : pending[0];
 }
 
 // ============================================================
@@ -2459,7 +2485,7 @@ function buildSystemContent(opts: {
     && guide.current_phase >= 0 && guide.current_phase < guide.phases.length;
 
   if (guideRunning) {
-    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics, opts.memoryCard, opts.lastUserText);
+    s += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics, opts.memoryCard, opts.lastUserText, !!opts.switchTopic);
   } else if (goal === '保持当前关系') {
     // 停止升级：只显示进度 + 维持现状指令
     s += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新话题；正常聊天稳住温度即可，她主动聊就自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
@@ -2470,10 +2496,14 @@ function buildSystemContent(opts: {
   // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
   //   放在所有目标/推进指令之后 = 最高优先级；检索词已切到"新话题/开场白"方向
   if (opts.switchTopic) {
+    // [v20260812 换话题优先攻略] 攻略在跑且清单还有未聊话题 → 定死攻略话题开场，不让 LLM 自由发挥
+    const stTopic = pickSwitchTopic(opts.memoryCard);
     s += `\n\n【切换话题】(本轮最高优先级，覆盖上面的所有目标与推进指令)\n`
       + `- 用户对当前话题不满意，要求换一个新话题继续聊。\n`
       + `- 本轮任务：给出一句可以直接发给对方的新话题开场白（1 句，≤20 字，带钩子/情绪/好奇心）。\n`
-      + `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`
+      + (stTopic
+        ? `- 本轮话题已定：「聊${stTopic}」——开场白围绕这个话题自然抛出（像随口想到一样），别绕开它换别的。\n`
+        : `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`)
       + `- 禁忌：不延续旧话题、不道歉、不解释为什么换话题、不提"换个话题吧"这种元话术；直接自然开场，像想到什么随口问一样。\n`
       + `- 输出只需这一句话术本体，不要任何附加说明。`;
   }
