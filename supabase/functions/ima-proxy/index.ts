@@ -398,6 +398,18 @@ Deno.serve(async (req) => {
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
 
+    // [v20260812 兴趣引擎] 每轮判定她对当前话题的投入度（聊得开心继续 / 连续 2 次低兴趣切清单新话题）
+    //   规则初判 + 疑似低兴趣时 LLM 复核；首轮（无对方历史）跳过；结果随 updateMemoryCard 落库
+    if (memoryCard && !switchTopic && rawQuery && llmKey
+      && (Array.isArray(history) ? history : []).some((h) => h && h.role === 'user')) {
+      try {
+        const interest = await judgeInterest(llmKey, llmBase, llmModel, memoryCard, rawQuery, history);
+        if (interest) memoryCard.interest = interest;
+      } catch (e: any) {
+        console.warn('兴趣判定失败:', e.message);
+      }
+    }
+
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
 
@@ -470,6 +482,9 @@ Deno.serve(async (req) => {
     let factsInjected = 0;
     // [v76] 输出后时间校验命中词（_debug 用；null=未触发）
     let lastTimeConflict: string | null = null;
+    // [v20260812 逻辑重复检测] 本轮防重复判定结果（_debug 用；提到顶层防作用域事故）
+    let dupHit = false;
+    let dupReason = '';
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
 
@@ -627,10 +642,26 @@ Deno.serve(async (req) => {
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
         // [v70 降本] 只与最近 5 条比较（全量 ≤20 条命中率高，误触发=多花一整轮重发成本）
+        // [v20260812 逻辑重复检测] dupHit 升级为三层：
+        //   ①字面 bigram ≥0.85 → 直接判重（零额外 LLM）
+        //   ②疑似区间 bigram 0.4-0.85 或与近 2 条共享 ≥2 个"框架词"（赌/赔/罚/约…）
+        //     → LLM 复核"字面/意思/话术框架"是否重复（延续上轮的框架不算重复）
+        //   ③都没命中 → 不判重（零额外成本）
         // [v76] 时间一致性兜底：回复出现与【当前时间】冲突的时段词（早安/晚安/这么晚等）→ 同上重生成
-        //   （两触发源合并成一次重试，避免同一轮双重重生成）
+        //   （多触发源合并成一次重试，避免同一轮双重重生成）
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.slice(-5) : [];
-        const dupHit = !!(reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs));
+        dupHit = !!(reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs));
+        dupReason = '';
+        if (!dupHit && reply && selfMsgs.length > 0 && llmKey) {
+          // 疑似：字面 0.4-0.85（换词但结构像）或框架语义组撞车（赌注/威胁/邀约换皮）
+          const litSusp = selfMsgs.some((p) => bigramScore(reply, p) >= 0.4);
+          const frameSusp = frameSuspicious(reply, selfMsgs.slice(-2));
+          if (litSusp || frameSusp) {
+            const v = await judgeLogicDup(llmKey, llmBase, llmModel, reply, selfMsgs);
+            if (v && v.dup) { dupHit = true; dupReason = v.reason; }
+            else if (v) console.info(`[logic_dup] 复核放行（延续/无重复）: "${truncateText(reply, 20)}"`);
+          }
+        }
         const timeHit = timeConflict(reply);
         lastTimeConflict = timeHit;
         // [v129 消毒检测] 参考句含强敏感词、回复里这些词全部消失 → 判定消毒 →
@@ -639,7 +670,7 @@ Deno.serve(async (req) => {
         lastSanitizeHit = sanitizedWords !== null;
         if ((dupHit || timeHit || sanitizedWords) && llmKey) {
           const notes: string[] = [];
-          if (dupHit) notes.push('你刚才生成的那句话与【你之前发过的话】重复了。严禁重复，必须换一句全新的、意思不重复的说法。');
+          if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了${dupReason ? '（' + dupReason + '）' : ''}。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           if (sanitizedWords) notes.push(`你刚才的回复把参考话术里的直白措辞（${sanitizedWords.join('/')}）全软化了，这是消毒不是加分。保留直白度：只许改人称、加语气词、调句序、换种说法，禁止同义软化或删掉擦边意象。`);
           const retry = await llmChat(llmKey, llmBase, llmModel, [
@@ -674,6 +705,13 @@ Deno.serve(async (req) => {
     //   决定：LLM 没产出 → reply='掉线了'，前端统一提示"军师掉线了，稍后再试"，不落库不渲染。
     if (!reply) {
       reply = '掉线了';
+    }
+
+    // [v20260812 兴趣引擎] 本轮建议话题回写 interest.topic（供下轮"继续聊/切换"判定；
+    //   buildGuideBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
+    if (memoryCard && memoryCard.interest) {
+      const pickTopic = pickNearestTopic(memoryCard, switchTopic ? '' : query);
+      if (pickTopic) memoryCard.interest.topic = pickTopic;
     }
 
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
@@ -729,6 +767,9 @@ Deno.serve(async (req) => {
         // [v129] 消毒观测（替换已删除的选句通道字段）：本轮参考弹药是否含敏感词 + 生成后是否检出消毒
         risk_hit: lastRiskHit,
         sanitize_hit: lastSanitizeHit,
+        // [v20260812 逻辑重复检测] 验证：dup_hit=是否判重 dup_reason=复核原因（字面/框架）
+        dup_hit: dupHit,
+        dup_reason: dupReason,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         // [2026-08-06] 整句路已移除，仅剩语义路命中统计
@@ -760,6 +801,9 @@ Deno.serve(async (req) => {
         thinking_budget: rawThinkingBudget,
         budget_active: effectiveThinkingBudget,
         budget_peak: budgetPeak,
+        // [v20260812 兴趣引擎] 验证：streak=连续低兴趣数 topic=当前话题
+        interest_streak: memoryCard?.interest?.streak ?? 0,
+        interest_topic: memoryCard?.interest?.topic || null,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
@@ -856,29 +900,96 @@ function buildContextParts(history: any[]): { recent: any[]; summary: string } {
 // ============================================================
 // [v9] 与"自己发过的话"的字面相似度检测（防重复兜底）
 //   bigram 命中比例 ≥0.85 或一字不差 → 判定重复，触发重生成
+//   [v20260812 逻辑重复检测] 拆出 bigramScore 供"疑似区间"复核用
 // ============================================================
-function isNearDuplicate(text: string, prev: string[]): boolean {
-  const t = text.trim();
-  if (!t) return false;
+function bigramScore(text: string, prev: string): number {
   const gram = (str: string, n: number): string[] => {
     const s = str.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, '');
     const out: string[] = [];
     for (let i = 0; i + n <= s.length; i++) out.push(s.slice(i, i + n));
     return out;
   };
-  const tg = gram(t, 2);
-  if (tg.length === 0) return false;
+  const tg = gram(text, 2);
+  if (tg.length === 0) return 0;
   const tset = new Set(tg);
+  const pg = gram(prev, 2);
+  if (pg.length === 0) return 0;
+  let hit = 0;
+  for (const g of pg) if (tset.has(g)) hit++;
+  return Math.max(hit / Math.max(pg.length, 1), hit / tset.size);
+}
+
+function isNearDuplicate(text: string, prev: string[]): boolean {
+  const t = text.trim();
+  if (!t) return false;
   for (const p of prev) {
     if (!p || !p.trim()) continue;
     if (p.trim() === t) return true;
-    const pg = gram(p, 2);
-    if (pg.length === 0) continue;
-    let hit = 0;
-    for (const g of pg) if (tset.has(g)) hit++;
-    if (hit / Math.max(pg.length, 1) >= 0.85 || hit / tset.size >= 0.85) return true;
+    if (bigramScore(t, p) >= 0.85) return true;
   }
   return false;
+}
+
+// [v20260812 逻辑重复检测] 话术框架语义组：同一组内换词（赌→赔→罚→记账）视为同一套框架
+//   与近 2 条自己话共享 ≥1 个"高信号组"（赌注/威胁）或 ≥2 个任意组 → 疑似换皮重复 → LLM 复核
+const FRAME_GROUPS: Array<{ name: string; words: string[] }> = [
+  { name: '赌注', words: ['赌', '赔', '罚', '输', '赢', '欠', '记账', '打赌', '双倍', '赌注'] },
+  { name: '邀约', words: ['约', '见面', '一起', '请', '请客', '买单', '接你', '陪', '来', '去', '下次', '改天'] },
+  { name: '威胁', words: ['不然', '否则', '小心', '别怪', '等着', '走着瞧', '没你好果子'] },
+  { name: '夸赞', words: ['好看', '帅', '可爱', '厉害', '绝了', '喜欢', '优秀'] },
+  { name: '推拉', words: ['才不', '谁要', '想得美', '再说吧', '少来', '别想'] },
+];
+function sharedFrameGroups(text: string, prevList: string[]): { groups: string[]; score: number } {
+  const t = String(text || '');
+  const hitGroups = new Set<string>();
+  let maxScore = 0;
+  for (const p of prevList) {
+    if (!p) continue;
+    let score = 0;
+    for (const g of FRAME_GROUPS) {
+      const tHit = g.words.some((w) => t.includes(w));
+      const pHit = g.words.some((w) => p.includes(w));
+      if (tHit && pHit) { hitGroups.add(g.name); score++; }
+    }
+    if (score > maxScore) maxScore = score;
+  }
+  return { groups: [...hitGroups], score: maxScore };
+}
+// 初筛判定：高信号组（赌注/威胁/邀约）共享 ≥1 或任意组共享 ≥2 → 疑似框架重复
+function frameSuspicious(reply: string, prevList: string[]): boolean {
+  const { groups, score } = sharedFrameGroups(reply, prevList);
+  if (score >= 2) return true;
+  if (score === 1 && (groups.includes('赌注') || groups.includes('威胁') || groups.includes('邀约'))) return true;
+  return false;
+}
+
+// [v20260812 逻辑重复复核] LLM 判定：字面/意思/话术框架（打赌/威胁/邀约/夸赞/推拉）是否重复
+//   延续上轮的框架（如接着"零食赌注"记账）不算重复——那是有连续感，判"延续"
+async function judgeLogicDup(
+  llmKey: string, llmBase: string, llmModel: string,
+  reply: string, selfMsgs: string[]
+): Promise<{ dup: boolean; reason: string } | null> {
+  try {
+    const prev = selfMsgs.slice(-3).map((m) => `你之前：${truncateText(String(m), 80)}`).join('\n');
+    const prompt = `你是对话质量检查助手。判断"你刚生成的这句回复"是否与"你之前发过的某句话"重复。\n`
+      + `${prev || '（无）'}\n`
+      + `你刚生成的回复：${truncateText(reply, 100)}\n`
+      + `判定规则（任一命中即重复）：\n`
+      + `- 字面重复：几乎一模一样或只改几个字；\n`
+      + `- 意思重复：换词说同一件事、同一个观点；\n`
+      + `- 框架/套路重复：同一套话术框架换皮再用——如又立一次赌注（"不好看你要赔"→"不好看罚你陪我吃饭"）、又威胁一次、又用一个同款邀约/夸赞/推拉套路。\n`
+      + `- 延续不算重复：接着之前立过的赌注/约定往下推（记账、加码、催兑现、回应她的接招）→ 这是连续感，判不重复。\n`
+      + `只输出 JSON：{"dup":true|false,"reason":"≤15字"}，不要任何其他文字。`;
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 60, _stage: 'logic_dup',
+    });
+    const m = content.match(/"dup"\s*:\s*(true|false)/);
+    const r = content.match(/"reason"\s*:\s*"([^"]*)"/);
+    return { dup: m ? m[1] === 'true' : false, reason: r ? r[1] : '' };
+  } catch (e: any) {
+    console.warn('judgeLogicDup failed:', e.message);
+    return null; // 失败保守判不重复（不误伤）
+  }
 }
 
 // ============================================================
@@ -1080,6 +1191,8 @@ type MemoryCard = {
   emotion_tone?: EmotionTone;
   // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
   guide?: GuideState | null;
+  // [v20260812 兴趣引擎] 她对当前话题的投入度状态（兴趣驱动切换：聊得开心继续/连续2次低兴趣切新话题）
+  interest?: InterestState;
   updated_at?: string;
 };
 
@@ -1213,6 +1326,98 @@ function detectTopicStagnation(query: string, history: any[]): { staleRounds: nu
   const isFob = (t: string) => /^(嗯|哦|额|哈|啊|好吧|随便|不知道|没有|行吧|嗯嗯|哦哦|哈哈|呵呵|是嘛|对呀|算了吧|都行|先忙|再说|睡觉了|累了)[。！!~～…]*$/.test(t);
   const retreating = recent.some((t) => isShort(t) || isFob(t));
   return { staleRounds, retreating };
+}
+
+// ============================================================
+// [v20260812 兴趣引擎] 她对"当前话题"的投入度 → 驱动话题切换
+//   规则初判（零 LLM）+ 疑似低兴趣时 LLM 复核（准确区分"接梗/傲娇"与"真敷衍"）
+//   streak: 连续低兴趣轮数（0/1/2；≥2 下一轮硬切清单新话题）；topic: 正在聊的话题 short
+//   设计决策（用户确认）：聊得开心就继续不切；连续第 2 次低兴趣 → 启用攻略清单新话题
+// ============================================================
+type InterestState = {
+  streak: number;       // 连续低兴趣次数（0-2，≥2 触发切换）
+  topic: string | null; // 正在聊/上轮建议的话题 short
+  at: string;           // 最近一次判定时间
+};
+
+// 规则初判兴趣：明确高信号 → 'high'（零 LLM，长回复/问句/积极词/接梗/主动话题）
+//   明确低信号（短/敷衍）→ 'low'（需 LLM 复核）；中间地带 → 'high'（保守，宁可不切，避免打断热络）
+const INTEREST_HIGH_RE = /[?？吗呢吧]|开心|喜欢|可爱|好呀|没问题|期待|笑死|有意思|绝了|真的假的|我也是|我也|原来|诶|哎|哇|天哪|你(说|讲|猜)|说说|聊聊|然后|后来|之后|确实|对呀|可以啊|行啊|嗯嗯|懂|明白|知道了|好嘞|必须|安排|走走走|下次|改天|有时间|想听|想看|想去|哈哈|嘿嘿/;
+const INTEREST_FOB_WORDS = /^(嗯|哦|额|哈|啊|好吧|随便|不知道|没有|行吧|嗯嗯|哦哦|呵呵|是嘛|对呀|算了吧|都行|先忙|再说|睡觉了|累了|没啥|没想|就这样|还好|还行|就那样)[。！!~～…]*$/;
+const INTEREST_FOB_PREFIX = /^(嗯|哦|额|哈|啊|好吧|行吧|哦哦|嗯嗯|呵呵|无语|服了|随便|算了吧|都行|再说)[,，。！!~～…\s]/;
+
+function quickInterestSignal(query: string, lastSelf: string): 'high' | 'low' {
+  const q = String(query || '').trim();
+  if (!q) return 'low';
+  if (q.length >= 15) return 'high';            // 长回复 = 投入
+  if (INTEREST_HIGH_RE.test(q)) return 'high';  // 问句/积极词/接梗词
+  if (lastSelf) {
+    // 她的话里出现军师上一句的关键词（接梗）→ 投入
+    const kws = extractKeywords(lastSelf);
+    if (kws.some((k) => k.length >= 2 && q.includes(k))) return 'high';
+  }
+  if (INTEREST_FOB_WORDS.test(q) || INTEREST_FOB_PREFIX.test(q)) return 'low'; // 纯敷衍
+  return 'high'; // 中间地带保守判高
+}
+
+// LLM 复核：疑似低兴趣时精确判断（短回是"接梗/傲娇/语气词"还是"真敷衍"）
+async function judgeInterestLow(
+  llmKey: string, llmBase: string, llmModel: string,
+  topicShort: string | null, query: string, history: any[]
+): Promise<boolean> {
+  try {
+    const self = (Array.isArray(history) ? history : [])
+      .filter((h) => h && h.role === 'assistant' && typeof h.content === 'string')
+      .slice(-1)[0]?.content || '';
+    const her = (Array.isArray(history) ? history : [])
+      .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+      .slice(-2)
+      .map((h) => `她：${truncateText(String(h.content), 60)}`)
+      .join('\n');
+    const prompt = `你是恋爱聊天节奏评估助手，判断她对当前话题是"投入"还是"敷衍"。\n`
+      + `当前话题：${topicShort || '未指定'}\n`
+      + `军师刚发的：${truncateText(self, 80) || '（无）'}\n`
+      + `最近她说的：\n${her || '（无）'}\n`
+      + `她本轮这句话：${truncateText(query, 80)}\n`
+      + `判定规则：\n`
+      + `- 接梗（提到你说的内容/顺着延伸）、反问、带情绪语气（"嗯哼~""哈哈绝了"）、给出新信息 → 投入 high\n`
+      + `- 傲娇式反驳（"才没有""谁要啊"）也算投入（她在跟你互动）\n`
+      + `- 纯敷衍（嗯/哦/随便/不想聊/转移话题但完全不接）→ 敷衍 low\n`
+      + `- 短句但有承接关系（回应你的话）→ 投入\n`
+      + `只输出 JSON：{"interest":"high"|"low","reason":"≤12字"}，不要任何其他文字。`;
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.2, maxTokens: 60, _stage: 'interest_judge',
+    });
+    const m = content.match(/"interest"\s*:\s*"(high|low)"/);
+    return m ? m[1] === 'low' : false;
+  } catch (e: any) {
+    console.warn('judgeInterestLow failed:', e.message);
+    return false; // LLM 失败保守判高（不误切）
+  }
+}
+
+// 每轮兴趣判定入口：更新 interest 状态（streak 递增/归零），不落库（随 updateMemoryCard 写回）
+//   返回更新后的 InterestState；无攻略/换话题/无 query → 返回原状态
+async function judgeInterest(
+  llmKey: string, llmBase: string, llmModel: string,
+  card: MemoryCard | null, query: string, history: any[]
+): Promise<InterestState | null> {
+  const g = card?.guide;
+  if (!card || !g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+  const q = String(query || '').trim();
+  if (!q) return null;
+  const prev: InterestState = card.interest || { streak: 0, topic: null, at: '' };
+  const lastSelf = (Array.isArray(history) ? history : [])
+    .filter((h) => h && h.role === 'assistant' && typeof h.content === 'string')
+    .slice(-1)[0]?.content || '';
+  const sig = quickInterestSignal(q, lastSelf);
+  let low = false;
+  if (sig === 'low' && llmKey) {
+    low = await judgeInterestLow(llmKey, llmBase, llmModel, prev.topic, q, history);
+    if (!low) console.info(`[interest] 规则低→LLM判高（接梗/傲娇），不计数: "${truncateText(q, 20)}"`);
+  }
+  const streak = low ? Math.min((prev.streak || 0) + 1, 2) : 0;
+  return { streak, topic: prev.topic, at: new Date().toISOString() };
 }
 
 // [v20260809 机会窗口] 对方主动问起话题库相关话题 = 她亲手递来的窗口（纯规则，零 LLM）
@@ -1748,7 +1953,7 @@ function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[]
     + `- 当前阶段 ${guide.current_phase + 1}/${guide.phases.length}「${ph.name}」：${ph.mission}\n`
     + `- 本阶段话题清单（全部聊过才进入下一阶段）：\n${sigList}\n${pickLine}`
     + `- 已耗 ${ph.rounds_in_phase || 0}/${maxRounds} 轮（超限未达成将按预案切换打法，不硬耗不纠缠）。\n`
-    + `- 主动引导：按阶段任务主动推进——优先聊本阶段话题清单里未打钩的话题（自然带入，别硬转）；她对该话题兴趣高（回应积极/话变长/主动延伸）就往深里聊、顺着延伸；她兴趣低（嗯/哦/敷衍/短回）就简单带过换下一个，不纠缠。\n`
+    + `- 主动引导：按阶段任务主动推进——优先聊本阶段话题清单里未打钩的话题（自然带入，别硬转）；她对该话题兴趣高（回应积极/话变长/主动延伸/接梗）就继续深入聊、顺着延伸，别急着换话题；她连续两次兴趣低下时，系统已自动把【本轮话题建议】切到清单下一个，顺着建议自然带过去即可，不硬聊不纠缠。\n`
     + `- 权重话题「年龄/照片/住哪」要聊出结果才算完成（知道她具体年龄/拿到照片/知道她住哪），其余话题聊出实质内容即可打钩。\n`
     + `- 她冷淡/回避就执行预案（${ph.exit_plan || '降速换话题养氛围'}）再找机会，绝不硬推、绝不表白、绝不逼问。`;
 }
@@ -1780,9 +1985,10 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 // ============================================================
 
 // [v20260811] 从攻略当前 phase 选"本轮建议话题"：
-//   ① 权重话题（年龄/照片/住哪）优先（列表页可见，最先引导聊）
-//   ② 其次按当前对话关键词重叠度挑最接近的未聊话题（聊起来自然）
-//   ③ 兜底取清单第一个未聊话题
+//   [v20260812 兴趣驱动改造] 优先级（用户在聊的高兴话题不被强行打断）：
+//   ① 兴趣高（interest.streak<2）且有正在聊的话题未打钩 → 继续聊它（权重话题也让路）
+//   ② 连续 2 次低兴趣（streak≥2）→ 排除当前话题，从清单选下一个（权重优先/重叠/兜底）
+//   ③ 无正在聊话题 → 原逻辑：权重话题优先 → 关键词重叠 → 兜底清单第一个
 //   返回 null = 无未聊话题（本阶段清单聊完，等推进下一阶段）
 function pickNearestTopic(card: MemoryCard, recentText?: string): string | null {
   const g = card.guide;
@@ -1792,15 +1998,22 @@ function pickNearestTopic(card: MemoryCard, recentText?: string): string | null 
   const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
   const pending = ph.signals.filter((sig) => isTopicSignal(sig) && !done.has(sig));
   if (pending.length === 0) return null;
+  const cur = card.interest?.topic || null;
+  const streak = card.interest?.streak || 0;
+  const text = String(recentText || '');
+  // ① 兴趣未断 + 正在聊的话题还没聊完 → 继续聊（不打断热络；权重话题在此让路）
+  if (streak < 2 && cur && pending.includes(cur)) return cur;
+  // ② 连续 2 次低兴趣 → 切换：排除当前话题，从清单里挑下一个
+  const candidates = streak >= 2 && cur ? pending.filter((sig) => sig !== cur) : pending;
+  if (candidates.length === 0) return pending[0];
   // 权重话题优先：年龄/照片/住哪 是列表页可见信息，最先引导聊
-  const weighted = pending.filter((sig) => topicDef(sig)?.weight);
+  const weighted = candidates.filter((sig) => topicDef(sig)?.weight);
   if (weighted.length > 0) return weighted[0];
   // 无权重话题时：按当前对话匹配最接近的话题（关键词重叠最多者胜）
-  const text = String(recentText || '');
   if (text.trim().length > 0) {
     let best: string | null = null;
     let bestHit = 0;
-    for (const sig of pending) {
+    for (const sig of candidates) {
       const t = topicDef(sig);
       if (!t) continue;
       const hits = t.kws.filter((k) => text.includes(k)).length;
@@ -1808,7 +2021,7 @@ function pickNearestTopic(card: MemoryCard, recentText?: string): string | null 
     }
     if (best) return best;
   }
-  return pending[0]; // 兜底：取清单第一个未聊话题
+  return candidates[0]; // 兜底：取候选第一个未聊话题
 }
 
 // ============================================================
@@ -2145,6 +2358,7 @@ function buildSystemContent(opts: {
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 你是同一个人，逻辑自洽：严禁自相矛盾、推翻自己说过的话、答非所问。\n`
     + `- 严禁重复你之前发过的任何一句话（含意思相近的说法）。\n`
+    + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度，就是不能换词再说一遍同样的事。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲？我有个消磨时间的绝招"（17字）。`;
 
