@@ -16,8 +16,10 @@
 
 // [v10] 数值区间 或 字符串枚举（thinking_mode：off/low/high/max）
 // [v77] 采样参数（temperature/惩罚系数/max_tokens）已由 ima-proxy 六阶段联动表接管，后台不再接收
+// [v20260812] thinking_budget 思考链压缩开关（on=思考档注入【思考预算】指令省成本）
 const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
   thinking_mode: ['off', 'low', 'high', 'max'],
+  thinking_budget: ['on', 'off'],
 };
 
 function validateLlmParams(v: any): string | null {

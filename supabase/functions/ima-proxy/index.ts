@@ -385,6 +385,8 @@ Deno.serve(async (req) => {
 
     // [v10] 思考模式生效档位：仅后台默认档（忽略请求体传参，防用户构造请求刷最高档）
     const effectiveThinkingMode: ThinkingMode = llmParams.thinking_mode;
+    // [v20260812 思考预算开关] 后台开关（默认 off）：on 且思考档时注入【思考预算】压缩思考链
+    const effectiveThinkingBudget = llmParams.thinking_budget === 'on';
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
@@ -594,7 +596,9 @@ Deno.serve(async (req) => {
           // [v76] 距上次聊天间隔（变化区注入，不动前缀缓存）
           lastGapText,
           // [v81 回退 v78] 思考档（v78 曾注入【思考预算】，已删除；档位由 llmChat 控制）
+          // [v20260812 思考预算开关] thinkingBudget=on 时恢复注入（默认 off 不注入，保持自然思考）
           thinking: effectiveThinkingMode,
+          thinkingBudget: effectiveThinkingBudget,
           // [v129] 高危词预检结果 → 命中则注入【措辞底线】保味指令
           riskHit: lastRiskHit,
         });
@@ -749,6 +753,8 @@ Deno.serve(async (req) => {
           return o;
         })(),
         thinking_mode: effectiveThinkingMode,
+        // [v20260812 思考预算开关] 验证开关生效（on 且思考档 → system 注入【思考预算】）
+        thinking_budget: effectiveThinkingBudget,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
@@ -2089,6 +2095,8 @@ function buildSystemContent(opts: {
   // [v78→v81 回退] 本轮思考档（off/low/high/max）：v78 曾用于注入【思考预算】压缩思考链，
   //   已删除（用户实测变笨）；档位机制本身由 llmChat 的 thinking 参数控制，此处保留签名兼容
   thinking?: ThinkingMode;
+  // [v20260812 思考预算开关] 后台开关：on 且思考档时注入【思考预算】压缩思考链（省成本）
+  thinkingBudget?: boolean;
   // [v129] 本轮参考弹药是否含敏感词（高危词预检结果）→ 命中则注入【措辞底线】保味指令
   riskHit?: boolean;
 }): { systemContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
@@ -2158,8 +2166,11 @@ function buildSystemContent(opts: {
 
   // [v80 缓存优化] 【上次聊天】块已后置到变化区尾部（每轮变，放前面会打断后续稳定块缓存）
 
-  // [v81 回退 v78] 【思考预算】块已删除：用户实测该指令压制模型思考（"变笨"），
-  //   恢复正常思考模式；思考档位机制（v10）保留，档位下模型自然思考不再被裁剪
+  // [v20260812 思考预算开关] v81 曾回退（用户实测变笨）；现做成后台开关：
+  //   thinkingBudget=on 且思考档 → 恢复 v78 压缩指令（省成本，可接受质量下降时打开）
+  if (opts.thinkingBudget && opts.thinking && opts.thinking !== 'off') {
+    s += `\n\n【思考预算】（思考档生效，最高优先）\n最终回复只有 ≤20 字，思考也必须克制：只做必要推理（潜台词/意图/策略判断），最多 3 步直接给结论，禁止长篇分析、禁止复述对话内容、禁止罗列选项。`;
+  }
 
   // [v75 缓存②] 【话题锚点】（记忆卡 profile.anchor，跨轮次变化）
   const anchor = opts.memoryCard?.profile?.anchor || '';
@@ -2810,12 +2821,15 @@ function mergeDedup(items: any[]): any[] {
 // [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
 //   [v77] 后台仅保留思考模式默认档；采样参数（temperature/惩罚系数/max_tokens）
 //   已由下方六阶段联动表接管，不再从后台读取。
-//   llm_params 存 JSON 字符串：{"thinking_mode":"off"}
+//   llm_params 存 JSON 字符串：{"thinking_mode":"off","thinking_budget":"off"}
+//   [v20260812 思考预算开关] thinking_budget=on 且思考档 → 注入【思考预算】指令压缩思考链
+//   （v78 方案，v81 因"变笨"回退；现做成后台开关，默认 off 保持自然思考，需要省成本时打开）
 // ============================================================
 type LlmParams = {
   thinking_mode: ThinkingMode;
+  thinking_budget?: 'on' | 'off';
 };
-const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off' };
+const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'off' };
 
 // [v77] 六阶段 × 三采样参数联动（主回复/重生成按 memoryCard.profile.stage 取档）
 //   设计依据：temperature=采样随机性（性格/冒险），presence=话题/词汇翻新，
@@ -2857,9 +2871,11 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     const tm = (typeof raw.thinking_mode === 'string' && THINKING_MODES.has(raw.thinking_mode))
       ? raw.thinking_mode as ThinkingMode
       : DEFAULT_LLM_PARAMS.thinking_mode;
+    // [v20260812 思考预算开关] on/off 枚举校验，非法回退 off
+    const tb = (raw.thinking_budget === 'on') ? 'on' as const : 'off' as const;
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
-      llm_params: { thinking_mode: tm },
+      llm_params: { thinking_mode: tm, thinking_budget: tb },
     };
   } catch (e: any) {
     console.warn('fetchAppConfig failed:', e.message);

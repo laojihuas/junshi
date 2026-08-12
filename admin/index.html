@@ -380,13 +380,20 @@
                     <br>temperature / 惩罚系数 / max_tokens 已由后端按六关系阶段（陌生/朋友/追求/暧昧/恋爱/挽回）自动联动，无需手动配置。
                 </p>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-                    <label style="font-size:12px;color:var(--muted);display:block;grid-column:1/-1;">
+                    <label style="font-size:12px;color:var(--muted);display:block;">
                         思考模式默认档（用户前端可自行切换，此处为全局默认）
                         <select id="llm-thinking-mode" class="input" style="margin-top:4px;">
                             <option value="off">普通（关闭思考，默认）</option>
                             <option value="low">轻度</option>
                             <option value="high">中度</option>
                             <option value="max">深度</option>
+                        </select>
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">
+                        思考链压缩（v78 方案复活，省成本；开启后思考会变短，可能"变笨"）
+                        <select id="llm-thinking-budget" class="input" style="margin-top:4px;">
+                            <option value="off">关闭（自然思考，默认）</option>
+                            <option value="on">开启（压缩思考链）</option>
                         </select>
                     </label>
                 </div>
@@ -739,6 +746,9 @@
                 const lp = data.llm_params || {};
                 document.getElementById('llm-thinking-mode').value =
                     ['off', 'low', 'high', 'max'].includes(lp.thinking_mode) ? lp.thinking_mode : 'off';
+                // [v20260812] 思考链压缩开关
+                document.getElementById('llm-thinking-budget').value =
+                    lp.thinking_budget === 'on' ? 'on' : 'off';
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -792,8 +802,10 @@
             const status = document.getElementById('llm-status');
             const saveBtn = document.getElementById('llm-save-btn');
             // [v77] 仅思考模式可配；采样参数已由后端六阶段联动表接管
+            // [v20260812] 思考链压缩开关（thinking_budget）随参数一并提交（整体替换 llm_params）
             const llm_params = {
-                thinking_mode: document.getElementById('llm-thinking-mode').value
+                thinking_mode: document.getElementById('llm-thinking-mode').value,
+                thinking_budget: document.getElementById('llm-thinking-budget').value
             };
             saveBtn.disabled = true;
             status.textContent = '保存中...';
