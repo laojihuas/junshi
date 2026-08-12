@@ -1387,12 +1387,15 @@ async function updateMemoryCard(ctx: {
   }
 
   // 2) 画像合并（频率控制）
+  //   [v20260812 降本] 首轮（firstRound，用户投喂资料/无对话）跳过画像提取：
+  //   extractProfile 输入为空纯输出默认值（stage=陌生），白烧 ~700 token/新好友；
+  //   次轮起（有真实对话）才提取，由限频兜底
   let needProfile = true;
   if (card.updated_at) {
     const last = new Date(card.updated_at).getTime();
     needProfile = !isNaN(last) && (Date.now() - last) > MEMORY_UPDATE_INTERVAL;
   }
-  if (needProfile && ctx.llmKey) {
+  if (needProfile && ctx.llmKey && !firstRound) {
     // [v57] extractProfile 现在返回 { profile, facts }
     const extracted = await extractProfile(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
     if (extracted) {
