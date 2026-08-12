@@ -404,6 +404,42 @@
                     <span id="llm-status" style="font-size:12px;color:var(--muted);"></span>
                 </div>
             </div>
+
+            <!-- [v20260812 配额参数搬后台] 原写死在 SQL 008 函数里的配额值 -->
+            <div class="card" style="margin-top:16px;">
+                <div class="card-title">
+                    <span>配额参数</span>
+                    <span style="font-size:12px;color:var(--muted);">保存后立即生效（下次扣次按新值）</span>
+                </div>
+                <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
+                    原写死在数据库函数里的配额数值，现可在后台调节：免费档三档、激活码日配额、邀请奖励与封顶。
+                    价格（¥68/月）与有效期（30 天）暂未搬，如需一并调节请告知。
+                </p>
+                <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 0-3 天（次/天）
+                        <input id="qp-tier1" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 3-7 天（次/天）
+                        <input id="qp-tier2" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 7 天+（次/天）
+                        <input id="qp-tier3" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">激活码日配额（次/天）
+                        <input id="qp-vip" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">邀请奖励（次/人）
+                        <input id="qp-invite-each" class="input input-num" type="number" min="1" max="1000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">邀请累计封顶（次）
+                        <input id="qp-invite-cap" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                </div>
+                <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+                    <button id="quota-save-btn" class="btn btn-primary">保存配额参数</button>
+                    <span id="quota-status" style="font-size:12px;color:var(--muted);"></span>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -751,6 +787,14 @@
                 // [v20260812] 思考链压缩三档（auto/on/off）
                 document.getElementById('llm-thinking-budget').value =
                     ['auto', 'on', 'off'].includes(lp.thinking_budget) ? lp.thinking_budget : 'auto';
+                // [v20260812 配额参数] 填充（缺省回退原默认值）
+                const qp = data.quota_params || {};
+                document.getElementById('qp-tier1').value = qp.free_daily_tier1 ?? 50;
+                document.getElementById('qp-tier2').value = qp.free_daily_tier2 ?? 30;
+                document.getElementById('qp-tier3').value = qp.free_daily_tier3 ?? 15;
+                document.getElementById('qp-vip').value = qp.vip_daily_limit ?? 500;
+                document.getElementById('qp-invite-each').value = qp.invite_bonus_each ?? 50;
+                document.getElementById('qp-invite-cap').value = qp.invite_bonus_cap ?? 300;
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -828,6 +872,49 @@
                 toast('LLM 参数保存成功');
             } catch (e) {
                 console.error('保存 LLM 参数失败:', e);
+                status.textContent = '保存失败：' + (e.message || '请检查 prompt-update 函数');
+                toast('保存失败：' + (e.message || '未知错误'));
+            } finally {
+                saveBtn.disabled = false;
+            }
+        }
+
+        // [v20260812 配额参数] 保存（prompt-update 后台校验管理员 + 白名单校验数值）
+        async function saveQuotaParams() {
+            const { updateUrl } = getPromptUrls();
+            const status = document.getElementById('quota-status');
+            const saveBtn = document.getElementById('quota-save-btn');
+            const readInt = (id) => parseInt(document.getElementById(id).value, 10);
+            const quota_params = {
+                free_daily_tier1: readInt('qp-tier1'),
+                free_daily_tier2: readInt('qp-tier2'),
+                free_daily_tier3: readInt('qp-tier3'),
+                vip_daily_limit: readInt('qp-vip'),
+                invite_bonus_each: readInt('qp-invite-each'),
+                invite_bonus_cap: readInt('qp-invite-cap'),
+            };
+            for (const [k, v] of Object.entries(quota_params)) {
+                if (!Number.isInteger(v) || v < 1 || v > 10000) { toast('配额参数需为 1~10000 的整数'); return; }
+            }
+            saveBtn.disabled = true;
+            status.textContent = '保存中...';
+            try {
+                const resp = await fetch(updateUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + (await getSessionToken())
+                    },
+                    body: JSON.stringify({ quota_params })
+                });
+                const data = await resp.json();
+                if (!resp.ok || !data.success) {
+                    throw new Error(data.error || 'HTTP ' + resp.status);
+                }
+                status.textContent = '✅ 配额参数已保存，立即生效';
+                toast('配额参数保存成功');
+            } catch (e) {
+                console.error('保存配额参数失败:', e);
                 status.textContent = '保存失败：' + (e.message || '请检查 prompt-update 函数');
                 toast('保存失败：' + (e.message || '未知错误'));
             } finally {
@@ -935,6 +1022,8 @@
             });
             // [LLM 生成参数] 保存
             document.getElementById('llm-save-btn').addEventListener('click', saveLlmParams);
+            // [配额参数] 保存
+            document.getElementById('quota-save-btn').addEventListener('click', saveQuotaParams);
 
             // 清理幽灵设备（调 cleanup_ghost_devices RPC：先 dry_run 预览 → 确认真删）
             document.getElementById('cleanup-ghost-btn').addEventListener('click', cleanupGhostDevices);

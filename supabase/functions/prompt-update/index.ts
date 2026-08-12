@@ -22,6 +22,29 @@ const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
   thinking_budget: ['auto', 'on', 'off'],
 };
 
+// [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（SQL 008 原硬编码值改读 app_config.quota_params）
+const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
+  free_daily_tier1: [1, 10000],   // 免费档 0-3 天（默认 50）
+  free_daily_tier2: [1, 10000],   // 免费档 3-7 天（默认 30）
+  free_daily_tier3: [1, 10000],   // 免费档 7 天+（默认 15）
+  vip_daily_limit: [1, 10000],    // 激活码日配额（默认 500）
+  invite_bonus_each: [1, 1000],   // 邀请奖励每次（默认 50）
+  invite_bonus_cap: [1, 10000],   // 邀请累计封顶（默认 300）
+};
+function validateQuotaParams(v: any): string | null {
+  if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'quota_params 必须为 JSON 对象';
+  for (const key of Object.keys(v)) {
+    if (!(key in QUOTA_PARAM_RANGE)) return `不支持的配额参数: ${key}`;
+    const [min, max] = QUOTA_PARAM_RANGE[key];
+    const val = v[key];
+    if (typeof val !== 'number' || !isFinite(val) || val < min || val > max) {
+      return `${key} 必须为 ${min}~${max} 之间的整数`;
+    }
+    if (val !== Math.floor(val)) return `${key} 必须为整数`;
+  }
+  return null;
+}
+
 function validateLlmParams(v: any): string | null {
   if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'llm_params 必须为 JSON 对象';
   for (const key of Object.keys(v)) {
@@ -59,9 +82,9 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json();
-    const { system_prompt, llm_params } = body;
-    if (typeof system_prompt !== 'string' && llm_params === undefined) {
-      return new Response(JSON.stringify({ error: '至少提供 system_prompt 或 llm_params' }), { headers, status: 400 });
+    const { system_prompt, llm_params, quota_params } = body;
+    if (typeof system_prompt !== 'string' && llm_params === undefined && quota_params === undefined) {
+      return new Response(JSON.stringify({ error: '至少提供 system_prompt / llm_params / quota_params 之一' }), { headers, status: 400 });
     }
     if (typeof system_prompt === 'string' && system_prompt.length > 20000) {
       return new Response(JSON.stringify({ error: 'system_prompt 过长（上限 20000 字符）' }), { headers, status: 400 });
@@ -71,6 +94,13 @@ Deno.serve(async (req) => {
       const err = validateLlmParams(llm_params);
       if (err) return new Response(JSON.stringify({ error: err }), { headers, status: 400 });
       llmParamsJson = JSON.stringify(llm_params);
+    }
+    // [v20260812 配额参数] 校验后整体写入 quota_params（与 llm_params 互不影响）
+    let quotaParamsJson: string | null = null;
+    if (quota_params !== undefined) {
+      const err = validateQuotaParams(quota_params);
+      if (err) return new Response(JSON.stringify({ error: err }), { headers, status: 400 });
+      quotaParamsJson = JSON.stringify(quota_params);
     }
 
     // ---- 用户认证 ----
@@ -110,6 +140,7 @@ Deno.serve(async (req) => {
     };
     if (typeof system_prompt === 'string') patchBody.system_prompt = system_prompt;
     if (llmParamsJson !== null) patchBody.llm_params = llmParamsJson;
+    if (quotaParamsJson !== null) patchBody.quota_params = quotaParamsJson;
 
     const upsertResp = await fetch(`${supabaseUrl}/rest/v1/app_config`, {
       method: 'POST',

@@ -39,16 +39,17 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: '认证失败' }), { headers, status: 401 });
     }
 
-    // ---- 读取统一提示词 + LLM 参数（app_config 单行表，id=1）----
+    // ---- 读取统一提示词 + LLM 参数 + 配额参数（app_config 单行表，id=1）----
     // 使用 service_role 读取（不受 RLS 限制，确保一定能读到配置）
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     const configResp = await fetch(
-      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params,updated_at`,
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params,quota_params,updated_at`,
       { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
     );
 
     let systemPrompt = '';
     let llmParams = {};
+    let quotaParams = {};
     if (configResp.ok) {
       const rows = await configResp.json();
       if (rows && rows.length > 0) {
@@ -56,10 +57,14 @@ Deno.serve(async (req) => {
         if (rows[0].llm_params) {
           try { llmParams = JSON.parse(rows[0].llm_params); } catch (e) { llmParams = {}; }
         }
+        // [v20260812 配额参数] 透传后台编辑用（值为数字，非法时回退空对象）
+        if (rows[0].quota_params) {
+          try { quotaParams = JSON.parse(rows[0].quota_params); } catch (e) { quotaParams = {}; }
+        }
       }
     }
 
-    return new Response(JSON.stringify({ system_prompt: systemPrompt, llm_params: llmParams }), { headers, status: 200 });
+    return new Response(JSON.stringify({ system_prompt: systemPrompt, llm_params: llmParams, quota_params: quotaParams }), { headers, status: 200 });
 
   } catch (error: any) {
     console.error('prompt-get error:', error.message);
