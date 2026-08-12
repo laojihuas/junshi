@@ -385,8 +385,11 @@ Deno.serve(async (req) => {
 
     // [v10] 思考模式生效档位：仅后台默认档（忽略请求体传参，防用户构造请求刷最高档）
     const effectiveThinkingMode: ThinkingMode = llmParams.thinking_mode;
-    // [v20260812 思考预算开关] 后台开关（默认 off）：on 且思考档时注入【思考预算】压缩思考链
-    const effectiveThinkingBudget = llmParams.thinking_budget === 'on';
+    // [v20260812 思考预算三档] 后台开关（默认 auto）：
+    //   on=始终压缩；off=永不压缩；auto=高峰时段(工作日9-12/14-18,价格翻倍)压缩,其余不压缩
+    const rawThinkingBudget = llmParams.thinking_budget || 'auto';
+    const budgetPeak = rawThinkingBudget === 'auto' && isDeepSeekPeak();
+    const effectiveThinkingBudget = rawThinkingBudget === 'on' || budgetPeak;
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
@@ -753,8 +756,10 @@ Deno.serve(async (req) => {
           return o;
         })(),
         thinking_mode: effectiveThinkingMode,
-        // [v20260812 思考预算开关] 验证开关生效（on 且思考档 → system 注入【思考预算】）
-        thinking_budget: effectiveThinkingBudget,
+        // [v20260812 思考预算三档] 验证：raw=后台档位(off/on/auto) active=实际是否压缩 peak=auto 档高峰命中
+        thinking_budget: rawThinkingBudget,
+        budget_active: effectiveThinkingBudget,
+        budget_peak: budgetPeak,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
@@ -2821,15 +2826,35 @@ function mergeDedup(items: any[]): any[] {
 // [v7] 从 app_config 读取统一提示词 + LLM 生成参数（service_role，绕过 RLS）
 //   [v77] 后台仅保留思考模式默认档；采样参数（temperature/惩罚系数/max_tokens）
 //   已由下方六阶段联动表接管，不再从后台读取。
-//   llm_params 存 JSON 字符串：{"thinking_mode":"off","thinking_budget":"off"}
-//   [v20260812 思考预算开关] thinking_budget=on 且思考档 → 注入【思考预算】指令压缩思考链
-//   （v78 方案，v81 因"变笨"回退；现做成后台开关，默认 off 保持自然思考，需要省成本时打开）
+//   llm_params 存 JSON 字符串：{"thinking_mode":"off","thinking_budget":"auto"}
+//   [v20260812 思考预算三档] thinking_budget ∈ auto/on/off，默认 auto：
+//     on 且思考档 → 始终注入【思考预算】指令压缩思考链；
+//     off → 永不注入（自然思考）；
+//     auto → 高峰时段（工作日 9:00-12:00 / 14:00-18:00，DeepSeek 价格翻倍）压缩，其余不压缩
+//   （v78 方案，v81 因"变笨"回退；做成后台开关，auto 为默认：高峰省成本、闲时保质量）
 // ============================================================
 type LlmParams = {
   thinking_mode: ThinkingMode;
-  thinking_budget?: 'on' | 'off';
+  thinking_budget?: 'auto' | 'on' | 'off';
 };
-const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'off' };
+const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'auto' };
+
+// [v20260812 高峰判定] DeepSeek 高峰时段（价格翻倍）：工作日(周一~周五) 9:00-12:00 / 14:00-18:00
+//   Asia/Shanghai 时间；auto 档用它决定是否压缩思考链
+function isDeepSeekPeak(): boolean {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai', weekday: 'short', hour: 'numeric', hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const wd = parts.find((p) => p.type === 'weekday')?.value || '';
+    const h = parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10);
+    if (wd === 'Sat' || wd === 'Sun') return false;
+    return (h >= 9 && h < 12) || (h >= 14 && h < 18);
+  } catch {
+    const h = new Date().getHours();
+    return (h >= 9 && h < 12) || (h >= 14 && h < 18);
+  }
+}
 
 // [v77] 六阶段 × 三采样参数联动（主回复/重生成按 memoryCard.profile.stage 取档）
 //   设计依据：temperature=采样随机性（性格/冒险），presence=话题/词汇翻新，
@@ -2871,8 +2896,10 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     const tm = (typeof raw.thinking_mode === 'string' && THINKING_MODES.has(raw.thinking_mode))
       ? raw.thinking_mode as ThinkingMode
       : DEFAULT_LLM_PARAMS.thinking_mode;
-    // [v20260812 思考预算开关] on/off 枚举校验，非法回退 off
-    const tb = (raw.thinking_budget === 'on') ? 'on' as const : 'off' as const;
+    // [v20260812 思考预算三档] auto/on/off 枚举校验，非法回退 auto（默认）
+    const tb = (raw.thinking_budget === 'on' || raw.thinking_budget === 'auto')
+      ? raw.thinking_budget as 'auto' | 'on'
+      : 'off' as const;
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
       llm_params: { thinking_mode: tm, thinking_budget: tb },

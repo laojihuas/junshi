@@ -390,11 +390,13 @@
                         </select>
                     </label>
                     <label style="font-size:12px;color:var(--muted);display:block;">
-                        思考链压缩（v78 方案复活，省成本；开启后思考会变短，可能"变笨"）
+                        思考链压缩（v78 方案复活；压缩思考可省成本但可能"变笨"）
                         <select id="llm-thinking-budget" class="input" style="margin-top:4px;">
-                            <option value="off">关闭（自然思考，默认）</option>
-                            <option value="on">开启（压缩思考链）</option>
+                            <option value="auto">自动（高峰压缩，默认）</option>
+                            <option value="off">关闭（自然思考）</option>
+                            <option value="on">开启（始终压缩）</option>
                         </select>
+                        <span style="display:block;margin-top:4px;color:#999;">自动 = 高峰时段（工作日 9:00-12:00 / 14:00-18:00，DeepSeek 价格翻倍）压缩，其余时间不压缩</span>
                     </label>
                 </div>
                 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
@@ -746,9 +748,9 @@
                 const lp = data.llm_params || {};
                 document.getElementById('llm-thinking-mode').value =
                     ['off', 'low', 'high', 'max'].includes(lp.thinking_mode) ? lp.thinking_mode : 'off';
-                // [v20260812] 思考链压缩开关
+                // [v20260812] 思考链压缩三档（auto/on/off）
                 document.getElementById('llm-thinking-budget').value =
-                    lp.thinking_budget === 'on' ? 'on' : 'off';
+                    ['auto', 'on', 'off'].includes(lp.thinking_budget) ? lp.thinking_budget : 'auto';
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
