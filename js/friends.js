@@ -6,9 +6,23 @@ const Friends = {
     sessions: [],
     // [长按管理] 当前选中的 session（Action Sheet 用）
     _currentSession: null,
+    // [批量删除] 多选模式状态
+    _batchMode: false,
+    _selectedIds: new Set(),
 
     async load() {
         if (!Auth.currentUser) return;
+        // [批量删除] 列表刷新时兜底退出多选模式（登录态切换等场景防残留）
+        if (this._batchMode) {
+            this._batchMode = false;
+            this._selectedIds = new Set();
+            const btn = document.getElementById('batch-del-btn');
+            if (btn) btn.classList.remove('active');
+            const bar = document.getElementById('batch-bar');
+            if (bar) bar.style.display = 'none';
+            const fab = document.getElementById('fab-add-friend');
+            if (fab) fab.style.display = '';
+        }
         // [v20260805] 刷新配额状态：账号模式刷新账号状态；游客模式刷新设备状态
         if (Auth.isAccount && typeof Auth.refreshAccountStatus === 'function') {
             await Auth.refreshAccountStatus();
@@ -86,8 +100,11 @@ const Friends = {
             const st = this._stageInfo(s);
             const avatarBg = st ? st.color : (s.avatar_color || '#07C160');
             const avatarTitle = st ? ` title="关系阶段：${this._escapeHtml(st.stage)}"` : '';
+            // [批量删除] 多选模式：左侧选择圈 + 选中态
+            const batchChecked = this._batchMode && this._selectedIds.has(s.id);
             return `
-                <div class="friend-item" data-session-id="${s.id}">
+                <div class="friend-item ${this._batchMode ? 'batch-mode' : ''} ${batchChecked ? 'checked' : ''}" data-session-id="${s.id}">
+                    ${this._batchMode ? `<div class="batch-check${batchChecked ? ' checked' : ''}"></div>` : ''}
                     <div class="friend-avatar" style="background: ${avatarBg}"${avatarTitle}>
                         ${initial}
                     </div>
@@ -100,12 +117,19 @@ const Friends = {
             `;
         }).join('');
 
-        // 点击进入聊天
+        // 点击进入聊天 / 批量模式下切换选中
         container.querySelectorAll('.friend-item').forEach(el => {
+            const sessionId = el.dataset.sessionId;
             el.addEventListener('click', () => {
-                const sessionId = el.dataset.sessionId;
+                if (this._batchMode) {
+                    this.toggleSelect(sessionId);
+                    return;
+                }
                 Chat.open(sessionId);
             });
+
+            // [批量删除] 多选模式下不做长按菜单
+            if (this._batchMode) return;
 
             // [长按管理] 桌面端用 mousedown 计时，移动端用 touchstart
             let longPressTimer = null;
@@ -114,7 +138,6 @@ const Friends = {
                 longPressed = false;
                 longPressTimer = setTimeout(() => {
                     longPressed = true;
-                    const sessionId = el.dataset.sessionId;
                     this._showActionSheet(sessionId);
                     // 触觉反馈（支持的设备）
                     if (navigator.vibrate) navigator.vibrate(15);
@@ -139,6 +162,99 @@ const Friends = {
             el.addEventListener('mouseup', endPress);
             el.addEventListener('mouseleave', cancelPress);
         });
+    },
+
+    // [批量删除] 进入多选模式
+    enterBatchMode() {
+        if (!this.sessions || this.sessions.length === 0) {
+            Utils.toast('暂无好友可管理');
+            return;
+        }
+        this._batchMode = true;
+        this._selectedIds = new Set();
+        const btn = document.getElementById('batch-del-btn');
+        if (btn) btn.classList.add('active');
+        const bar = document.getElementById('batch-bar');
+        if (bar) bar.style.display = '';
+        const fab = document.getElementById('fab-add-friend');
+        if (fab) fab.style.display = 'none';
+        this._updateBatchCount();
+        this.render();
+    },
+
+    // [批量删除] 退出多选模式
+    exitBatchMode() {
+        this._batchMode = false;
+        this._selectedIds = new Set();
+        const btn = document.getElementById('batch-del-btn');
+        if (btn) btn.classList.remove('active');
+        const bar = document.getElementById('batch-bar');
+        if (bar) bar.style.display = 'none';
+        const fab = document.getElementById('fab-add-friend');
+        if (fab) fab.style.display = '';
+        this.render();
+    },
+
+    // [批量删除] 切换单项选中
+    toggleSelect(sessionId) {
+        if (!this._batchMode) return;
+        if (this._selectedIds.has(sessionId)) {
+            this._selectedIds.delete(sessionId);
+        } else {
+            this._selectedIds.add(sessionId);
+        }
+        const el = document.querySelector(`.friend-item[data-session-id="${sessionId}"]`);
+        if (el) {
+            el.classList.toggle('checked', this._selectedIds.has(sessionId));
+            const chk = el.querySelector('.batch-check');
+            if (chk) chk.classList.toggle('checked', this._selectedIds.has(sessionId));
+        }
+        this._updateBatchCount();
+    },
+
+    // [批量删除] 全选 / 取消全选
+    toggleSelectAll() {
+        if (this._selectedIds.size === this.sessions.length) {
+            this._selectedIds.clear();
+        } else {
+            this.sessions.forEach(s => this._selectedIds.add(s.id));
+        }
+        this._updateBatchCount();
+        this.render();
+    },
+
+    // [批量删除] 更新底部操作栏计数与全选文字
+    _updateBatchCount() {
+        const n = this._selectedIds.size;
+        const countEl = document.getElementById('batch-del-count');
+        if (countEl) countEl.textContent = '(' + n + ')';
+        const allBtn = document.getElementById('batch-select-all');
+        if (allBtn) allBtn.textContent = n === this.sessions.length ? '取消全选' : '全选';
+    },
+
+    // [批量删除] 确认并批量删除
+    async confirmBatchDelete() {
+        const n = this._selectedIds.size;
+        if (n === 0) {
+            Utils.toast('请先选择要删除的好友');
+            return;
+        }
+        if (!confirm(`确定删除选中的 ${n} 个好友及所有聊天记录？此操作不可恢复`)) return;
+        const ids = [...this._selectedIds];
+        Utils.showLoading();
+        const ok = await DB.deleteSessions(ids);
+        Utils.hideLoading();
+        if (ok) {
+            // 清理窗口历史缓存，防止残留
+            ids.forEach(id => {
+                try { WindowSession.removeFriend(id); } catch (e) {}
+            });
+            Utils.toast('已删除 ' + n + ' 个好友');
+            this.exitBatchMode();
+            await this.load();
+        } else {
+            Utils.toast('删除失败，请重试');
+        }
     },
 
     // 新建好友

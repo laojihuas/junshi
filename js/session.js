@@ -113,6 +113,19 @@ const WindowSession = {
         this._data = null;
     },
 
+    // [批量删除] 删除单个好友的窗口历史（删除好友后清理，防残留缓存）
+    removeFriend(friendSessionId) {
+        this._ensureInit();
+        if (!friendSessionId) return;
+        if (this._data.conversations && this._data.conversations[friendSessionId]) {
+            delete this._data.conversations[friendSessionId];
+        }
+        if (this._data.activeFriend === friendSessionId) {
+            this._data.activeFriend = null;
+        }
+        this._save();
+    },
+
     // ----------------------------------------------------------
     // 最后查看页面（localStorage 持久化，用于杀进程后恢复）
     // 场景：聊天页切到其他 App，浏览器回收页面进程，回来时页面

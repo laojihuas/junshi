@@ -135,6 +135,21 @@ const DB = {
         return true;
     },
 
+    // [批量删除] 删除多个好友会话（一次请求，.in 批量）
+    async deleteSessions(sessionIds) {
+        const sb = getSupabaseClient();
+        if (!sb || !Array.isArray(sessionIds) || sessionIds.length === 0) return false;
+        const { error } = await sb
+            .from('chat_sessions')
+            .delete()
+            .in('id', sessionIds);
+        if (error) {
+            console.error('[DB] deleteSessions error:', error);
+            return false;
+        }
+        return true;
+    },
+
     // [长按管理] 更新会话（昵称 / 备注）
     async updateSession(sessionId, updates) {
         const sb = getSupabaseClient();

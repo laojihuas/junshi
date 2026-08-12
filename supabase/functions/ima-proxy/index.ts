@@ -393,6 +393,9 @@ Deno.serve(async (req) => {
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
 
+    // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
+    //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
+
     // [v20260810 攻略] 自动制定/重制作战攻略（战略层）：
     //   有目标 && 无攻略 && 对话轮数足够 → 自动生成（一次性 ~900 token，写入记忆卡由 updateMemoryCard 落库）
     //   goal 变化 → 旧攻略作废置空，下轮自动按新目标重制
@@ -667,6 +670,8 @@ Deno.serve(async (req) => {
     }
 
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
+    //   [v20260812 仅评价过滤] 记忆/统计走原始 history（资料正常记录，供主回复基于资料展开聊天）；
+    //   只有 extractProfile（关系阶段/画像判定）在函数内部剔除首条资料
     if (session_id) {
       try {
         await updateMemoryCard({
@@ -1304,6 +1309,9 @@ async function updateMemoryCard(ctx: {
   currentQuery?: string;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
+  // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
+  //   → 话题打钩等"关系进展评价"跳过（资料不触发打钩）；其余记忆/统计不受影响
+  const firstRound = !(Array.isArray(ctx.history) && ctx.history.some((h) => h && h.role === 'user'));
 
   // 1) 规则追加对方最近说过的话（去重：与最后一条相同则跳过）
   const lastUser = [...(Array.isArray(ctx.history) ? ctx.history : [])]
@@ -1438,11 +1446,12 @@ async function updateMemoryCard(ctx: {
   // [v20260811 话题打钩] 每轮规则打钩：她本轮的话命中当前阶段未完成话题 → 打钩
   //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
   //   话题命中 = 该话题实质聊过（打钩判定）
+  //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
   {
     const g = card.guide;
     const gph = g && g.status === 'running' ? g.phases[g.current_phase] : null;
     if (gph && Array.isArray(gph.signals)) {
-      const herText = String(ctx.currentQuery || '');
+      const herText = firstRound ? '' : String(ctx.currentQuery || '');
       const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
       let changed = false;
       for (const sig of gph.signals) {
@@ -1473,10 +1482,13 @@ async function updateMemoryCard(ctx: {
 async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[]; topics_done: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
   const curTopics = JSON.stringify(Array.isArray(card.topics_done) ? card.topics_done : []);
-  const recentDialogue = (Array.isArray(history) ? history : [])
+  // [v20260812 仅评价过滤] 首条 user 消息是用户投喂的女生资料（"她叫XX，25岁…"），非女生原话：
+  //   只在本函数（关系阶段/画像判定）剔除首条——主回复上下文/记忆/检索仍保留资料供展开聊天
+  const userMsgs = (Array.isArray(history) ? history : [])
     // [v20260809 归属加固] 只取对方（role=user）的话喂画像提取：
     //   把军师/用户自己发的（assistant）也喂进去 → LLM 偶尔把"自己说的话"当对方画像
-    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
+    .filter((h) => h && h.role === 'user' && typeof h.content === 'string');
+  const recentDialogue = (userMsgs.length > 1 ? userMsgs.slice(1) : [])
     .slice(-6)
     .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');

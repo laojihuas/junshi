@@ -136,6 +136,24 @@ const App = {
             Friends.showCreateModal();
         });
 
+        // [批量删除] 好友列表：头部入口 + 底部操作栏
+        const batchDelBtn = document.getElementById('batch-del-btn');
+        if (batchDelBtn) {
+            batchDelBtn.addEventListener('click', () => Friends.enterBatchMode());
+        }
+        const batchSelectAll = document.getElementById('batch-select-all');
+        if (batchSelectAll) {
+            batchSelectAll.addEventListener('click', () => Friends.toggleSelectAll());
+        }
+        const batchDel = document.getElementById('batch-del');
+        if (batchDel) {
+            batchDel.addEventListener('click', () => Friends.confirmBatchDelete());
+        }
+        const batchCancel = document.getElementById('batch-cancel');
+        if (batchCancel) {
+            batchCancel.addEventListener('click', () => Friends.exitBatchMode());
+        }
+
         // [v20260805 账号体系] 右上角"登入/退出"按钮
         const authBtn = document.getElementById('auth-btn');
         if (authBtn) {
