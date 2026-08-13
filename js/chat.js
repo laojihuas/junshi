@@ -2,7 +2,7 @@
 // 军师 - 聊天窗口模块
 // ============================================================
 
-// [v20260811 话题] 话题库 short 名清单（与后端 TOPIC_LIBRARY 对齐，攻略信号判断用）
+// [v20260811 话题] 话题库 short 名清单（与后端 TOPIC_LIBRARY 对齐，话题打钩判断用）
 //   顺序与后端一致：破冰15/升温15/暧昧10/恋爱10
 const TOPIC_LIBRARY_SHORTS = [
     '名字', '年龄', '照片', '住哪', '工作', '作息', '通勤', '饮食', '做饭', '运动',
@@ -53,10 +53,9 @@ const Chat = {
         } catch (e) {
             this._prevStage = '';
         }
-        // [v20260810 攻略] 攻略面板：打开会话时从 memory_card 读初始攻略状态（已 select *，零额外请求）
-        // [v20260811 折叠] 每次进会话默认折叠（只显示本轮建议话题），用户展开过则保持
+        // [v20260813 攻略已砍] 话题清单面板：进会话默认折叠；打开时无 topics 数据，首轮响应后渲染
         if (typeof this._guideExpanded !== 'boolean') this._guideExpanded = false;
-        this._updateGuidePanel((mc && mc.guide) || null, null);
+        this._updateTopicPanel(null, null);
 
         // [多窗口会话] 记录当前窗口正在对话的好友，
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
@@ -176,7 +175,7 @@ const Chat = {
         // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
         const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
-        // [v20260811 话题] 已聊话题进度（攻略信号打钩来源：话题 short 名列表）
+        // [v20260811 话题] 已聊话题进度（话题打钩来源：话题 short 名列表）
         const doneTopics = Array.isArray(mc.topics_done) ? mc.topics_done : [];
         let topicHtml = '';
         if (doneTopics.length > 0 || (p.stage && p.stage !== '陌生' && p.stage !== '挽回')) {
@@ -730,7 +729,7 @@ const Chat = {
             }
 
             const data = await response.json();
-            // [v20260805] 保存 _debug 供阶段提示/攻略渲染（后端零成本白送字段，非 LLM 内容）
+            // [v20260805] 保存 _debug 供阶段提示/话题清单渲染（后端零成本白送字段，非 LLM 内容）
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
                 // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/陌生不提示）
@@ -745,15 +744,8 @@ const Chat = {
                 }
                 this._prevStage = ns || this._prevStage;
             }
-            // [v20260810 攻略] 攻略状态（后端透传 guide 对象）→ 渲染面板 + 同步缓存
-            if (data && data.guide) {
-                const mcObj = this.memoryCard
-                    ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
-                    : null;
-                if (mcObj) { mcObj.guide = data.guide; this.memoryCard = mcObj; }
-            }
-            // [v20260811 行动机制移除] pick_topic = 本轮建议话题（折叠态显示）
-            this._updateGuidePanel((data && data.guide) || null, (data && data.pick_topic) || null);
+            // [v20260813 攻略已砍] 话题清单（后端透传 data.topics + pick_topic）→ 渲染面板
+            this._updateTopicPanel(data || null, (data && data.pick_topic) || null);
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
@@ -762,143 +754,47 @@ const Chat = {
         }
     },
 
-    // [v20260810 攻略] 攻略面板：聊天页顶部显示当前作战攻略（目标/阶段/信号/进度/控制按钮）
-    //   输入：guide 对象（后端响应 data.guide，形态 {name,goal,status,current_phase,phases,last_eval}）
-    //   或 memory_card 对象（打开会话时，取 .guide 字段，兼容字符串）
-    //   [v20260811 行动机制移除] 第二参数改 pickTopic（本轮建议话题 short，后端 pick_topic 透传）：
-    //     折叠态默认只显示"🎯 本轮建议话题：聊XX"（避免面板太大挡屏幕），
-    //     点"展开完整攻略"才显示阶段/信号/控制按钮；再点收起
-    _updateGuidePanel(src, pickTopic) {
+    // [v20260813 攻略已砍] 话题清单面板：聊天页顶部显示当前关系话题清单（三权重优先 + 打钩态）
+    //   输入：src=后端响应对象（含 data.topics 数组）；pickTopic=本轮建议话题 short（data.pick_topic）
+    //   折叠态默认只显示"🎯 本轮建议话题：聊XX"；展开显示完整清单（聊过的显示 ✓，三权重话题 ★）
+    _updateTopicPanel(src, pickTopic) {
         const el = document.getElementById('chat-guide');
         if (!el) return;
-        let guide = null;
-        if (src && src.guide) {
-            guide = src.guide;
-            if (typeof guide === 'string') { try { guide = JSON.parse(guide); } catch (e) { guide = null; } }
-        } else if (src && src.phases && src.status) {
-            guide = src;
-        }
-        if (!guide || !Array.isArray(guide.phases) || guide.phases.length === 0) {
+        const topics = (src && Array.isArray(src.topics)) ? src.topics : null;
+        if (!topics || topics.length === 0) {
             el.classList.remove('show');
             el.innerHTML = '';
             return;
         }
-        // 状态/阶段变化 toast（仅用户可见，纯前端 UI）
-        const st = guide.status;
-        const phIdx = guide.current_phase;
-        if (this._prevGuideStatus && this._prevGuideStatus !== 'running' && st === 'running') {
-            Utils.toast('攻略已启动：「' + guide.name + '」');
-        } else if (this._prevGuideStatus === 'running' && st === 'done') {
-            Utils.toast('攻略完成！🎉');
-        } else if (this._prevGuideStatus === 'running' && st === 'aborted') {
-            Utils.toast('攻略已终止');
-        } else if (st === 'running' && this._prevGuidePhase != null && phIdx !== this._prevGuidePhase) {
-            Utils.toast('攻略推进：进入阶段「' + guide.phases[phIdx].name + '」');
-        }
-        this._prevGuideStatus = st;
-        this._prevGuidePhase = phIdx;
-        // [v20260811 话题] 已聊话题集合（判断"聊过XX"型信号是否达成）
-        const mcObj = this.memoryCard
-            ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
-            : null;
-        const doneTopics = new Set((mcObj && mcObj.topics_done) || []);
-        const ph = guide.phases[phIdx] || guide.phases[0];
-        // 信号 = 话题 short 名（如"名字"）；命中已聊集合 = 打钩；非话题型信号（行为描述）不勾
-        const isKnownTopic = (s) => TOPIC_LIBRARY_SHORTS.indexOf(s) > -1;
-        const sigHtml = (ph.signals || []).map(s => {
-            const known = isKnownTopic(s);
-            const hit = known && doneTopics.has(s);
-            const label = known ? '聊' + s : s;
-            return '<div class="guide-sig' + (hit ? ' done' : '') + '">' + (hit ? '✓' : '○') + ' ' + this._escapeHtml(label) + '</div>';
+        const stage = (src._debug && src._debug.memory_stage) || '';
+        const stageLabel = stage ? '（' + this._escapeHtml(stage) + '）' : '';
+        const pendingCount = topics.filter(t => !t.done).length;
+        const listHtml = topics.map(t => {
+            const mark = t.weight ? '★' : '○';
+            return '<div class="guide-sig' + (t.done ? ' done' : '') + '">' + (t.done ? '✓' : mark) + ' 聊' + this._escapeHtml(t.short) + '</div>';
         }).join('');
-        const rounds = (ph.rounds_in_phase || 0) + '/' + (ph.stay_max_rounds || 8);
-        const ST = { running: '运行中', paused: '已暂停', done: '已完成', aborted: '已终止' };
-        const btnHtml = guide.status === 'running'
-            ? '<button class="guide-btn" data-act="pause">暂停</button><button class="guide-btn" data-act="abort">终止</button><button class="guide-btn" data-act="reset">重制</button>'
-            : (guide.status === 'paused'
-                ? '<button class="guide-btn primary" data-act="resume">继续</button><button class="guide-btn" data-act="abort">终止</button><button class="guide-btn" data-act="reset">重制</button>'
-                : '<button class="guide-btn primary" data-act="reset">重新制定</button>');
-        // [v20260811 折叠] 完整攻略内容（默认收起；展开才渲染）
         const fullHtml =
-            '<div class="guide-head"><span class="guide-name">攻略「' + this._escapeHtml(guide.name) + '」</span>'
-            + '<span class="guide-status ' + guide.status + '">' + (ST[guide.status] || guide.status) + '</span></div>'
-            + '<div class="guide-goal">目标：' + this._escapeHtml(guide.goal) + '</div>'
-            + '<div class="guide-track">' + guide.phases.map((p, i) =>
-                '<div class="guide-dot' + (i < phIdx ? ' done' : (i === phIdx ? ' cur' : '')) + '"></div>'
-                + (i < guide.phases.length - 1 ? '<div class="guide-line' + (i < phIdx ? ' done' : '') + '"></div>' : '')
-              ).join('') + '</div>'
-            + '<div class="guide-phase"><span class="guide-phase-name">' + this._escapeHtml(ph.name) + '</span>'
-            + '<span class="guide-rounds">' + rounds + ' 轮</span></div>'
-            + '<div class="guide-mission">' + this._escapeHtml(ph.mission) + '</div>'
-            + '<div class="guide-sigs">' + sigHtml + '</div>'
-            + (guide.last_eval ? '<div class="guide-eval">' + this._escapeHtml(guide.last_eval) + '</div>' : '')
-            + '<div class="guide-actions">' + btnHtml + '</div>';
+            '<div class="guide-head"><span class="guide-name">话题清单' + stageLabel + '</span>'
+            + '<span class="guide-status running">' + pendingCount + ' 个待聊</span></div>'
+            + '<div class="guide-sigs">' + listHtml + '</div>';
         const expanded = !!this._guideExpanded;
-        // [v20260811 行动机制移除] 折叠态主体：显示"本轮建议话题"；无建议时给一行极简攻略状态
+        // 折叠态主体：显示"本轮建议话题"；无建议时给一行极简清单状态
         const pickKnown = pickTopic && TOPIC_LIBRARY_SHORTS.indexOf(pickTopic) > -1;
         const pickHtml = pickKnown
             ? '<div class="guide-mini" style="display:flex;align-items:center;gap:6px;"><span style="font-size:12px;">🎯</span><span>本轮建议话题：<b style="color:#FFD54F;">聊' + this._escapeHtml(pickTopic) + '</b></span></div>'
             : '';
-        let mainHtml;
-        if (expanded) {
-            mainHtml = fullHtml;
-        } else {
-            mainHtml = pickHtml
-                ? pickHtml
-                : '<div class="guide-mini">攻略「' + this._escapeHtml(guide.name) + '」运行中 · 阶段「' + this._escapeHtml(ph.name) + '」</div>';
-        }
-        const toggleHtml = '<button class="guide-toggle" data-toggle="1">' + (expanded ? '收起完整攻略 ▴' : '展开完整攻略 ▾') + '</button>';
+        const mainHtml = expanded
+            ? fullHtml
+            : (pickHtml || '<div class="guide-mini">话题清单' + stageLabel + ' · ' + pendingCount + ' 个待聊</div>');
+        const toggleHtml = '<button class="guide-toggle" data-toggle="1">' + (expanded ? '收起清单 ▴' : '展开清单 ▾') + '</button>';
         el.innerHTML = mainHtml + toggleHtml;
         el.classList.add('show');
-        // [v20260811 折叠] 展开/收起切换（重渲染保持状态）
+        // 展开/收起切换（重渲染保持状态）
         const tb = el.querySelector('.guide-toggle');
         if (tb) tb.onclick = () => {
             this._guideExpanded = !this._guideExpanded;
-            this._updateGuidePanel(src, pickTopic);
+            this._updateTopicPanel(src, pickTopic);
         };
-        // 绑定控制按钮（暂停/继续/终止/重制；仅展开态渲染）
-        el.querySelectorAll('.guide-btn').forEach(b => {
-            b.onclick = () => this._guideAction(b.dataset.act);
-        });
-    },
-
-    // [v20260810 攻略] 控制按钮：暂停/继续/终止/重制
-    //   直接改 chat_sessions.memory_card.guide（零后端调用；重制=清空，后端下轮自动重新制定）
-    async _guideAction(action) {
-        if (!this.currentSessionId) {
-            Utils.toast('请先进入一个好友会话');
-            return;
-        }
-        try {
-            const sb = getSupabaseClient();
-            const { data } = await sb.from('chat_sessions').select('memory_card').eq('id', this.currentSessionId).single();
-            if (!data) { Utils.toast('会话不存在'); return; }
-            let mc = data.memory_card
-                ? (typeof data.memory_card === 'string' ? JSON.parse(data.memory_card) : data.memory_card)
-                : {};
-            if (!mc || typeof mc !== 'object') mc = {};
-            if (action === 'reset') {
-                if (mc.guide) delete mc.guide;
-                this._prevGuideStatus = null;
-                this._prevGuidePhase = null;
-            } else if (mc.guide) {
-                if (action === 'pause') mc.guide.status = 'paused';
-                else if (action === 'resume') mc.guide.status = 'running';
-                else if (action === 'abort') mc.guide.status = 'aborted';
-            }
-            const { error } = await sb.from('chat_sessions').update({ memory_card: JSON.stringify(mc) }).eq('id', this.currentSessionId);
-            if (error) {
-                console.error('[军师] 攻略控制失败:', error);
-                Utils.toast('操作失败，请重试');
-                return;
-            }
-            this.memoryCard = mc;
-            this._updateGuidePanel(mc, null);
-            Utils.toast({ pause: '攻略已暂停', resume: '攻略已继续', abort: '攻略已终止', reset: '攻略已清除，下轮对话自动重新制定' }[action] || 'ok');
-        } catch (e) {
-            console.error('[军师] 攻略控制异常:', e);
-            Utils.toast('网络错误，请稍后重试');
-        }
     },
 
     // [统一提示词] 从后台获取当前统一的 system_prompt

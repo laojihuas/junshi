@@ -62,13 +62,14 @@
 //     挑 top4（FACTS_INJECT_MAX），不全量塞——像人按话题想起相关记忆
 //   - _debug 新增 facts_len
 //
-// [v58→v141 战略层演进]（目标引导已删除，攻略接管）
+// [v58→v141→v20260813 战略层演进]（目标引导已删，攻略已砍 → 关系话题清单接管）
 //   - [v141] GOAL_HINTS 目标引导与 ESCALATION 默认推进已删除（从未见效且与攻略重复，浪费 token）
 //   - memory_card.goal 仅剩两个语义：'保持当前关系'（不升级）或 空（默认推进，前端只剩这两个选项）
-//   - 战略驱动唯一来源 = 攻略 guide（自动生成，见 extractGuide；聊满 GUIDE_MIN_ROUNDS 且非"保持当前关系"）
+//   - [v20260813 攻略已砍] 战略驱动 = 关系话题清单（stageTopicList）：消息 → 关系阶段 → 战术 →
+//     关系话题清单（三权重年龄/照片/住哪置顶 + 当前关系期话题）→ 每轮话题建议（pickNearestTopic 纯规则）→ 话术参考
 //   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 追求→暧昧→恋爱
 //     最多升一级；冷淡/回避可降级；拿不准保持
-//   - 战略层(攻略) > 弹药层(锚点/幽默/IOI) 两层叠加（战术层套路已于 2026-08-11 移除）
+//   - 战略层(话题清单) > 弹药层(锚点/幽默/IOI) 两层叠加（战术层套路已于 2026-08-11 移除）
 //
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 架构：战略层(记忆卡 stage 定基调) + 引擎层(pulse/balance/emotion_tone 实时输入)
@@ -213,18 +214,7 @@ const STAGE_VOCAB: Record<string, string[]> = {
 };
 
 // [v11] 根据记忆卡解析当前 M3 战术阶段词表（目标驱动）
-// [v20260810 攻略] 攻略激活时优先按"当前阶段任务"取词（攻略承载目标，goal 引导退居二线）
 function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
-  const guide = memoryCard?.guide;
-  if (guide && guide.status === 'running' && Array.isArray(guide.phases)
-    && guide.current_phase >= 0 && guide.current_phase < guide.phases.length) {
-    const phaseText = (guide.phases[guide.current_phase].mission || '')
-      + ' ' + (guide.phases[guide.current_phase].signals || []).join(' ');
-    const fromPhase = extractKeywords(phaseText)
-      .filter((k) => TOPIC_VOCAB.includes(k))
-      .slice(0, 5);
-    if (fromPhase.length >= 2) return fromPhase; // 阶段任务词 ≥2 个才接管（否则回落目标/阶段推断）
-  }
   const stage = memoryCard?.profile?.stage || '';
   let phase: keyof typeof STAGE_VOCAB = 'attract';
   if (stage === '挽回' || stage === '恋爱') phase = 'comfort';
@@ -413,24 +403,6 @@ Deno.serve(async (req) => {
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
 
-    // [v20260810 攻略] 自动制定/重制作战攻略（战略层）：
-    //   有目标 && 无攻略 && 对话轮数足够 → 自动生成（一次性 ~900 token，写入记忆卡由 updateMemoryCard 落库）
-    //   goal 变化 → 旧攻略作废置空，下轮自动按新目标重制
-    if (memoryCard && llmKey) {
-      try {
-        if (memoryCard.guide && memoryCard.goal && memoryCard.guide.goal !== memoryCard.goal) {
-          memoryCard.guide = null;
-        }
-        if (!memoryCard.guide && memoryCard.goal !== '保持当前关系'
-          && (Array.isArray(history) ? history.length : 0) >= GUIDE_MIN_ROUNDS) {
-          const guide = await extractGuide(llmKey, llmBase, llmModel, memoryCard, history);
-          if (guide) memoryCard.guide = guide;
-        }
-      } catch (e: any) {
-        console.warn('攻略生成失败:', e.message);
-      }
-    }
-
     // [v6 L2] 上下文工程：近详远略压缩
     //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
@@ -539,9 +511,8 @@ Deno.serve(async (req) => {
         //   保证"嗯"在吸引期拿到冷读/打压类弹药、舒适期拿到联系感/共鸣类弹药
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
 
-        // [v20260811 行动机制已移除] 攻略话题清单即行动指南：
-        //   每轮"聊哪个话题"由 buildGuideBlock 注入的本轮话题建议（pickNearestTopic 纯规则）承担，
-        //   不再需要 quest 跨轮布局器（extract_quest LLM 调用已删，省成本）
+        // [v20260813 攻略已砍] 关系话题清单即行动指南：
+        //   每轮"聊哪个话题"由 buildTopicListBlock 注入的本轮话题建议（pickNearestTopic 纯规则）承担
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
         kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
@@ -712,9 +683,9 @@ Deno.serve(async (req) => {
     }
 
     // [v20260812 兴趣引擎] 本轮建议话题回写 interest.topic（供下轮"继续聊/切换"判定；
-    //   buildGuideBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
+    //   buildTopicListBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
     if (memoryCard && memoryCard.interest) {
-      // [v20260812 换话题优先攻略] 换话题模式用 pickSwitchTopic（攻略未聊话题），普通轮用 pickNearestTopic
+      // [v20260813] 换话题模式用 pickSwitchTopic（清单未聊话题），普通轮用 pickNearestTopic
       const pickTopic = switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
       if (pickTopic) memoryCard.interest.topic = pickTopic;
     }
@@ -753,13 +724,11 @@ Deno.serve(async (req) => {
         limit: quotaInfo.limit,
         bonus: quotaInfo.bonus ?? null,
       } : null,
-      // [v20260810 攻略] 攻略状态透传（前端攻略面板渲染；null=无攻略）
-      guide: memoryCard?.guide || null,
-      // [v20260811 行动机制移除] 本轮建议话题透传（前端折叠态显示"聊XX"；null=无攻略/清单聊完）
+      // [v20260813 攻略已砍] 当前关系话题清单透传（前端渲染清单；含打钩态）
+      topics: stageTopicListData(memoryCard),
+      // [v20260813] 本轮建议话题透传（前端折叠态显示"聊XX"；null=清单聊完）
       pick_topic: (() => {
-        const g = memoryCard?.guide;
-        if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-        // [v20260812 换话题优先攻略] 换话题模式与【切换话题】注入保持一致
+        // 换话题模式与【切换话题】注入保持一致
         return switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
       })(),
       _debug: {
@@ -813,7 +782,7 @@ Deno.serve(async (req) => {
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
-        // [v20260811 话题] 已聊话题进度（验证打钩推进）
+        // [v20260811 话题] 已聊话题进度（验证清单打钩）
         topics_done: Array.isArray(memoryCard?.topics_done) ? memoryCard!.topics_done! : [],
         // [v82] 话题停滞状态（验证主动开窗/换话题弹药）：stale_rounds=当前话题已聊轮数, retreating=对方退缩信号
         stale_rounds: topicState.staleRounds,
@@ -844,26 +813,10 @@ Deno.serve(async (req) => {
         balance_direction: memoryCard?.balance?.direction || null,
         emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
-        // [v20260810 攻略] 攻略状态（验证攻略注入/推进）：status + 当前阶段 + 已耗轮次
-        guide_status: memoryCard?.guide?.status || null,
-        guide_phase: (() => {
-          const g = memoryCard?.guide;
-          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-          const ph = g.phases[g.current_phase];
-          return ph ? `${g.current_phase + 1}/${g.phases.length} ${ph.name}` : null;
-        })(),
-        guide_rounds: (() => {
-          const g = memoryCard?.guide;
-          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-          const ph = g.phases[g.current_phase];
-          return ph ? `${ph.rounds_in_phase || 0}/${ph.stay_max_rounds || 8}` : null;
-        })(),
-        guide_eval: memoryCard?.guide?.last_eval || null,
-        // [v20260811 话题] 本轮建议话题（验证每轮话题引导；null=无攻略/清单已聊完）
+        // [v20260813 攻略已砍] 话题清单验证：当前关系清单未聊数 + 本轮建议话题
+        topic_pending: stageTopicList((memoryCard?.profile?.stage) || '陌生', memoryCard).length,
         pick_topic: (() => {
-          const g = memoryCard?.guide;
-          if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-          // [v20260812 换话题优先攻略] 换话题模式与【切换话题】注入保持一致
+          // 换话题模式与【切换话题】注入保持一致
           return switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
         })(),
         folder_hs: !!kbFolders?.hs,
@@ -1142,29 +1095,6 @@ type PulseState = {
   avg_gap_min?: number;   // 近 5 轮平均回复间隔（分钟，可选项）
 };
 
-// [v20260810 攻略] 作战攻略（战略层）：把"皮球式被动应答"升级为"带剧本的主动推进"
-//   三层结构：攻略(总目标) → 阶段(任务/信号/安全阀/预案) → 战术(弹药)
-//   信号驱动推进：无时间表/无 deadline——阶段全部成功信号达成才进下一阶段；
-//   stay_max_rounds 仅作安全阀（不达标超限 → 执行 exit_plan 切换打法，绝不作为推进条件）；
-//   [v20260811 话题] signals 改为话题 short 名（TOPIC_LIBRARY），不再用里程碑
-type GuidePhase = {
-  name: string;              // 阶段名（像攻略关卡，如"舒适感铺垫"）
-  mission: string;           // 本阶段任务（≤60字，注入 system 的行动方向）
-  signals: string[];         // [v20260811] 话题清单 3-6 条（话题 short 名，聊过即打钩）
-  stay_max_rounds: number;   // 安全阀：不达标超限 → exit_plan（不推进）
-  rounds_in_phase: number;   // 已耗轮次（每轮回复后 +1）
-  exit_plan: string;         // 不达标预案（≤40字，如"降低推进浓度回归纯聊天3轮再试"）
-};
-type GuideState = {
-  name: string;              // 攻略名（≤20字）
-  goal: string;              // 总目标（来自 memory_card.goal）
-  status: 'running' | 'paused' | 'done' | 'aborted';
-  current_phase: number;     // 当前阶段下标
-  started_at: string;
-  phases: GuidePhase[];
-  last_eval?: string;        // 最近一次进度评估摘要（供前端面板显示）
-};
-
 // [v11] 话题主权引擎（线上"框架"量化：谁在追谁）
 type BalanceState = {
   direction: 'self_pursuing' | 'balanced' | 'user_pursuing'; // 用户需求感外露 / 均衡 / 对方主动
@@ -1189,15 +1119,13 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / 保持当前关系 / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
-  // [v20260811 话题清单] 已聊过话题（short 名，如 '名字'/'年龄'）——攻略信号"聊过XX"判定用
+  // [v20260811 话题清单] 已聊过话题（short 名，如 '名字'/'年龄'）——话题清单"聊过XX"打钩用
   //   由 extractProfile LLM 低频判定 + 每轮规则打钩（topicHit + 权重话题 topicResultHit）共同写入
   topics_done?: string[];
   // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
-  // [v20260810 攻略] 作战攻略（战略层）：信号驱动推进的长期剧本（自动生成，见 extractGuide）
-  guide?: GuideState | null;
   // [v20260812 兴趣引擎] 她对当前话题的投入度状态（兴趣驱动切换：聊得开心继续/连续2次低兴趣切新话题）
   interest?: InterestState;
   updated_at?: string;
@@ -1207,10 +1135,7 @@ type MemoryCard = {
 const FACTS_MAX = 20;          // 长期记忆上限（超了淘汰最久没提的）
 const FACTS_INJECT_MAX = 3;    // 每轮按相关度最多注入几条（v79.2 4→3 收紧）
 
-// [v20260810 攻略] 攻略常量
-const GUIDE_MIN_ROUNDS = 5;    // 自动制定攻略的最低对话轮数（history 消息条数，双方合计；画像够用再出攻略）
-const GUIDE_MIN_PHASES = 3;    // 攻略阶段数下限
-const GUIDE_MAX_PHASES = 5;    // 攻略阶段数上限
+// [v20260813 攻略已砍] 话题库改为按关系阶段直接取清单（不再经攻略包装）
 
 // [v20260811 话题清单] 话题库（攻略清单素材库，源文件 话题.txt，共 50 个）
 //   4 期分组：破冰15 / 升温15 / 暧昧10 / 恋爱10；每话题带打钩关键词 kws
@@ -1404,13 +1329,13 @@ async function judgeInterestLow(
 }
 
 // 每轮兴趣判定入口：更新 interest 状态（streak 递增/归零），不落库（随 updateMemoryCard 写回）
-//   返回更新后的 InterestState；无攻略/换话题/无 query → 返回原状态
+//   返回更新后的 InterestState；无卡/换话题/无 query → 返回原状态
+//   [v20260813 攻略已砍] 去掉 guide 依赖：话题机制独立运行（连续低兴趣切换由话题清单驱动）
 async function judgeInterest(
   llmKey: string, llmBase: string, llmModel: string,
   card: MemoryCard | null, query: string, history: any[]
 ): Promise<InterestState | null> {
-  const g = card?.guide;
-  if (!card || !g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
+  if (!card) return null;
   const q = String(query || '').trim();
   if (!q) return null;
   const prev: InterestState = card.interest || { streak: 0, topic: null, at: '' };
@@ -1491,8 +1416,10 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (parsed && typeof parsed === 'object') {
       // [2026-08-11] 存量清洗：旧套路字段 strategy、旧里程碑字段 milestones 已废弃，读入即剥离，写回时自然消失
+      // [2026-08-13] 攻略 guide 已砍，存量卡读入即剥离
       delete parsed.strategy;
       delete parsed.milestones;
+      delete parsed.guide;
       return parsed;
     }
     return null;
@@ -1649,53 +1576,28 @@ async function updateMemoryCard(ctx: {
         card.topics_done = extracted.topics_done;
       }
     }
-    // [v20260810 攻略] LLM 低频信号评估（与画像同周期 ~5min）：判定行为型信号是否达成 → 全部达成即推进
-    if (card.guide && card.guide.status === 'running') {
-      const ev = await evalGuideSignals(ctx.llmKey, ctx.llmBase, ctx.llmModel, card, ctx.history);
-      if (ev) {
-        const gph = card.guide.phases[card.guide.current_phase];
-        if (gph && Array.isArray(gph.signals) && gph.signals.length > 0 && ev.done.length >= gph.signals.length) {
-          advanceGuide(card, ev.summary); // 全部信号达成 → 推进/完成
-        } else if (ev.summary) {
-          card.guide.last_eval = ev.summary; // 未达成 → 只更新评估摘要
-        }
-      }
-    }
     card.updated_at = new Date().toISOString();
   }
 
-  // [v20260810 攻略] 攻略进度（每轮规则）：话题型信号判定 + 安全阀（超限执行预案不推进）
-  if (card.guide && card.guide.status === 'running') {
-    updateGuideProgress(card, ctx.history);
-  }
-
-  // [v20260811 话题打钩] 每轮规则打钩：她本轮的话命中当前阶段未完成话题 → 打钩
+  // [v20260813 攻略已砍] 话题打钩：她本轮的话命中"当前关系话题清单"里未完成话题 → 打钩
   //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
-  //   话题命中 = 该话题实质聊过（打钩判定）
   //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
   {
-    const g = card.guide;
-    const gph = g && g.status === 'running' ? g.phases[g.current_phase] : null;
-    if (gph && Array.isArray(gph.signals)) {
-      const herText = firstRound ? '' : String(ctx.currentQuery || '');
-      const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
-      let changed = false;
-      for (const sig of gph.signals) {
-        const t = topicDef(sig);
-        if (!t || done.has(sig)) continue;
-        if (herText && topicHit(t, herText) && topicResultHit(t, herText)) {
-          done.add(sig);
+    const stage = (card.profile && card.profile.stage) || '陌生';
+    const list = stageTopicList(stage, card);
+    const herText = firstRound ? '' : String(ctx.currentQuery || '');
+    const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+    let changed = false;
+    if (herText) {
+      for (const t of list) {
+        if (done.has(t.short)) continue;
+        if (topicHit(t, herText) && topicResultHit(t, herText)) {
+          done.add(t.short);
           changed = true;
         }
       }
-      if (changed) {
-        card.topics_done = [...done];
-        // 打钩后立即检查本阶段是否全部达成 → 推进（纯规则，无需等 LLM）
-        if (gph.signals.every((sig) => isTopicSignal(sig) && topicSignalDone(sig, done))) {
-          advanceGuide(card, `本阶段话题已全部聊过，攻略推进`);
-        }
-      }
     }
+    if (changed) card.topics_done = [...done];
   }
 
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
@@ -1764,19 +1666,42 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
 }
 
 // ============================================================
-// [v20260810 攻略] 作战攻略：生成 / 信号评估 / 推进 / 安全阀
-//   信号驱动（无时间表）：阶段全部成功信号达成才推进；stay_max_rounds 仅安全阀
-//   [v20260811 话题] 攻略 signals 改为"聊过XX话题"（话题 short 名，来自 TOPIC_LIBRARY）
+// [v20260813 攻略已砍] 关系话题清单（替代攻略 signals）
+//   链路：消息 → 关系阶段(stage) → 战术 → 关系话题清单 → 话术切块参考
+//   清单构成：三权重话题（年龄/照片/住哪，未聊）置顶 + 当前关系期话题（未聊）
+//   打钩/每轮话题建议/切换话题全部基于该清单（纯规则零 LLM，无攻略状态机）
 // ============================================================
 
-// 信号是否为话题型（信号文本 = TOPIC_LIBRARY 里的 short 名）
-function isTopicSignal(sig: string): boolean {
-  return !!topicDef(sig);
+// 关系阶段 → 话题期映射（六关系阶段 → 话题库 4 期）
+const STAGE_TOPIC_PHASE: Record<string, 'break' | 'warm' | 'flirt' | 'love'> = {
+  陌生: 'break',
+  朋友: 'break',
+  追求: 'warm',
+  暧昧: 'flirt',
+  恋爱: 'love',
+  挽回: 'warm',   // 挽回 = 重建舒适感/升温，用好感升温期话题
+};
+
+// 当前关系的话题清单（未打钩的）：三权重话题置顶 + 当前关系期话题
+//   权重话题跨期保留：无论哪个关系阶段，年龄/照片/住哪没聊出结果就一直在清单最前
+function stageTopicList(stage: string, card: MemoryCard | null): TopicDef[] {
+  const phase = STAGE_TOPIC_PHASE[stage] || 'break';
+  const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
+  const weighted = TOPIC_LIBRARY.filter((t) => t.weight && !done.has(t.short));
+  const rest = TOPIC_LIBRARY.filter((t) => t.stage === phase && !t.weight && !done.has(t.short));
+  return [...weighted, ...rest];
 }
 
-// 话题型信号是否已达成（对应话题在已聊集合里）
-function topicSignalDone(sig: string, done: Set<string>): boolean {
-  return done.has(sig);
+// 关系话题清单数据（响应 topics 字段，前端渲染清单用）：含打钩态（聊过的也能看到 ✓）
+function stageTopicListData(card: MemoryCard | null): Array<{ short: string; name: string; done: boolean; weight?: string }> {
+  const stage = (card?.profile && card.profile.stage) || '陌生';
+  const phase = STAGE_TOPIC_PHASE[stage] || 'break';
+  const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
+  const weighted = TOPIC_LIBRARY.filter((t) => t.weight);
+  const rest = TOPIC_LIBRARY.filter((t) => t.stage === phase && !t.weight);
+  return [...weighted, ...rest].map((t) => ({
+    short: t.short, name: t.name, done: done.has(t.short), weight: t.weight,
+  }));
 }
 
 // [v20260811] 她的话是否让某话题"实质聊过"（规则打钩）：命中关键词 + 权重话题需聊出结果
@@ -1785,185 +1710,27 @@ function topicDoneByText(topic: TopicDef | undefined, text: string): boolean {
   return topicHit(topic, text) && topicResultHit(topic, text);
 }
 
-// 推进/完成攻略（规则版与 LLM 版共用；current_phase 越界视为完成）
-function advanceGuide(card: MemoryCard, evalSummary?: string): void {
-  const g = card.guide;
-  if (!g || !Array.isArray(g.phases) || g.phases.length === 0) { if (g) g.status = 'done'; return; }
-  if (g.current_phase + 1 >= g.phases.length) {
-    g.status = 'done';
-    g.last_eval = evalSummary || `攻略完成：${g.phases[g.current_phase].name} 全部信号达成`;
-  } else {
-    g.current_phase += 1;
-    g.last_eval = evalSummary || `已推进到「${g.phases[g.current_phase].name}」`;
-  }
-}
+// [v20260813 攻略已砍] advanceGuide / updateGuideProgress / evalGuideSignals / extractGuide 已整体删除
+//   （攻略状态机 + LLM 制定攻略 + LLM 低频评估全部移除，省 ~900 token/次 的攻略生成与定期评估调用）
 
-// 每轮规则进度：话题型信号判定 + 安全阀（超限执行预案，不推进）
-function updateGuideProgress(card: MemoryCard, history: any[]): void {
-  const g = card.guide;
-  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return;
-  const ph = g.phases[g.current_phase];
-  if (!ph) { g.status = 'done'; return; }
-  ph.rounds_in_phase = (ph.rounds_in_phase || 0) + 1;
-  const signals = Array.isArray(ph.signals) ? ph.signals : [];
-  // 话题型信号规则判定：全部信号都是话题型 且 全部已聊过 → 直接推进
-  // （含非话题型行为信号时规则判定不了，交给 LLM 低频评估 evalGuideSignals）
-  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
-  if (signals.length > 0 && signals.every((sig) => isTopicSignal(sig) && topicSignalDone(sig, done))) {
-    advanceGuide(card);
-    return;
-  }
-  // 安全阀：超限未达标 → 执行预案（不推进，重置轮次开始新一轮尝试）
-  const maxRounds = ph.stay_max_rounds || 8;
-  if (ph.rounds_in_phase >= maxRounds) {
-    g.last_eval = `「${ph.name}」已耗 ${ph.rounds_in_phase}/${maxRounds} 轮未达标，按预案：${ph.exit_plan || '切换话题方向继续'}（信号不变，重新计数）`;
-    ph.rounds_in_phase = 0;
-  }
-}
-
-// [v20260810 攻略] LLM 低频评估当前阶段信号（行为型信号需要语义判断；与画像提取同周期 ~5min）
-async function evalGuideSignals(
-  llmKey: string, llmBase: string, llmModel: string,
-  card: MemoryCard, history: any[]
-): Promise<{ done: number[]; summary: string } | null> {
-  const g = card.guide;
-  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-  const ph = g.phases[g.current_phase];
-  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
-  const recent = (Array.isArray(history) ? history : [])
-    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
-    .slice(-6)
-    .map((h) => `对方：${truncateText(String(h.content || ''), 150)}`)
-    .join('\n');
-  const prompt = `你是恋爱攻略的进度评估助手。用户正在按攻略推进与女生的聊天。\n`
-    + `当前攻略阶段「${ph.name}」，任务：${ph.mission}\n`
-    + `成功信号（编号从 1 开始，逐条判定）：\n`
-    + ph.signals.map((sig, i) => `${i + 1}. ${sig}`).join('\n')
-    + `\n最近对方说的话：\n${recent || '（无）'}\n`
-    + `要求：只根据"对方已经做了什么/聊了什么"判定信号是否达成（话题是否已实质聊过——聊出具体内容而非提一嘴；权重话题年龄/照片/住哪需聊出结果：知道具体年龄/发过照片/知道住哪），拿不准的不算达成；只输出 JSON：{"done":[已达成信号编号数组，无则[]],"summary":"一句话进度评估，≤40字"}，不要任何其他文字。`;
-  try {
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 200, _stage: 'guide_eval',
-    });
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
-    const p = JSON.parse(content.slice(start, end + 1));
-    const done = Array.isArray(p.done)
-      ? p.done.map((n: any) => parseInt(n, 10)).filter((n: number) => n >= 1 && n <= ph.signals.length)
-      : [];
-    return {
-      done,
-      summary: typeof p.summary === 'string' ? p.summary.slice(0, 40) : '',
-    };
-  } catch (e: any) {
-    console.warn('evalGuideSignals failed:', e.message);
-    return null;
-  }
-}
-
-// [v20260810 攻略] 制定作战攻略（LLM 一次性生成，信号驱动无时间表）
-//   [v20260811 话题] 输入改为话题库：LLM 按阶段/性格/目标/最近对话从 TOPIC_LIBRARY 挑话题当 signals
-//   年龄/照片/住哪（权重话题）必须排进前两个阶段（列表页可见，最容易自然聊到）
-async function extractGuide(
-  llmKey: string, llmBase: string, llmModel: string,
-  card: MemoryCard, history: any[]
-): Promise<GuideState | null> {
-  const p = card.profile || {};
-  const doneTopics = Array.isArray(card.topics_done) ? card.topics_done : [];
-  const recent = (Array.isArray(history) ? history : [])
-    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
-    .slice(-8)
-    .map((h) => `对方：${truncateText(String(h.content || ''), 120)}`)
-    .join('\n');
-  // 话题库按期分组喂给 LLM（短名清单，便于挑选）
-  const topicPool = TOPIC_LIBRARY.map((t) => t.short).join('/');
-  const weightTopics = TOPIC_LIBRARY.filter((t) => t.weight).map((t) => t.short).join('/');
-  const prompt = `你是恋爱攻略策划师。为「用户本人」制定一份和当前这位女生聊天的作战攻略（像游戏攻略：有明确目的地和路线，军师主动推进，不靠对方踢一下动一下）。\n`
-    + `当前情况：\n`
-    + `- 关系阶段：${p.stage || '陌生'}\n`
-    + `- 对方性格：${p.personality || '未知'}\n`
-    + `- 关系背景：${p.relationship_note || '无'}\n`
-    + `- 用户设定的总目标：${card.goal || '推进恋爱'}\n`
-    + `- 已聊过话题：${doneTopics.join('/') || '无'}\n`
-    + `- 话题库（short 名清单，只能从这里选）：${topicPool}\n`
-    + `- 最近对方说的话：${recent || '（无）'}\n`
-    + `要求（严格遵守）：\n`
-    + `1. 规划 ${GUIDE_MIN_PHASES}~${GUIDE_MAX_PHASES} 个阶段，从当前状态一步步通往总目标；阶段名像攻略关卡（如"破冰建立连接"→"舒适感铺垫"→"暧昧试探"→"邀约落地"）。\n`
-    + `2. 每个阶段给出：mission（本阶段任务，≤60字，可执行的动作方向）、signals（成功信号 3~6 条 = 本阶段要聊的话题 short 名，从「话题库」里选最贴合本阶段关系状态的 3~6 个；话题名原样输出，全部聊过才进下一阶段）、stay_max_rounds（本阶段最多停留轮数 3~10，超了还没达标就按预案换打法，不硬耗不纠缠）、exit_plan（不达标预案，≤40字，如"降低推进浓度回归纯聊天3轮再试"）。\n`
-    + `3. 【权重硬约束】「${weightTopics}」这三个话题必须出现在前两个阶段的 signals 里（它们在好友列表昵称旁可见，最容易自然聊到，优先拿到；已聊过的跳过）。\n`
-    + `4. 话题按关系递进分配：破冰期放轻松信息类（名字/工作/饮食/作息等），升温期放生活类（周末/宠物/旅游/家庭等），暧昧期放感情类（前任/择偶/恋爱观等），恋爱期放深关系类（约会/金钱观/未来/结婚等）；已聊过的话题不用再列。\n`
-    + `5. 信号驱动：禁止写时间/天数要求，只写可观察的达成信号；阶段之间必须有递进，最后一阶段信号全达成 = 攻略完成。\n`
-    + `6. 若总目标是挽回/修复：第一阶段必须是"稳情绪重建信任"，禁止调侃/打压类话题信号，且各阶段节奏都更温和。\n`
-    + `只输出 JSON：{"name":"攻略名(≤20字)","goal":"总目标(≤30字)","phases":[{"name":"阶段名","mission":"...","signals":["话题short名","..."],"stay_max_rounds":n,"exit_plan":"..."}]}，不要任何其他文字。`;
-  try {
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.4, maxTokens: 900, _stage: 'extract_guide',
-    });
-    const start = content.indexOf('{');
-    const end = content.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
-    const g = JSON.parse(content.slice(start, end + 1));
-    const name = typeof g.name === 'string' ? g.name.trim().slice(0, 20) : '恋爱推进攻略';
-    const validShorts = new Set(TOPIC_LIBRARY.map((t) => t.short));
-    const phases = (Array.isArray(g.phases) ? g.phases : [])
-      .filter((ph: any) => ph && typeof ph === 'object' && typeof ph.name === 'string')
-      .slice(0, GUIDE_MAX_PHASES)
-      .map((ph: any) => ({
-        name: String(ph.name).trim().slice(0, 20),
-        mission: String(ph.mission || '').trim().slice(0, 60),
-        signals: (Array.isArray(ph.signals) ? ph.signals : [])
-          .map((s: any) => (typeof s === 'string' ? s.trim().slice(0, 30) : ''))
-          // [v20260811] 只保留话题库里的合法 short 名（LLM 偶发自创/带"聊"前缀 → 剥前缀再匹配）
-          .map((s: string) => (s.startsWith('聊') ? s.slice(1) : s))
-          .filter((s: string) => s.length > 0 && validShorts.has(s))
-          .slice(0, 6),
-        stay_max_rounds: Math.max(3, Math.min(10, parseInt(ph.stay_max_rounds, 10) || 6)),
-        rounds_in_phase: 0,
-        exit_plan: String(ph.exit_plan || '降低推进浓度，回归轻松聊天几轮再试').trim().slice(0, 40),
-      }));
-    if (phases.length < GUIDE_MIN_PHASES) return null; // 阶段数不足 = 生成失败
-    return {
-      name,
-      // [v141] 攻略目标固定取用户 goal；无 goal（默认推进）= 统一"推进恋爱"，不用 LLM 自拟
-      goal: String(card.goal || '推进恋爱').slice(0, 30),
-      status: 'running',
-      current_phase: 0,
-      started_at: new Date().toISOString(),
-      phases,
-      last_eval: `攻略已制定：${phases.length} 个阶段，当前「${phases[0].name}」`,
-    };
-  } catch (e: any) {
-    console.warn('extractGuide failed:', e.message);
-    return null;
-  }
-}
-
-// [v20260810 攻略] 当前攻略注入块（buildSystemContent 用）：替代 GOAL_HINTS/ESCALATION
-//   [v20260811 话题] signals = 话题 short 名；打钩显示"聊过"；本轮话题建议（纯规则）
-function buildGuideBlock(guide: GuideState, ph: GuidePhase, doneTopics: string[], card?: MemoryCard | null, recentText?: string, switchTopic?: boolean): string {
-  const doneSet = new Set(doneTopics);
-  const sigList = (ph.signals || []).map((sig) => {
-    const t = topicDef(sig);
-    const hit = t ? topicSignalDone(sig, doneSet) : false;
-    const label = t ? `聊${sig}` : sig;
-    return `  ${hit ? '✓' : '○'} ${label}`;
-  }).join('\n');
-  // [v20260811 行动机制移除] 本轮建议话题（纯规则）：未聊清单里最接近当前对话的一个
-  //   [v20260812 换话题优先攻略] 换话题模式 → 用 pickSwitchTopic 定的攻略话题（与【切换话题】一致）
+// [v20260813 攻略已砍] 关系话题清单注入块（buildSystemContent 用）：替代原【当前攻略】块
+//   按当前关系阶段取清单（三权重置顶），带打钩态与每轮话题建议（纯规则）
+function buildTopicListBlock(card: MemoryCard | null, recentText?: string, switchTopic?: boolean): string {
+  const stage = (card?.profile && card.profile.stage) || '陌生';
+  const list = stageTopicList(stage, card);
+  const listHtml = list.length > 0
+    ? list.map((t) => `  ${t.weight ? '★' : '○'} 聊${t.short}${t.weight ? `（${TOPIC_WEIGHT_LABEL[t.weight]}，聊出结果才打钩）` : ''}`).join('\n')
+    : '  （本阶段话题已全部聊过 ✓）';
+  // 本轮建议话题（纯规则）：未聊清单里最接近当前对话的一个；换话题模式用 pickSwitchTopic
   const pick = card ? (switchTopic ? pickSwitchTopic(card) : pickNearestTopic(card, recentText)) : null;
   const pickLine = pick
     ? `\n- 【本轮话题建议】优先自然把话题往「聊${pick}」上带（结合当前对话顺势引出，别生硬；她聊到相关就直接深入）。\n`
     : '';
-  const maxRounds = ph.stay_max_rounds || 8;
-  return `\n\n【当前攻略】(战略层，最高优先级，替代目标引导)\n`
-    + `- 你在执行攻略「${guide.name}」，总目标：${guide.goal}。你不是被动的应声虫——每一轮都带着攻略目的在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急。\n`
-    + `- 当前阶段 ${guide.current_phase + 1}/${guide.phases.length}「${ph.name}」：${ph.mission}\n`
-    + `- 本阶段话题清单（全部聊过才进入下一阶段）：\n${sigList}\n${pickLine}`
-    + `- 已耗 ${ph.rounds_in_phase || 0}/${maxRounds} 轮（超限未达成将按预案切换打法，不硬耗不纠缠）。\n`
-    + `- 主动引导：按阶段任务主动推进——优先聊本阶段话题清单里未打钩的话题（自然带入，别硬转）；她对该话题兴趣高（回应积极/话变长/主动延伸/接梗）就继续深入聊、顺着延伸，别急着换话题；她连续两次兴趣低下时，系统已自动把【本轮话题建议】切到清单下一个，顺着建议自然带过去即可，不硬聊不纠缠。\n`
+  return `\n\n【本轮话题清单】(当前关系：${stage}，战略方向)\n`
+    + `- 话题清单（★=优先话题，未打钩优先聊；聊过的自动打钩✓）：\n${listHtml}\n${pickLine}`
+    + `- 规则：她对该话题兴趣高（回应积极/话变长/主动延伸/接梗）就继续深入聊、顺着延伸，别急着换话题；她连续两次兴趣低下时，系统已自动把【本轮话题建议】切到清单下一个，顺着建议自然带过去即可，不硬聊不纠缠。\n`
     + `- 权重话题「年龄/照片/住哪」要聊出结果才算完成（知道她具体年龄/拿到照片/知道她住哪），其余话题聊出实质内容即可打钩。\n`
-    + `- 她冷淡/回避就执行预案（${ph.exit_plan || '降速换话题养氛围'}）再找机会，绝不硬推、绝不表白、绝不逼问。`;
+    + `- 你带着方向感在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急；她冷淡/回避就降速换话题养氛围再找机会，绝不硬推、绝不表白、绝不逼问。`;
 }
 
 // [v57] 合并新事实到长期记忆：去重(互含视为同条并刷新提及时间) + 上限淘汰(按提及新旧)
@@ -1986,25 +1753,23 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 }
 
 // ============================================================
-// [v20260811 行动机制已移除] 每轮话题建议（纯规则零 LLM）
-//   攻略话题清单即行动指南：每轮按当前对话从当前阶段未聊话题里挑"最接近"的一个
-//   注入 buildGuideBlock 供主回复"优先聊它"；聊过即打钩，清单聊完自动推进攻略
-//   不再需要 quest 跨轮布局器（extract_quest LLM 调用已删，省成本）
+// [v20260813 攻略已砍] 每轮话题建议（纯规则零 LLM）
+//   基于"关系话题清单"（三权重置顶 + 当前关系期话题）：
+//   每轮按当前对话从清单未聊话题里挑"最接近"的一个注入 buildTopicListBlock
+//   供主回复"优先聊它"；聊过即打钩，清单聊完显示已完成
 // ============================================================
 
-// [v20260811] 从攻略当前 phase 选"本轮建议话题"：
+// [v20260811] 从关系话题清单选"本轮建议话题"：
 //   [v20260812 兴趣驱动改造] 优先级（用户在聊的高兴话题不被强行打断）：
 //   ① 兴趣高（interest.streak<2）且有正在聊的话题未打钩 → 继续聊它（权重话题也让路）
 //   ② 连续 2 次低兴趣（streak≥2）→ 排除当前话题，从清单选下一个（权重优先/重叠/兜底）
 //   ③ 无正在聊话题 → 原逻辑：权重话题优先 → 关键词重叠 → 兜底清单第一个
-//   返回 null = 无未聊话题（本阶段清单聊完，等推进下一阶段）
+//   返回 null = 无未聊话题（清单聊完）
 function pickNearestTopic(card: MemoryCard, recentText?: string): string | null {
-  const g = card.guide;
-  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-  const ph = g.phases[g.current_phase];
-  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
-  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
-  const pending = ph.signals.filter((sig) => isTopicSignal(sig) && !done.has(sig));
+  if (!card) return null;
+  const stage = (card.profile && card.profile.stage) || '陌生';
+  const list = stageTopicList(stage, card);
+  const pending = list.map((t) => t.short);
   if (pending.length === 0) return null;
   const cur = card.interest?.topic || null;
   const streak = card.interest?.streak || 0;
@@ -2032,19 +1797,16 @@ function pickNearestTopic(card: MemoryCard, recentText?: string): string | null 
   return candidates[0]; // 兜底：取候选第一个未聊话题
 }
 
-// [v20260812 换话题优先攻略] 用户点"换话题"按钮（/换话题）时专用选话题：
-//   优先从攻略当前阶段"未聊过"的话题里定一个（排除正在聊的，权重话题优先，兜底第一个），
-//   让【切换话题】开场白围绕攻略话题抛，而不是 LLM 自由发挥；无攻略/清单聊完 → 退回原逻辑
+// [v20260813] 用户点"换话题"按钮（/换话题）时专用选话题：
+//   优先从当前关系话题清单"未聊过"的话题里定一个（排除正在聊的，权重话题优先，兜底第一个），
+//   让【切换话题】开场白围绕清单话题抛，而不是 LLM 自由发挥；清单聊完 → 退回原逻辑
 function pickSwitchTopic(card: MemoryCard | null | undefined): string | null {
   if (!card) return null;
-  const g = card.guide;
-  if (!g || g.status !== 'running' || !Array.isArray(g.phases)) return null;
-  const ph = g.phases[g.current_phase];
-  if (!ph || !Array.isArray(ph.signals) || ph.signals.length === 0) return null;
-  const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
+  const stage = (card.profile && card.profile.stage) || '陌生';
+  const list = stageTopicList(stage, card);
   const cur = card.interest?.topic || null;
   // 未聊 + 排除正在聊的（用户点换话题=不想聊当前这个）
-  const pending = ph.signals.filter((sig) => isTopicSignal(sig) && !done.has(sig) && sig !== cur);
+  const pending = list.map((t) => t.short).filter((sig) => sig !== cur);
   if (pending.length === 0) {
     // 没别的可换（只剩当前/清单已聊完）→ 退回 pickNearestTopic 原逻辑（可能继续聊或 null）
     return pickNearestTopic(card, '');
@@ -2489,32 +2251,23 @@ function buildSystemContent(opts: {
   // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
   // [v58/v61→v145] 关系目标 + 已聊话题数据（战略层）：
-  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；topics_done 仅作数据（攻略 signals 判定/生成/面板）
+  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；topics_done 仅作话题清单打钩数据
   const goal = opts.memoryCard?.goal || '';
   const doneTopics = Array.isArray(opts.memoryCard?.topics_done) ? (opts.memoryCard!.topics_done!) : [];
 
-  // [v20260810 攻略] 攻略激活 → 注入【当前攻略】块（战略层唯一驱动）：
-  //   [v141] 目标引导（GOAL_HINTS）与默认推进（ESCALATION）已删除——从未见效且与攻略重复，浪费 token；
-  //   [v145] 里程碑引导块（buildMilestoneBlock）已删除——收集引导/进度点亮全部并入攻略 signals；
-  //   [v20260811 话题] signals 改为话题清单，topics_done 打钩
-  const guide = opts.memoryCard?.guide || null;
-  const guideRunning = !!guide && guide.status === 'running'
-    && Array.isArray(guide.phases) && guide.phases.length > 0
-    && guide.current_phase >= 0 && guide.current_phase < guide.phases.length;
-
-  if (guideRunning) {
-    d += buildGuideBlock(guide!, guide!.phases[guide!.current_phase], doneTopics, opts.memoryCard, opts.lastUserText, !!opts.switchTopic);
-  } else if (goal === '保持当前关系') {
-    // 停止升级：只显示进度 + 维持现状指令
+  // [v20260813 攻略已砍] 注入【本轮话题清单】块（战略层唯一驱动，替代原【当前攻略】）：
+  //   按当前关系阶段取话题清单（三权重置顶），带打钩态与每轮话题建议（纯规则零 LLM）
+  if (goal !== '保持当前关系') {
+    d += buildTopicListBlock(opts.memoryCard, opts.lastUserText, !!opts.switchTopic);
+  } else {
+    // 停止升级：维持现状指令（不注入话题清单，不引导新话题）
     d += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新话题；正常聊天稳住温度即可，她主动聊就自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
   }
-  // [v145] 无攻略且非"保持当前关系"（如对话<5轮攻略未生成）：不注入任何推进/收集指令，
-  //   方向完全交给攻略（默认启动，聊满 GUIDE_MIN_ROUNDS 自动生成）
 
   // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
   //   放在所有目标/推进指令之后 = 最高优先级；检索词已切到"新话题/开场白"方向
   if (opts.switchTopic) {
-    // [v20260812 换话题优先攻略] 攻略在跑且清单还有未聊话题 → 定死攻略话题开场，不让 LLM 自由发挥
+    // [v20260813] 从当前关系话题清单选新话题（排除正在聊的），不让 LLM 自由发挥
     const stTopic = pickSwitchTopic(opts.memoryCard);
     d += `\n\n【切换话题】(本轮最高优先级，覆盖上面的所有目标与推进指令)\n`
       + `- 用户对当前话题不满意，要求换一个新话题继续聊。\n`
