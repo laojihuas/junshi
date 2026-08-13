@@ -23,11 +23,12 @@ const Paywall = {
         // [v20260805] 不暴露免费档位数字（50/30/15），只做引导
         document.getElementById('paywall-tries-desc').textContent =
             `今日次数已用完，开通 VIP 继续畅聊`;
-        // [邀请功能] 展示单次邀请赠送次数（不显示 300 上限）
+        // [邀请功能] 展示单次邀请赠送次数（上不封顶，v20260813 起 cap=0 无上限）
+        const reward = window.APP_CONFIG?.invite?.rewardTries || 50;
         const rewardEl = document.getElementById('invite-reward-tries');
-        if (rewardEl) {
-            rewardEl.textContent = window.APP_CONFIG?.invite?.rewardTries || 50;
-        }
+        if (rewardEl) rewardEl.textContent = reward;
+        const rewardDetailEl = document.getElementById('invite-reward-tries-detail');
+        if (rewardDetailEl) rewardDetailEl.textContent = reward;
     },
 
     // 激活码验证（v20260805 账号版：绑账号，Authorization 携带账号 JWT）

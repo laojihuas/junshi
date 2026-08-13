@@ -413,18 +413,19 @@
                     <span style="font-size:12px;color:var(--muted);">保存后立即生效（下次扣次按新值）</span>
                 </div>
                 <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
-                    原写死在数据库函数里的配额数值，现可在后台调节：免费档三档、激活码日配额、邀请奖励与封顶。
-                    价格（¥68/月）与有效期（30 天）暂未搬，如需一并调节请告知。
+                    配额规则（v20260813）：游客每日 20 次、用完弹窗提示登录；注册用户注册后前 3 天 50 次/天、
+                    3 天后统一 20 次/天；邀请 +50 次/人、上不封顶（封顶填 0=不封顶）。
+                    以下数值后台可调，保存后下次扣次生效。
                 </p>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
-                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 0-3 天（次/天）
+                    <label style="font-size:12px;color:var(--muted);display:block;">游客每日（次/天）
+                        <input id="qp-guest" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    </label>
+                    <label style="font-size:12px;color:var(--muted);display:block;">注册用户 0-3 天（次/天）
                         <input id="qp-tier1" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
                     </label>
-                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 3-7 天（次/天）
+                    <label style="font-size:12px;color:var(--muted);display:block;">注册用户 3 天+（次/天）
                         <input id="qp-tier2" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
-                    </label>
-                    <label style="font-size:12px;color:var(--muted);display:block;">免费档 7 天+（次/天）
-                        <input id="qp-tier3" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
                     </label>
                     <label style="font-size:12px;color:var(--muted);display:block;">激活码日配额（次/天）
                         <input id="qp-vip" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
@@ -432,8 +433,8 @@
                     <label style="font-size:12px;color:var(--muted);display:block;">邀请奖励（次/人）
                         <input id="qp-invite-each" class="input input-num" type="number" min="1" max="1000" style="margin-top:4px;width:100%;">
                     </label>
-                    <label style="font-size:12px;color:var(--muted);display:block;">邀请累计封顶（次）
-                        <input id="qp-invite-cap" class="input input-num" type="number" min="1" max="10000" style="margin-top:4px;width:100%;">
+                    <label style="font-size:12px;color:var(--muted);display:block;">邀请累计封顶（次，0=不封顶）
+                        <input id="qp-invite-cap" class="input input-num" type="number" min="0" max="10000" style="margin-top:4px;width:100%;">
                     </label>
                 </div>
                 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
@@ -790,12 +791,12 @@
                     ['auto', 'on', 'off'].includes(lp.thinking_budget) ? lp.thinking_budget : 'auto';
                 // [v20260812 配额参数] 填充（缺省回退原默认值）
                 const qp = data.quota_params || {};
+                document.getElementById('qp-guest').value = qp.guest_daily ?? 20;
                 document.getElementById('qp-tier1').value = qp.free_daily_tier1 ?? 50;
-                document.getElementById('qp-tier2').value = qp.free_daily_tier2 ?? 30;
-                document.getElementById('qp-tier3').value = qp.free_daily_tier3 ?? 15;
+                document.getElementById('qp-tier2').value = qp.free_daily_tier2 ?? 20;
                 document.getElementById('qp-vip').value = qp.vip_daily_limit ?? 500;
                 document.getElementById('qp-invite-each').value = qp.invite_bonus_each ?? 50;
-                document.getElementById('qp-invite-cap').value = qp.invite_bonus_cap ?? 300;
+                document.getElementById('qp-invite-cap').value = qp.invite_bonus_cap ?? 0;
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -887,15 +888,17 @@
             const saveBtn = document.getElementById('quota-save-btn');
             const readInt = (id) => parseInt(document.getElementById(id).value, 10);
             const quota_params = {
+                guest_daily: readInt('qp-guest'),
                 free_daily_tier1: readInt('qp-tier1'),
                 free_daily_tier2: readInt('qp-tier2'),
-                free_daily_tier3: readInt('qp-tier3'),
                 vip_daily_limit: readInt('qp-vip'),
                 invite_bonus_each: readInt('qp-invite-each'),
                 invite_bonus_cap: readInt('qp-invite-cap'),
             };
             for (const [k, v] of Object.entries(quota_params)) {
-                if (!Number.isInteger(v) || v < 1 || v > 10000) { toast('配额参数需为 1~10000 的整数'); return; }
+                // cap 允许 0（不封顶），其余需 1~10000
+                const min = k === 'invite_bonus_cap' ? 0 : 1;
+                if (!Number.isInteger(v) || v < min || v > 10000) { toast('配额参数需为 ' + min + '~10000 的整数'); return; }
             }
             saveBtn.disabled = true;
             status.textContent = '保存中...';

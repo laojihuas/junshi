@@ -22,14 +22,15 @@ const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
   thinking_budget: ['auto', 'on', 'off'],
 };
 
-// [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（SQL 008 原硬编码值改读 app_config.quota_params）
+// [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（v20260813：加 guest_daily；cap 允许 0=不封顶）
 const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
-  free_daily_tier1: [1, 10000],   // 免费档 0-3 天（默认 50）
-  free_daily_tier2: [1, 10000],   // 免费档 3-7 天（默认 30）
-  free_daily_tier3: [1, 10000],   // 免费档 7 天+（默认 15）
+  guest_daily: [1, 10000],        // 游客每日（默认 20）
+  free_daily_tier1: [1, 10000],   // 注册用户 0-3 天（默认 50）
+  free_daily_tier2: [1, 10000],   // 注册用户 3 天+（默认 20）
+  free_daily_tier3: [1, 10000],   // 保留（不再使用，兼容后台旧值）
   vip_daily_limit: [1, 10000],    // 激活码日配额（默认 500）
   invite_bonus_each: [1, 1000],   // 邀请奖励每次（默认 50）
-  invite_bonus_cap: [1, 10000],   // 邀请累计封顶（默认 300）
+  invite_bonus_cap: [0, 10000],   // 邀请累计封顶（默认 0=不封顶）
 };
 function validateQuotaParams(v: any): string | null {
   if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'quota_params 必须为 JSON 对象';
