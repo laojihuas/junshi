@@ -357,7 +357,8 @@
                     <span style="font-size:12px;color:var(--muted);">所有好友/窗口共用，修改后立即生效</span>
                 </div>
                 <p style="font-size:13px;color:var(--muted);margin-bottom:12px;">
-                    该提示词作为 IMA 请求的 system_prompt 随每次对话发送，前端用户不可见。
+                    该提示词作为【附加规则】注入每次对话的末尾（2026-08-13 缓存重构后不再占据 system 前缀，
+                    编辑它不会使全站缓存失效），前端用户不可见。
                     修改保存后，所有用户下次发送消息时立即使用新提示词。
                 </p>
                 <textarea id="prompt-textarea" class="prompt-textarea" placeholder="输入统一提示词内容..." spellcheck="false"></textarea>
