@@ -153,18 +153,18 @@ const Chat = {
         const facts = Array.isArray(mc.facts) ? mc.facts : [];
         const goal = mc.goal || '';
 
-        const STAGE_COLORS = { '追求': '#185FA5', '暧昧': '#993556', '恋爱': '#A32D2D', '挽回': '#854F0B', '朋友': '#5F5E5A' };
+        const STAGE_COLORS = { '吸引': '#185FA5', '舒适': '#993556', '恋爱': '#A32D2D' };
         const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
-        const stageTag = (p.stage && p.stage !== '陌生')
+        const stageTag = (p.stage && p.stage !== '')
             ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`
             : '';
 
         const sec = (title, dotColor, html) =>
             `<div class="memory-section"><div class="memory-sec-title"><span class="memory-dot" style="background:${dotColor}"></span>${title}</div>${html}</div>`;
 
-        // [v58] 目标 + 阶段推进链（文字版，已过.done 小绿、进行中.on 加亮）
+        // [v58] 目标 + [v182] 三阶段推进链（吸引→舒适→恋爱；已过.done 小绿、进行中.on 加亮）
         const goalHtml = goal ? `<div class="memory-goal">目标：${this._escapeHtml(goal)}</div>` : '';
-        const STAGE_CHAIN = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
+        const STAGE_CHAIN = ['吸引', '舒适', '恋爱'];
         let chainHtml = '';
         if (p.stage && STAGE_CHAIN.includes(p.stage)) {
             const idx = STAGE_CHAIN.indexOf(p.stage);
@@ -178,7 +178,7 @@ const Chat = {
         // [v20260811 话题] 已聊话题进度（话题打钩来源：话题 short 名列表）
         const doneTopics = Array.isArray(mc.topics_done) ? mc.topics_done : [];
         let topicHtml = '';
-        if (doneTopics.length > 0 || (p.stage && p.stage !== '陌生' && p.stage !== '挽回')) {
+        if (doneTopics.length > 0 || (p.stage && p.stage !== '')) {
             topicHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">'
                 + (doneTopics.length > 0
                     ? doneTopics.map(t => `<span class="chain-node done">✓${this._escapeHtml(t)}</span>`).join('')
@@ -732,10 +732,10 @@ const Chat = {
             // [v20260805] 保存 _debug 供阶段提示/话题清单渲染（后端零成本白送字段，非 LLM 内容）
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
-                // [v58] 阶段升级提示：按正常顺序前进时 toast（回退/陌生不提示）
+                // [v182] 阶段升级提示：按正常顺序前进时 toast（回退/无阶段不提示）
                 const ns = this.lastDebug.memory_stage;
-                if (ns && ns !== '陌生' && this._prevStage && ns !== this._prevStage) {
-                    const ORDER = ['陌生', '朋友', '追求', '暧昧', '恋爱'];
+                if (ns && ns !== '' && this._prevStage && ns !== this._prevStage) {
+                    const ORDER = ['吸引', '舒适', '恋爱'];
                     const a = ORDER.indexOf(this._prevStage);
                     const b = ORDER.indexOf(ns);
                     if (a > -1 && b > -1 && b > a) {
@@ -757,6 +757,7 @@ const Chat = {
     // [v20260813 攻略已砍] 话题清单面板：聊天页顶部显示当前关系话题清单（三权重优先 + 打钩态）
     //   输入：src=后端响应对象（含 data.topics 数组）；pickTopic=本轮建议话题 short（data.pick_topic）
     //   折叠态默认只显示"🎯 本轮建议话题：聊XX"；展开显示完整清单（聊过的显示 ✓，三权重话题 ★）
+    //   [v182 用户打钩] 清单话题可点击手动打钩/取消（写 memory_card.topics_done，用户自行标记聊过）
     _updateTopicPanel(src, pickTopic) {
         const el = document.getElementById('chat-guide');
         if (!el) return;
@@ -771,12 +772,13 @@ const Chat = {
         const pendingCount = topics.filter(t => !t.done).length;
         const listHtml = topics.map(t => {
             const mark = t.weight ? '★' : '○';
-            return '<div class="guide-sig' + (t.done ? ' done' : '') + '">' + (t.done ? '✓' : mark) + ' 聊' + this._escapeHtml(t.short) + '</div>';
+            return '<div class="guide-sig' + (t.done ? ' done' : '') + '" data-topic="' + this._escapeHtml(t.short) + '" title="点击手动标记聊过/取消" style="cursor:pointer;">' + (t.done ? '✓' : mark) + ' 聊' + this._escapeHtml(t.short) + '</div>';
         }).join('');
         const fullHtml =
             '<div class="guide-head"><span class="guide-name">话题清单' + stageLabel + '</span>'
             + '<span class="guide-status running">' + pendingCount + ' 个待聊</span></div>'
-            + '<div class="guide-sigs">' + listHtml + '</div>';
+            + '<div class="guide-sigs">' + listHtml + '</div>'
+            + '<div class="guide-hint" style="font-size:11px;color:rgba(255,255,255,.35);margin-top:4px;">点击话题可手动打钩/取消</div>';
         const expanded = !!this._guideExpanded;
         // 折叠态主体：显示"本轮建议话题"；无建议时给一行极简清单状态
         const pickKnown = pickTopic && TOPIC_LIBRARY_SHORTS.indexOf(pickTopic) > -1;
@@ -795,6 +797,33 @@ const Chat = {
             this._guideExpanded = !this._guideExpanded;
             this._updateTopicPanel(src, pickTopic);
         };
+        // [v182 用户打钩] 话题点击 → 手动打钩/取消
+        el.querySelectorAll('.guide-sig[data-topic]').forEach(sig => {
+            sig.onclick = () => this._toggleTopicDone(sig.dataset.topic);
+        });
+    },
+
+    // [v182 用户打钩] 手动打钩/取消话题（直接改 chat_sessions.memory_card.topics_done）
+    async _toggleTopicDone(short) {
+        if (!this.currentSessionId) return;
+        let mc = this.memoryCard
+            ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
+            : null;
+        if (!mc || typeof mc !== 'object') mc = {};
+        const done = new Set(Array.isArray(mc.topics_done) ? mc.topics_done : []);
+        const nowDone = !done.has(short);
+        if (nowDone) done.add(short); else done.delete(short);
+        mc.topics_done = [...done];
+        try {
+            const sb = getSupabaseClient();
+            const { error } = await sb.from('chat_sessions').update({ memory_card: JSON.stringify(mc) }).eq('id', this.currentSessionId);
+            if (error) throw error;
+            this.memoryCard = mc;
+            Utils.toast(nowDone ? '已标记聊过「' + short + '」' : '已取消「' + short + '」');
+        } catch (e) {
+            console.error('[军师] 手动打钩失败:', e);
+            Utils.toast('保存失败，请重试');
+        }
     },
 
     // [统一提示词] 从后台获取当前统一的 system_prompt

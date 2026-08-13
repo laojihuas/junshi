@@ -84,7 +84,8 @@ const DB = {
         if (!sb) return [];
         const { data, error } = await sb
             .from('chat_sessions')
-            .select('*')
+            // [v182] 带消息数聚合（头像灰色判定：聊天≤5条未判定关系）
+            .select('*, chat_messages(count)')
             .eq('user_id', userId)
             .order('updated_at', { ascending: false });
         if (error) {

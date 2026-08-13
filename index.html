@@ -245,21 +245,19 @@
         <div class="modal-content">
             <div class="modal-title">设置关系</div>
             <div class="modal-body">
-                <div class="memory-sec-title" style="margin-top:0"><span class="memory-dot" style="background:#378ADD"></span>关系阶段</div>
+                <div class="memory-sec-title" style="margin-top:0"><span class="memory-dot" style="background:#378ADD"></span>关系阶段（选一个则固定，不选默认自动升级）</div>
                 <div class="stage-options" id="stage-options">
-                    <button class="stage-option" data-stage="追求"><span class="stage-dot" style="background:#185FA5"></span>追求</button>
-                    <button class="stage-option" data-stage="暧昧"><span class="stage-dot" style="background:#993556"></span>暧昧</button>
+                    <button class="stage-option" data-stage="吸引"><span class="stage-dot" style="background:#185FA5"></span>吸引</button>
+                    <button class="stage-option" data-stage="舒适"><span class="stage-dot" style="background:#993556"></span>舒适</button>
                     <button class="stage-option" data-stage="恋爱"><span class="stage-dot" style="background:#A32D2D"></span>恋爱</button>
-                    <button class="stage-option" data-stage="挽回"><span class="stage-dot" style="background:#854F0B"></span>挽回</button>
-                    <button class="stage-option" data-stage="朋友"><span class="stage-dot" style="background:#5F5E5A"></span>朋友</button>
-                    <button class="stage-option" data-stage="__auto__"><span class="stage-dot" style="background:linear-gradient(135deg,#185FA5,#993556,#A32D2D,#854F0B,#5F5E5A)"></span>恢复 AI 判断</button>
+                    <button class="stage-option" data-stage="__auto__"><span class="stage-dot" style="background:linear-gradient(135deg,#185FA5,#993556,#A32D2D)"></span>自动</button>
                 </div>
                 <div class="memory-sec-title"><span class="memory-dot" style="background:#1D9E75"></span>关系目标（军师按此驱动推进）</div>
                 <div class="stage-options" id="goal-options">
                     <button class="stage-option" data-goal="__none__"><span class="stage-dot" style="background:#7CFC9A"></span>默认推进（推荐）</button>
                     <button class="stage-option" data-goal="保持当前关系"><span class="stage-dot" style="background:#5F5E5A"></span>保持当前关系</button>
                 </div>
-                <div class="field-hint">默认推进 = 军师自动制定攻略，一路往恋爱推进；选"保持当前关系"则不出攻略、只维持现状</div>
+                <div class="field-hint">吸引 → 舒适 → 恋爱 三阶段；选"自动"则军师按对话信号自动升级，否则停留在所选阶段</div>
             </div>
             <div class="modal-footer">
                 <button id="stage-cancel" class="btn btn-outline">取消</button>

@@ -19,10 +19,10 @@
 //   - 角色定位重写：有血有肉的真人——有脾气、有态度，不是客服/老好人
 //   - 敢调情：暧昧/恋爱阶段直接带钩子，别温吞水
 //   - 敢否定(Neg)：对方飘/装/拿你开涮时直接顶回去，制造张力而非讨好
-//   - 遇攻击必反击：ATTACK_RE 检测对方攻击/挑衅/阴阳怪气（排除挽回期），
+//   - 遇攻击必反击：ATTACK_RE 检测对方攻击/挑衅/阴阳怪气，
 //     命中注入【对方正在攻击你】强化块：先反击再收尾，绝不卑微解释/讨好
 //   - 【线上语境与轻度否定】升级为【语气与态度】：保留安全边界（禁外貌/
-//     性格/价值贬低、情绪低落/挽回期收起锋芒），放开"敢"的权限
+//     性格/价值贬低、情绪低落或真正受伤时收起锋芒），放开"敢"的权限
 //   - 默认温度 0.4→0.6、frequency_penalty 0.5→0.7：输出更有性格方差
 //   - _debug 新增 attack_detected
 //
@@ -133,7 +133,7 @@
 //       主回复前读取注入 system；主回复后异步合并更新（画像提取频率 ≤ 每3分钟一次）
 //     - 输出格式约束：【分析】+【回复建议 N】+【小提示】结构化三段
 //   L3 提示词体系：
-//     - 场景指令：按记忆卡 stage 注入对应关系阶段的指导（追求/暧昧/恋爱/挽回/朋友）
+//     - 场景指令：按记忆卡 stage 注入对应关系阶段的指导（吸引/舒适/恋爱，v182 三阶段统一）
 //     - 全局提示词(后台可编辑) > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 //
 // 兼容性：所有增强均为服务端内部实现；旧前端（不传 session_id/history）自动降级，
@@ -170,16 +170,23 @@ const STOP_WORDS = new Set([
 // 中文标点切分
 const SPLIT_RE = /[，。！？；、,.!?;:\s\n\r"'""''（）()【】\[\]]+/;
 
-// [v6 L3] 关系阶段 → 场景指导映射（由记忆卡 profile.stage 触发）
-// [v11] 全部改为线上场景版（纯文字聊天：展示面+节奏+文字张力）
+// [v6 L3→v182 三阶段统一] 关系阶段 → 场景指导映射（迷男三大阶段：吸引/舒适/恋爱）
+//   [v182 用户拍板] 六关系阶段废弃，统一为三阶段；"诱惑"对外一律显示为"恋爱"
 const STAGE_HINTS: Record<string, string> = {
-  '追求': '线上追求期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可以有态度、带点轻度调侃制造张力，别急着表白、别查户口式提问，更别一味顺着对方。',
-  '暧昧': '线上暧昧期：用文字张力推进——先回应再调侃/留白，保留一点神秘感；敢于调情，说话直接点、带点挑逗和钩子，别总温吞水；可抛出模糊邀约试探，不急着捅破窗户纸，守住"暧昧窗口"。',
-  '恋爱': '线上恋爱期：回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃保鲜，带点自己的脾气，但别拿原则问题开玩笑。',
-  '挽回': '线上挽回期：先稳住对方情绪、不追问不施压，用稳定低压力的输出重建安全感；此阶段严禁任何调侃/打压，对方说什么都先接住情绪。',
-  '朋友': '线上朋友：自然、有态度、不刻意讨好，话题轻松但保持边界。',
-  '陌生': '',
+  '吸引': '线上吸引期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可以有态度、带点轻度调侃制造张力，别急着表白、别无意义盘问（年龄/照片/住哪这类信息交换允许自然提问），更别一味顺着对方。',
+  '舒适': '线上舒适期：建立信任与情感连接——先回应再分享，多聊生活与共同点，制造"咱们是一类人"的感觉；聊天自然升温，多用"咱们/我们都"，对方分享经历时先接住再连接自己的相似故事；不必再端着，但别急着推进关系。',
+  '恋爱': '线上恋爱期：关系已确立，用文字张力保鲜——回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃、可以抛见面邀约与调情，测试一点服从性；守住边界但不温吞，敢于把暧昧兑现成见面。',
 };
+
+// [v182 三阶段统一] 存量记忆卡/LLM 输出可能仍是旧六阶段（陌生/朋友/追求/暧昧/恋爱/挽回）
+//   → 统一换算成三阶段：陌生/朋友→吸引，追求/挽回→舒适，暧昧→恋爱
+function normalizeStage(s: string): string {
+  if (s === '吸引' || s === '舒适' || s === '恋爱') return s;
+  if (s === '陌生' || s === '朋友') return '吸引';
+  if (s === '追求' || s === '挽回') return '舒适';
+  if (s === '暧昧') return '恋爱';
+  return '吸引';
+}
 
 // [v8] 领域词表：知识库主题检索词
 // [2026-08-06 话术库版] 恋爱教学/聊天实战已删库，词表按现存 739 块恋爱话术重新校准：
@@ -213,13 +220,12 @@ const STAGE_VOCAB: Record<string, string[]> = {
   'seduction': ['进挪', '兴趣指标', '升级关系', '暧昧', '撩', '角色扮演', '调戏'],
 };
 
-// [v11] 根据记忆卡解析当前 M3 战术阶段词表（目标驱动）
+// [v11→v182] 根据记忆卡解析当前 M3 战术阶段词表（三阶段：吸引→attract、舒适→comfort、恋爱→seduce）
 function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
   const stage = memoryCard?.profile?.stage || '';
   let phase: keyof typeof STAGE_VOCAB = 'attract';
-  if (stage === '挽回' || stage === '恋爱') phase = 'comfort';
-  else if (stage === '暧昧') phase = 'seduction';
-  else if (stage === '追求') phase = 'attract';
+  if (stage === '恋爱') phase = 'seduction';
+  else if (stage === '舒适') phase = 'comfort';
   return STAGE_VOCAB[phase] || [];
 }
 
@@ -800,8 +806,8 @@ Deno.serve(async (req) => {
         stage_presence: usedStageLlm.presence_penalty,
         stage_freq: usedStageLlm.frequency_penalty,
         self_msgs_len: Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.length : 0,
-        // [v14] 攻击检测是否命中（验证反击指令注入）
-        attack_detected: ATTACK_RE.test(query) && (memoryCard?.profile?.stage || '') !== '挽回',
+        // [v14] 攻击检测是否命中（验证反击指令注入；三阶段下无挽回豁免）
+        attack_detected: ATTACK_RE.test(query),
         // [v73 迷男精髓] 战术类别与阶段（验证卡组注入）
         tactic_category: tactic.category,
         tactic_phase: tactic.phase,
@@ -814,7 +820,7 @@ Deno.serve(async (req) => {
         emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
         // [v20260813 攻略已砍] 话题清单验证：当前关系清单未聊数 + 本轮建议话题
-        topic_pending: stageTopicList((memoryCard?.profile?.stage) || '陌生', memoryCard).length,
+        topic_pending: stageTopicList((memoryCard?.profile?.stage) || '吸引', memoryCard).length,
         pick_topic: (() => {
           // 换话题模式与【切换话题】注入保持一致
           return switchTopic ? pickSwitchTopic(memoryCard) : pickNearestTopic(memoryCard, query);
@@ -1116,7 +1122,7 @@ type MemoryCard = {
   // [v57] 长期事实清单：值得跨天记住的硬事实（约定/日期/偏好/雷点/家庭/工作）
   //   [{text(≤40字), at(首次记录), last_mention(最近提及)}]，上限 FACTS_MAX，按 last_mention 新旧排序
   facts?: { text: string; at: string; last_mention: string }[];
-  // [v58] 关系目标（用户在前端设置）：约见面 / 推进恋爱 / 挽回修复 / 保持暧昧 / 保持当前关系 / ''(未设置=默认推进)
+  // [v58] 关系目标（用户在前端设置）：'保持当前关系' / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
   // [v20260811 话题清单] 已聊过话题（short 名，如 '名字'/'年龄'）——话题清单"聊过XX"打钩用
@@ -1137,74 +1143,75 @@ const FACTS_INJECT_MAX = 3;    // 每轮按相关度最多注入几条（v79.2 4
 
 // [v20260813 攻略已砍] 话题库改为按关系阶段直接取清单（不再经攻略包装）
 
-// [v20260811 话题清单] 话题库（攻略清单素材库，源文件 话题.txt，共 50 个）
-//   4 期分组：破冰15 / 升温15 / 暧昧10 / 恋爱10；每话题带打钩关键词 kws
+// [v20260811 话题清单] 话题库（源文件 话题.txt，共 50 个）
+//   [v182 三阶段统一] 3 阶段分组：吸引15 / 舒适15 / 恋爱20（原暧昧期+恋爱期并入 seduce）；
+//   每话题带打钩关键词 kws
 //   weight：'age'|'photo'|'region' = 权重话题（年龄/照片/住哪，好友列表昵称旁可见，
-//   信息最容易自然拿到）——生成攻略时强制排进前阶段、每轮话题建议优先、且必须"聊出结果"才打钩
+//   信息最容易自然拿到）——未聊出结果跨阶段置顶、每轮话题建议优先、必须"聊出结果"才打钩
 type TopicDef = {
-  name: string;         // 话题名（攻略信号/面板显示用，如 '聊名字'）
+  name: string;         // 话题名（话题清单/面板显示用，如 '聊名字'）
   short: string;        // 短名（话题建议/打钩引用用，如 '名字'）
-  stage: 'break' | 'warm' | 'flirt' | 'love';  // 所属期
+  stage: 'attract' | 'comfort' | 'seduce';  // 所属阶段
   kws: string[];        // 打钩预检关键词（她的话命中任一即视为"聊过"）
-  weight?: 'age' | 'photo' | 'region';          // 权重话题标记
+  weight?: 'age' | 'photo' | 'region';      // 权重话题标记
 };
 const TOPIC_LIBRARY: TopicDef[] = [
   // ---- 相识破冰期（15）----
-  { name: '聊名字', short: '名字', stage: 'break', kws: ['名字', '全名', '昵称', '外号', '叫啥', '怎么称呼'] },
-  { name: '聊年龄', short: '年龄', stage: 'break', weight: 'age', kws: ['年龄', '多大', '几岁', '生日', '生肖', '星座', '属'] },
-  { name: '聊照片', short: '照片', stage: 'break', weight: 'photo', kws: ['照片', '自拍', '长相', '本人', '发张', '看看你'] },
-  { name: '聊住哪', short: '住哪', stage: 'break', weight: 'region', kws: ['住哪', '哪里人', '城市', '区域', '租房', '买房', '合租', '独居'] },
-  { name: '聊工作/学业', short: '工作', stage: 'break', kws: ['工作', '上班', '职业', '做什么', '学业', '上学', '专业', '实习'] },
-  { name: '聊作息时间', short: '作息', stage: 'break', kws: ['作息', '几点起', '几点睡', '熬夜', '早睡', '失眠'] },
-  { name: '聊日常通勤', short: '通勤', stage: 'break', kws: ['通勤', '地铁', '公交', '开车', '上班路', '路上'] },
-  { name: '聊饮食习惯', short: '饮食', stage: 'break', kws: ['吃', '饮食', '辣', '火锅', '口味', '忌口', '爱吃'] },
-  { name: '聊会不会做饭', short: '做饭', stage: 'break', kws: ['做饭', '做菜', '拿手菜', '厨艺', '下厨', '黑暗料理'] },
-  { name: '聊运动健身', short: '运动', stage: 'break', kws: ['运动', '健身', '跑步', '打球', '健身房', '瑜伽', '户外'] },
-  { name: '聊兴趣爱好', short: '爱好', stage: 'break', kws: ['爱好', '兴趣', '空闲', '平时干嘛', '业余', '打发时间'] },
-  { name: '聊最近在追的剧/综艺/动漫', short: '追剧', stage: 'break', kws: ['追剧', '综艺', '动漫', '最近看', '剧'] },
-  { name: '聊喜欢的音乐类型和歌手', short: '音乐', stage: 'break', kws: ['音乐', '歌手', '歌单', '听歌', '演唱会', '曲风'] },
-  { name: '聊电影口味', short: '电影', stage: 'break', kws: ['电影', '影院', '大片', '看电影', '片单'] },
-  { name: '聊看书吗', short: '看书', stage: 'break', kws: ['看书', '读书', '书', '小说', '电子书', '纸质书'] },
+  { name: '聊名字', short: '名字', stage: 'attract', kws: ['名字', '全名', '昵称', '外号', '叫啥', '怎么称呼'] },
+  { name: '聊年龄', short: '年龄', stage: 'attract', weight: 'age', kws: ['年龄', '多大', '几岁', '生日', '生肖', '星座', '属'] },
+  { name: '聊照片', short: '照片', stage: 'attract', weight: 'photo', kws: ['照片', '自拍', '长相', '本人', '发张', '看看你'] },
+  { name: '聊住哪', short: '住哪', stage: 'attract', weight: 'region', kws: ['住哪', '哪里人', '城市', '区域', '租房', '买房', '合租', '独居'] },
+  { name: '聊工作/学业', short: '工作', stage: 'attract', kws: ['工作', '上班', '职业', '做什么', '学业', '上学', '专业', '实习'] },
+  { name: '聊作息时间', short: '作息', stage: 'attract', kws: ['作息', '几点起', '几点睡', '熬夜', '早睡', '失眠'] },
+  { name: '聊日常通勤', short: '通勤', stage: 'attract', kws: ['通勤', '地铁', '公交', '开车', '上班路', '路上'] },
+  { name: '聊饮食习惯', short: '饮食', stage: 'attract', kws: ['吃', '饮食', '辣', '火锅', '口味', '忌口', '爱吃'] },
+  { name: '聊会不会做饭', short: '做饭', stage: 'attract', kws: ['做饭', '做菜', '拿手菜', '厨艺', '下厨', '黑暗料理'] },
+  { name: '聊运动健身', short: '运动', stage: 'attract', kws: ['运动', '健身', '跑步', '打球', '健身房', '瑜伽', '户外'] },
+  { name: '聊兴趣爱好', short: '爱好', stage: 'attract', kws: ['爱好', '兴趣', '空闲', '平时干嘛', '业余', '打发时间'] },
+  { name: '聊最近在追的剧/综艺/动漫', short: '追剧', stage: 'attract', kws: ['追剧', '综艺', '动漫', '最近看', '剧'] },
+  { name: '聊喜欢的音乐类型和歌手', short: '音乐', stage: 'attract', kws: ['音乐', '歌手', '歌单', '听歌', '演唱会', '曲风'] },
+  { name: '聊电影口味', short: '电影', stage: 'attract', kws: ['电影', '影院', '大片', '看电影', '片单'] },
+  { name: '聊看书吗', short: '看书', stage: 'attract', kws: ['看书', '读书', '书', '小说', '电子书', '纸质书'] },
   // ---- 好感升温期（15）----
-  { name: '聊周末怎么过', short: '周末', stage: 'warm', kws: ['周末', '放假', '宅', '出门', '休息日'] },
-  { name: '聊社交习惯', short: '社交', stage: 'warm', kws: ['聚会', '社恐', '朋友多', '社交', '交际'] },
-  { name: '聊酒量', short: '酒量', stage: 'warm', kws: ['喝酒', '酒量', '酒', '微醺', '喝醉'] },
-  { name: '聊抽不抽烟', short: '抽烟', stage: 'warm', kws: ['抽烟', '吸烟', '烟瘾'] },
-  { name: '聊养宠物', short: '宠物', stage: 'warm', kws: ['宠物', '猫', '狗', '养猫', '养狗'] },
-  { name: '聊旅游', short: '旅游', stage: 'warm', kws: ['旅游', '旅行', '去过', '想去', '度假', '自驾'] },
-  { name: '聊喜欢的季节和天气', short: '季节', stage: 'warm', kws: ['季节', '天气', '冬天', '夏天', '下雨', '下雪'] },
-  { name: '聊穿衣风格', short: '穿衣', stage: 'warm', kws: ['穿衣', '穿搭', '风格', '打扮', '衣服'] },
-  { name: '聊手机', short: '手机', stage: 'warm', kws: ['手机', '苹果', '安卓', 'app', '刷手机'] },
-  { name: '聊睡眠习惯', short: '睡眠', stage: 'warm', kws: ['睡眠', '睡觉', '睡姿', '呼噜', '认床', '失眠', '做梦'] },
-  { name: '聊怕什么', short: '怕什么', stage: 'warm', kws: ['怕', '害怕', '怕黑', '怕虫', '怕高', '怕鬼', '胆小'] },
-  { name: '聊学生时代', short: '学生时代', stage: 'warm', kws: ['学生', '上学', '成绩', '逃课', '老师', '学校', '同学'] },
-  { name: '聊童年', short: '童年', stage: 'warm', kws: ['童年', '小时候', '长大', '老家', '回忆'] },
-  { name: '聊家庭情况', short: '家庭', stage: 'warm', kws: ['家庭', '爸妈', '父母', '兄弟姐妹', '独生', '家里'] },
-  { name: '聊和父母的关系', short: '父母关系', stage: 'warm', kws: ['父母', '爸妈', '瞒着', '说心里话', '跟家里'] },
+  { name: '聊周末怎么过', short: '周末', stage: 'comfort', kws: ['周末', '放假', '宅', '出门', '休息日'] },
+  { name: '聊社交习惯', short: '社交', stage: 'comfort', kws: ['聚会', '社恐', '朋友多', '社交', '交际'] },
+  { name: '聊酒量', short: '酒量', stage: 'comfort', kws: ['喝酒', '酒量', '酒', '微醺', '喝醉'] },
+  { name: '聊抽不抽烟', short: '抽烟', stage: 'comfort', kws: ['抽烟', '吸烟', '烟瘾'] },
+  { name: '聊养宠物', short: '宠物', stage: 'comfort', kws: ['宠物', '猫', '狗', '养猫', '养狗'] },
+  { name: '聊旅游', short: '旅游', stage: 'comfort', kws: ['旅游', '旅行', '去过', '想去', '度假', '自驾'] },
+  { name: '聊喜欢的季节和天气', short: '季节', stage: 'comfort', kws: ['季节', '天气', '冬天', '夏天', '下雨', '下雪'] },
+  { name: '聊穿衣风格', short: '穿衣', stage: 'comfort', kws: ['穿衣', '穿搭', '风格', '打扮', '衣服'] },
+  { name: '聊手机', short: '手机', stage: 'comfort', kws: ['手机', '苹果', '安卓', 'app', '刷手机'] },
+  { name: '聊睡眠习惯', short: '睡眠', stage: 'comfort', kws: ['睡眠', '睡觉', '睡姿', '呼噜', '认床', '失眠', '做梦'] },
+  { name: '聊怕什么', short: '怕什么', stage: 'comfort', kws: ['怕', '害怕', '怕黑', '怕虫', '怕高', '怕鬼', '胆小'] },
+  { name: '聊学生时代', short: '学生时代', stage: 'comfort', kws: ['学生', '上学', '成绩', '逃课', '老师', '学校', '同学'] },
+  { name: '聊童年', short: '童年', stage: 'comfort', kws: ['童年', '小时候', '长大', '老家', '回忆'] },
+  { name: '聊家庭情况', short: '家庭', stage: 'comfort', kws: ['家庭', '爸妈', '父母', '兄弟姐妹', '独生', '家里'] },
+  { name: '聊和父母的关系', short: '父母关系', stage: 'comfort', kws: ['父母', '爸妈', '瞒着', '说心里话', '跟家里'] },
   // ---- 暧昧期（10）----
-  { name: '聊感情经历', short: '感情经历', stage: 'flirt', kws: ['感情', '谈过', '恋爱史', '交往过', '几段'] },
-  { name: '聊前任', short: '前任', stage: 'flirt', kws: ['前任', 'ex', '前男友', '前女友', '分手后'] },
-  { name: '聊分手原因', short: '分手原因', stage: 'flirt', kws: ['分手', '分开', '异地', '出轨', '性格不合', '闹掰'] },
-  { name: '聊对前任的态度', short: '前任态度', stage: 'flirt', kws: ['放下', '恨', '释怀', '忘不了', '翻篇'] },
-  { name: '聊择偶标准', short: '择偶标准', stage: 'flirt', kws: ['择偶', '标准', '理想型', '喜欢什么样', '对象标准'] },
-  { name: '聊对恋爱的看法', short: '恋爱观', stage: 'flirt', kws: ['恋爱', '爱情', '感情观', '谈恋爱', '爱是什么'] },
-  { name: '聊第一次见面什么印象', short: '第一印象', stage: 'flirt', kws: ['第一印象', '初见', '见面印象'] },
-  { name: '聊现在的关系状态', short: '关系状态', stage: 'flirt', kws: ['关系', '我们', '算什么', '进展', '怎么看我'] },
-  { name: '聊和同事/同学的关系', short: '同事关系', stage: 'flirt', kws: ['同事', '同学', '讨厌的人', '关系好'] },
-  { name: '聊压力来源', short: '压力', stage: 'flirt', kws: ['压力', '焦虑', '烦', '心事', '累'] },
+  { name: '聊感情经历', short: '感情经历', stage: 'seduce', kws: ['感情', '谈过', '恋爱史', '交往过', '几段'] },
+  { name: '聊前任', short: '前任', stage: 'seduce', kws: ['前任', 'ex', '前男友', '前女友', '分手后'] },
+  { name: '聊分手原因', short: '分手原因', stage: 'seduce', kws: ['分手', '分开', '异地', '出轨', '性格不合', '闹掰'] },
+  { name: '聊对前任的态度', short: '前任态度', stage: 'seduce', kws: ['放下', '恨', '释怀', '忘不了', '翻篇'] },
+  { name: '聊择偶标准', short: '择偶标准', stage: 'seduce', kws: ['择偶', '标准', '理想型', '喜欢什么样', '对象标准'] },
+  { name: '聊对恋爱的看法', short: '恋爱观', stage: 'seduce', kws: ['恋爱', '爱情', '感情观', '谈恋爱', '爱是什么'] },
+  { name: '聊第一次见面什么印象', short: '第一印象', stage: 'seduce', kws: ['第一印象', '初见', '见面印象'] },
+  { name: '聊现在的关系状态', short: '关系状态', stage: 'seduce', kws: ['关系', '我们', '算什么', '进展', '怎么看我'] },
+  { name: '聊和同事/同学的关系', short: '同事关系', stage: 'seduce', kws: ['同事', '同学', '讨厌的人', '关系好'] },
+  { name: '聊压力来源', short: '压力', stage: 'seduce', kws: ['压力', '焦虑', '烦', '心事', '累'] },
   // ---- 正式恋爱期（10）----
-  { name: '聊约会', short: '约会', stage: 'love', kws: ['约会', '见面', '出来', '约', '下次', '安排'] },
-  { name: '聊敏感面', short: '敏感面', stage: 'love', kws: ['脆弱', '敏感', '不安', '不敢提', '软肋'] },
-  { name: '聊金钱观', short: '金钱观', stage: 'love', kws: ['钱', '金钱', '花钱', '存钱', 'AA', '买单', '消费观'] },
-  { name: '聊消费习惯', short: '消费', stage: 'love', kws: ['消费', '舍得', '贵', '便宜', '购物', '买东西'] },
-  { name: '聊未来规划', short: '未来', stage: 'love', kws: ['未来', '规划', '发展', '五年', '以后', '打算'] },
-  { name: '聊结婚', short: '结婚', stage: 'love', kws: ['结婚', '婚姻', '嫁', '婚房', '想结'] },
-  { name: '聊孩子', short: '孩子', stage: 'love', kws: ['孩子', '小孩', '宝宝', '要几个'] },
-  { name: '聊定居', short: '定居', stage: 'love', kws: ['定居', '房子', '买房', '城市', '落户'] },
-  { name: '聊吵架', short: '吵架', stage: 'love', kws: ['吵架', '生气', '冷战', '和好', '闹矛盾', '哄'] },
-  { name: '聊我们', short: '我们', stage: 'love', kws: ['我们', '合适', '未来', '爱不爱', '在一起'] },
+  { name: '聊约会', short: '约会', stage: 'seduce', kws: ['约会', '见面', '出来', '约', '下次', '安排'] },
+  { name: '聊敏感面', short: '敏感面', stage: 'seduce', kws: ['脆弱', '敏感', '不安', '不敢提', '软肋'] },
+  { name: '聊金钱观', short: '金钱观', stage: 'seduce', kws: ['钱', '金钱', '花钱', '存钱', 'AA', '买单', '消费观'] },
+  { name: '聊消费习惯', short: '消费', stage: 'seduce', kws: ['消费', '舍得', '贵', '便宜', '购物', '买东西'] },
+  { name: '聊未来规划', short: '未来', stage: 'seduce', kws: ['未来', '规划', '发展', '五年', '以后', '打算'] },
+  { name: '聊结婚', short: '结婚', stage: 'seduce', kws: ['结婚', '婚姻', '嫁', '婚房', '想结'] },
+  { name: '聊孩子', short: '孩子', stage: 'seduce', kws: ['孩子', '小孩', '宝宝', '要几个'] },
+  { name: '聊定居', short: '定居', stage: 'seduce', kws: ['定居', '房子', '买房', '城市', '落户'] },
+  { name: '聊吵架', short: '吵架', stage: 'seduce', kws: ['吵架', '生气', '冷战', '和好', '闹矛盾', '哄'] },
+  { name: '聊我们', short: '我们', stage: 'seduce', kws: ['我们', '合适', '未来', '爱不爱', '在一起'] },
 ];
-const TOPIC_STAGE_LABEL: Record<string, string> = { break: '相识破冰期', warm: '好感升温期', flirt: '暧昧期', love: '正式恋爱期' };
+const TOPIC_STAGE_LABEL: Record<string, string> = { attract: '吸引期', comfort: '舒适期', seduce: '恋爱期' };
 const TOPIC_WEIGHT_LABEL: Record<string, string> = { age: '年龄', photo: '照片', region: '住哪' };
 
 // [v20260811] 话题查找：按 short 找 TopicDef
@@ -1417,9 +1424,13 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
     if (parsed && typeof parsed === 'object') {
       // [2026-08-11] 存量清洗：旧套路字段 strategy、旧里程碑字段 milestones 已废弃，读入即剥离，写回时自然消失
       // [2026-08-13] 攻略 guide 已砍，存量卡读入即剥离
+      // [v182 三阶段统一] 存量 stage 六阶段 → 换算三阶段
       delete parsed.strategy;
       delete parsed.milestones;
       delete parsed.guide;
+      if (parsed.profile && typeof parsed.profile.stage === 'string') {
+        parsed.profile.stage = normalizeStage(parsed.profile.stage);
+      }
       return parsed;
     }
     return null;
@@ -1583,7 +1594,7 @@ async function updateMemoryCard(ctx: {
   //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
   //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
   {
-    const stage = (card.profile && card.profile.stage) || '陌生';
+    const stage = (card.profile && card.profile.stage) || '吸引';
     const list = stageTopicList(stage, card);
     const herText = firstRound ? '' : String(ctx.currentQuery || '');
     const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
@@ -1621,8 +1632,8 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
     .join('\n');
   const topicShortList = TOPIC_LIBRARY.map((t) => t.short).join('/');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"追求/暧昧/恋爱/挽回/朋友/陌生"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
-    + `[v60 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"朋友→追求→暧昧→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级或"朋友"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
+    + `[v60→v182 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"吸引→舒适→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级到"吸引"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
@@ -1646,7 +1657,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
     ])).filter((m) => validShorts.has(m));
     return {
       profile: {
-        stage: typeof p.stage === 'string' && p.stage ? p.stage : '陌生',
+        stage: typeof p.stage === 'string' && p.stage ? normalizeStage(p.stage) : '吸引',
         personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
         relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
         recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
@@ -1668,34 +1679,26 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
 // ============================================================
 // [v20260813 攻略已砍] 关系话题清单（替代攻略 signals）
 //   链路：消息 → 关系阶段(stage) → 战术 → 关系话题清单 → 话术切块参考
-//   清单构成：三权重话题（年龄/照片/住哪，未聊）置顶 + 当前关系期话题（未聊）
+//   清单构成：三权重话题（年龄/照片/住哪，未聊）置顶 + 当前阶段话题（未聊）
 //   打钩/每轮话题建议/切换话题全部基于该清单（纯规则零 LLM，无攻略状态机）
 // ============================================================
 
-// 关系阶段 → 话题期映射（六关系阶段 → 话题库 4 期）
-const STAGE_TOPIC_PHASE: Record<string, 'break' | 'warm' | 'flirt' | 'love'> = {
-  陌生: 'break',
-  朋友: 'break',
-  追求: 'warm',
-  暧昧: 'flirt',
-  恋爱: 'love',
-  挽回: 'warm',   // 挽回 = 重建舒适感/升温，用好感升温期话题
-};
+// [v182 三阶段统一] stage 即三阶段（吸引/舒适/恋爱），直接与 TOPIC_LIBRARY.stage 对齐，无需映射表
 
-// 当前关系的话题清单（未打钩的）：三权重话题置顶 + 当前关系期话题
-//   权重话题跨期保留：无论哪个关系阶段，年龄/照片/住哪没聊出结果就一直在清单最前
+// 当前阶段的话题清单（未打钩的）：三权重话题置顶 + 当前阶段话题
+//   权重话题跨阶段保留：无论当前阶段，年龄/照片/住哪没聊出结果就一直在清单最前
 function stageTopicList(stage: string, card: MemoryCard | null): TopicDef[] {
-  const phase = STAGE_TOPIC_PHASE[stage] || 'break';
+  const phase = (stage === '舒适' ? 'comfort' : stage === '恋爱' ? 'seduce' : 'attract');
   const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
   const weighted = TOPIC_LIBRARY.filter((t) => t.weight && !done.has(t.short));
   const rest = TOPIC_LIBRARY.filter((t) => t.stage === phase && !t.weight && !done.has(t.short));
   return [...weighted, ...rest];
 }
 
-// 关系话题清单数据（响应 topics 字段，前端渲染清单用）：含打钩态（聊过的也能看到 ✓）
+// 阶段话题清单数据（响应 topics 字段，前端渲染清单用）：含打钩态（聊过的也能看到 ✓）
 function stageTopicListData(card: MemoryCard | null): Array<{ short: string; name: string; done: boolean; weight?: string }> {
-  const stage = (card?.profile && card.profile.stage) || '陌生';
-  const phase = STAGE_TOPIC_PHASE[stage] || 'break';
+  const stage = (card?.profile && card.profile.stage) || '吸引';
+  const phase = (stage === '舒适' ? 'comfort' : stage === '恋爱' ? 'seduce' : 'attract');
   const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
   const weighted = TOPIC_LIBRARY.filter((t) => t.weight);
   const rest = TOPIC_LIBRARY.filter((t) => t.stage === phase && !t.weight);
@@ -1716,7 +1719,7 @@ function topicDoneByText(topic: TopicDef | undefined, text: string): boolean {
 // [v20260813 攻略已砍] 关系话题清单注入块（buildSystemContent 用）：替代原【当前攻略】块
 //   按当前关系阶段取清单（三权重置顶），带打钩态与每轮话题建议（纯规则）
 function buildTopicListBlock(card: MemoryCard | null, recentText?: string, switchTopic?: boolean): string {
-  const stage = (card?.profile && card.profile.stage) || '陌生';
+  const stage = (card?.profile && card.profile.stage) || '吸引';
   const list = stageTopicList(stage, card);
   const listHtml = list.length > 0
     ? list.map((t) => `  ${t.weight ? '★' : '○'} 聊${t.short}${t.weight ? `（${TOPIC_WEIGHT_LABEL[t.weight]}，聊出结果才打钩）` : ''}`).join('\n')
@@ -1767,7 +1770,7 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
 //   返回 null = 无未聊话题（清单聊完）
 function pickNearestTopic(card: MemoryCard, recentText?: string): string | null {
   if (!card) return null;
-  const stage = (card.profile && card.profile.stage) || '陌生';
+  const stage = (card.profile && card.profile.stage) || '吸引';
   const list = stageTopicList(stage, card);
   const pending = list.map((t) => t.short);
   if (pending.length === 0) return null;
@@ -1802,7 +1805,7 @@ function pickNearestTopic(card: MemoryCard, recentText?: string): string | null 
 //   让【切换话题】开场白围绕清单话题抛，而不是 LLM 自由发挥；清单聊完 → 退回原逻辑
 function pickSwitchTopic(card: MemoryCard | null | undefined): string | null {
   if (!card) return null;
-  const stage = (card.profile && card.profile.stage) || '陌生';
+  const stage = (card.profile && card.profile.stage) || '吸引';
   const list = stageTopicList(stage, card);
   const cur = card.interest?.topic || null;
   // 未聊 + 排除正在聊的（用户点换话题=不想聊当前这个）
@@ -1821,7 +1824,7 @@ function pickSwitchTopic(card: MemoryCard | null | undefined): string | null {
 // 顺序：全局提示词 > 场景指令 > 用户简介 > 记忆卡 > 更早摘要 > 知识库参考 > 格式约束
 // ============================================================
 
-// [v14] 对方攻击/挑衅/阴阳怪气检测（命中 → 注入反击指令；排除挽回期由调用方控制）
+// [v14] 对方攻击/挑衅/阴阳怪气检测（命中 → 注入反击指令）
 const ATTACK_RE = /你(就|真是|也太|凭什么|有什么|算个|配|只会|不过|还敢)|呵呵|呵呵哒|无语|服了|就这|搞笑|有病|弱智|智障|傻逼|滚|闭嘴|拉黑|删了|嫌你|嫌弃|配不上|看不上|幼稚|矫情|作死|省省|别来|少来|敷衍|冷漠|没意思|没趣|装什么|装|PUA|渣男|海王/;
 
 // ============================================================
@@ -1957,9 +1960,9 @@ const TACTIC_CARDS: Record<TacticCategory, TacticCard[]> = {
 
 // 阶段卡（场景19-21：按对方发言回合数判定）
 const TACTIC_PHASE_CARDS: Record<'attract' | 'comfort' | 'seduce', string> = {
-  attract: '吸引期（本轮判定：关系刚起步/对方投入少或降温）：只做DHV（展示价值）和筛选，不暴露任何兴趣；禁用一切提问，禁用未来邀约；多用"我"少用"你"，陈述句为主、冷读为主。范例："看你头像，我有90%把握你是个表面安静、内心极其有主见的人。"',
-  comfort: '舒适期（本轮判定：已有熟悉感/她愿意分享，或关系到暧昧/恋爱）：建立信任和情感纽带，制造"我们是一类人"的感觉；她分享经历后立刻连接你的相似故事；多用"咱们"、"看来我们都……"。范例："你也有过那种时候？我也是！我记得有一次……"',
-  seduce: '诱惑期（本轮判定：暧昧/恋爱且已约好见面或聊得够热）：制造见面理由、测试服从性；开始植入模糊邀约、种心锚；遇ASD立刻退回舒适期，绝不纠缠。范例："下次有机会带你见识一下什么叫真正的……"',
+  attract: '吸引期（本轮判定：关系刚起步/对方投入少或降温）：只做DHV（展示价值）和筛选，不暴露任何兴趣；禁无意义盘问（年龄/照片/住哪这类信息交换允许自然提问），禁用未来邀约；多用"我"少用"你"，陈述句为主、冷读为主。范例："看你头像，我有90%把握你是个表面安静、内心极其有主见的人。"',
+  comfort: '舒适期（本轮判定：已有熟悉感/她愿意分享）：建立信任和情感纽带，制造"我们是一类人"的感觉；她分享经历后立刻连接你的相似故事；多用"咱们"、"看来我们都……"。范例："你也有过那种时候？我也是！我记得有一次……"',
+  seduce: '恋爱期（本轮判定：关系已确立或聊得够热）：制造见面理由、测试服从性；开始植入模糊邀约、种心锚；遇ASD立刻退回舒适期，绝不纠缠。范例："下次有机会带你见识一下什么叫真正的……"',
 };
 
 // 防守类触发词（v73 强/弱分级防误伤）：
@@ -1971,51 +1974,17 @@ const DEFENSE_WEAK_RE = /^(嗯|哦|呵呵|哈{2,}|随便|不知道|没意思|无
 const SELF_NEED_RE = /(想你|喜欢你|很想你|舍不得|爱你|好想|离不开|一定要见|求你了)/;
 const INVITE_REJECT_RE = /(不去|算了|没空|改天|再说吧|别约|不想见|拒绝|呵呵不了)/;
 
-// [v73] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
-// [v147 阶段判定修复] phase 不再只看回合数：
-//   ① 回合数 = 基础下限（防刚认识就误进舒适/诱惑）
-//   ② 情感温度 = 最近 8 条对方消息的投入度（长消息/语气词/自述分享/主动提问加分，短敷衍减分）
-//   ③ 关系阶段 = 上限闸门：陌生/朋友/追求 永不 seduce；暧昧/恋爱 才允许诱惑期
-//   修复案例：追求期聊 10+ 轮（纯回合数误判 seduce）→ 全程注入诱惑期进攻卡（制造见面理由/测试服从性），
-//   把"她分享日常/自述特质/婉拒试探"全按字面交易式接话 → 改成追求期 8 轮后仍走 comfort，先接情绪再接事
-function resolveTacticPhase(stage: string, userTurns: number, history: any[], doneTopics: string[]): 'attract' | 'comfort' | 'seduce' {
-  const recent = (Array.isArray(history) ? history : [])
-    .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
-    .slice(-8);
-  let warmth = 0;
-  for (const h of recent) {
-    const t = String(h.content || '').trim();
-    const len = [...t].length;
-    if (len >= 12) warmth += 1;            // 愿意说长句 = 投入
-    else if (len <= 4) warmth -= 1;        // 短敷衍 = 降温
-    if (/[哈哈啊呢呀嘛呗啦哦嗯]{1,}|\[.{1,6}\]/.test(t)) warmth += 0.5;  // 语气词/emoji
-    if (/(我每天|我最近|我比较|我一般|我最|我挺|我有点|我其实|我平时|我就是|我这个人|我性格|我喜欢|我最爱|每天|经常|有时候|说实话)/.test(t)) warmth += 1;  // 自述/分享
-    if (/[？?]|吗$|你呢|你[呢咧]|你觉得|你喜不喜欢/.test(t)) warmth += 0.5;  // 主动提问
-  }
-  // [v20260811 话题] "约会"话题已聊过 ≈ 原"约会"里程碑达成
-  const hasDate = Array.isArray(doneTopics) && doneTopics.includes('约会');
-  const turns = userTurns;
-  // 诱惑期（seduce）闸门：仅暧昧/恋爱，且已约好见面 或 聊得够多且很热
-  if ((stage === '暧昧' || stage === '恋爱') && (hasDate || (turns >= 6 && warmth >= 2))) return 'seduce';
-  // 恋爱/挽回：默认舒适期（维护亲密/共情重建），不再用吸引卡
-  if (stage === '恋爱' || stage === '挽回') return 'comfort';
-  // 舒适期：聊得久且对方没在降温（warmth≥0）或 温度够 或 回合够+有温度
-  //   （聊得久但全程短敷衍 = 她在降温，不升级，保持吸引/防守姿态）
-  if ((turns >= 8 && warmth >= 0) || warmth >= 2 || (turns >= 4 && warmth >= 1)) return 'comfort';
-  return 'attract';
-}
-
+// [v73→v182 三阶段统一] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
+//   [v182] 战术阶段 = 关系阶段直接映射（吸引→attract、舒适→comfort、恋爱→seduce），
+//   不再用回合数/温度计推导——阶段由 extractProfile 自动升级或用户长按手动指定；
+//   旧 resolveTacticPhase（回合数+温度计推导）已整体删除
 function resolveTacticCategory(query: string, history: any[], memoryCard: MemoryCard | null): { category: TacticCategory; phase: 'attract' | 'comfort' | 'seduce'; cardIndex: number } {
-  const stage = memoryCard?.profile?.stage || '';
-  // 回合数 = 对方发言次数（user 消息）
-  const userTurns = (Array.isArray(history) ? history : []).filter((h) => h && h.role === 'user').length;
-  const doneTopics = Array.isArray(memoryCard?.topics_done) ? (memoryCard!.topics_done as string[]) : [];
-  const phase = resolveTacticPhase(stage, userTurns, history, doneTopics);
-  // 挽回期：不触发防守/进攻，走共情（类别仍给 attack 但卡组内容已含安全边界）
+  const stage = memoryCard?.profile?.stage || '吸引';
+  const phase = stage === '舒适' ? 'comfort' : stage === '恋爱' ? 'seduce' : 'attract';
   let category: TacticCategory = 'attack';
   const q = (query || '').trim();
   const lastSelf = (Array.isArray(history) ? history : []).filter((h) => h.role === 'assistant').slice(-1).map((h) => String(h.content || '')).join('');
-  if (stage !== '挽回' && (DEFENSE_STRONG_RE.test(q) || (q.length <= 4 && DEFENSE_WEAK_RE.test(q)))) category = 'defense';
+  if (DEFENSE_STRONG_RE.test(q) || (q.length <= 4 && DEFENSE_WEAK_RE.test(q))) category = 'defense';
   else if (SELF_NEED_RE.test(lastSelf) || INVITE_REJECT_RE.test(q)) category = 'rescue';
   // [v20260811 降本] 命中具体卡 → 只注入该卡（防守/救场按触发词细分；-1=未细分，全组精简注入）
   let cardIndex = -1;
@@ -2062,7 +2031,7 @@ const GLOBAL_TACTIC_PREAMBLE = `\n\n【战术指令】(本轮最高优先，先�
   + `全局原则（全程生效）：\n`
   + `- 回复字数 ≤ 她字数的1.3倍，通常一句；整条 ≤20字，超20字=失败必须压缩。\n`
   + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
-  + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落、真正受伤或关系处于挽回期 → 收起锋芒先共情，此场景禁用调侃与反击。`;
+  + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落或真正受伤 → 收起锋芒先共情，此场景禁用调侃与反击。`;
 
 // [v75] 战术变化部分（每轮按类别/阶段变化 → 放后缀不破坏前缀缓存）：阶段卡 + 命中类别卡组
 // [v79.2 瘦身] 卡组只输出"场景→态度→手法"规则；examples 范例已由知识库参考弹药承担
@@ -2871,21 +2840,17 @@ function isDeepSeekPeak(): boolean {
   }
 }
 
-// [v77] 六阶段 × 三采样参数联动（主回复/重生成按 memoryCard.profile.stage 取档）
+// [v77→v182 三阶段统一] 三阶段 × 三采样参数联动（主回复/重生成按 memoryCard.profile.stage 取档）
 //   设计依据：temperature=采样随机性（性格/冒险），presence=话题/词汇翻新，
 //   frequency=高频重复压制。三参数同向但幅度不同：
-//     暧昧三高（活跃多样、钩子不断）；挽回三低（稳定可预测、安全感）；
-//     中段差异：朋友期轮次密→frequency 给高压口头禅；追求期靠锚点重复拉近距离→frequency 不封顶
+//     恋爱三高（活跃多样、钩子不断）；舒适中段；吸引靠展示面/冷读，presence 给中高压口头禅
 //   frequency 峰值 0.85 封顶：给【话题锚点】复用留空间，且与 presence 叠加避免过度换词
 const STAGE_LLM_PARAMS: Record<string, { temperature: number; presence_penalty: number; frequency_penalty: number }> = {
-  '陌生': { temperature: 0.55, presence_penalty: 0.40, frequency_penalty: 0.70 },
-  '朋友': { temperature: 0.60, presence_penalty: 0.30, frequency_penalty: 0.80 },
-  '追求': { temperature: 0.65, presence_penalty: 0.50, frequency_penalty: 0.75 },
-  '暧昧': { temperature: 0.75, presence_penalty: 0.65, frequency_penalty: 0.85 },
-  '恋爱': { temperature: 0.60, presence_penalty: 0.30, frequency_penalty: 0.60 },
-  '挽回': { temperature: 0.40, presence_penalty: 0.15, frequency_penalty: 0.50 },
+  '吸引': { temperature: 0.58, presence_penalty: 0.35, frequency_penalty: 0.75 },
+  '舒适': { temperature: 0.62, presence_penalty: 0.40, frequency_penalty: 0.70 },
+  '恋爱': { temperature: 0.72, presence_penalty: 0.60, frequency_penalty: 0.80 },
 };
-// 无阶段/未识别阶段 → 朋友档（安全中间值，兼容旧记忆卡与窗口恢复场景）
+// 无阶段/未识别阶段 → 吸引档（安全中间值，兼容旧记忆卡与窗口恢复场景）
 const DEFAULT_STAGE_LLM = { temperature: 0.6, presence_penalty: 0.3, frequency_penalty: 0.7 };
 // [v77] 主回复输出上限（原后台 max_tokens 默认值，固定；思考档由 llmChat 内部自动放宽到 2000+）
 const MAIN_MAX_TOKENS = 1200;

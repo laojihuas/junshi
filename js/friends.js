@@ -369,11 +369,9 @@ const Friends = {
         const goalOpts = document.getElementById('goal-options');
         const cancelBtn = document.getElementById('stage-cancel');
 
-        // 当前 stage（含手动标记判断）
+        // 当前 stage（三阶段：吸引/舒适/恋爱；无则空）
         const st = this._stageInfo(session);
-        let current = st ? st.stage : '';
-        const manual = this._isManualStage(session);
-        if (manual && current === '陌生') current = ''; // 手动陌生态不参与高亮
+        let current = st && (st.stage === '吸引' || st.stage === '舒适' || st.stage === '恋爱') ? st.stage : '';
 
         // 高亮当前 stage
         opts.querySelectorAll('.stage-option').forEach(btn => {
@@ -406,7 +404,7 @@ const Friends = {
                 const ok = await this._setStage(session, val);
                 Utils.hideLoading();
                 if (ok) {
-                    Utils.toast(val === '__auto__' ? '已恢复 AI 判断' : '关系已更新');
+                    Utils.toast(val === '__auto__' ? '已设为自动（随对话升级）' : '已固定为「' + val + '」');
                     await this.load();
                 } else {
                     Utils.toast('保存失败，请重试');
@@ -447,16 +445,6 @@ const Friends = {
             memory_card: JSON.stringify(mc)
         });
         return !!updated;
-    },
-
-    // [v20260805] 手动标注判定：memory_card.profile.stage_source === 'manual'
-    _isManualStage(session) {
-        try {
-            const mc = this._parseMemoryCard(session);
-            return !!(mc && mc.profile && mc.profile.stage_source === 'manual');
-        } catch (e) {
-            return false;
-        }
     },
 
     // [v20260805] 解析 memory_card（text 列 JSON 字符串，兼容已 parse 对象）
@@ -636,32 +624,42 @@ const Friends = {
         return div.innerHTML;
     },
 
-    // [v20260805] A方案：关系阶段 → 头像底色（追求蓝/暧昧粉/恋爱红/挽回琥珀/朋友灰）
-    // [v20260809] 朋友与陌生同为灰色（#5F5E5A），其余不变
-    // 陌生/无画像 → 一律灰色（title 显示"陌生"）
+    // [v182 三阶段统一] 关系阶段 → 头像底色（吸引蓝/舒适粉/恋爱红）
+    //   灰色 = 聊天 ≤5 条（未判定关系）或暂无画像；旧六阶段存量值换算三阶段
     _STAGE_COLORS: {
-        '追求': '#185FA5',
-        '暧昧': '#993556',
+        '吸引': '#185FA5',
+        '舒适': '#993556',
         '恋爱': '#A32D2D',
-        '挽回': '#854F0B',
-        '朋友': '#5F5E5A',
     },
     _DEFAULT_GRAY: '#5F5E5A',
+    // [v182] 旧六阶段（陌生/朋友/追求/暧昧/恋爱/挽回）→ 三阶段换算（与后端 normalizeStage 一致）
+    _normalizeStage(stage) {
+        if (stage === '吸引' || stage === '舒适' || stage === '恋爱') return stage;
+        if (stage === '陌生' || stage === '朋友') return '吸引';
+        if (stage === '追求' || stage === '挽回') return '舒适';
+        if (stage === '暧昧') return '恋爱';
+        return '';
+    },
 
     _stageInfo(s) {
         let stage = '';
+        let msgCount = 0;
         try {
             if (s && s.memory_card) {
-                // memory_card 为 text 列存 JSON 字符串（兼容已 parse 的对象）
                 const mc = typeof s.memory_card === 'string' ? JSON.parse(s.memory_card) : s.memory_card;
-                stage = (mc && mc.profile && mc.profile.stage) || '';
+                stage = this._normalizeStage((mc && mc.profile && mc.profile.stage) || '');
+            }
+            // [v182] 消息数（列表查询已带 chat_messages(count) 聚合）
+            if (s && Array.isArray(s.chat_messages) && s.chat_messages[0] && typeof s.chat_messages[0].count === 'number') {
+                msgCount = s.chat_messages[0].count;
             }
         } catch (e) {
             stage = '';
         }
-        const color = this._STAGE_COLORS[stage];
-        if (color) return { stage, color };
-        // [v20260805b] 没聊天/陌生：一律灰色，不显示随机底色
-        return { stage: stage || '陌生', color: this._DEFAULT_GRAY };
+        // 聊天 ≤5 条 → 灰色（还没到判定阶段）；超过后按阶段上色；无阶段 → 灰兜底
+        if (msgCount <= 5 || !stage) {
+            return { stage: stage || '', color: this._DEFAULT_GRAY };
+        }
+        return { stage, color: this._STAGE_COLORS[stage] || this._DEFAULT_GRAY };
     }
 };
