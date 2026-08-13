@@ -465,6 +465,8 @@ Deno.serve(async (req) => {
     let dupReason = '';
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
+    // [v183 锚点降频] 锚点注入模式（_debug 用；提到顶层防作用域事故，块内赋值）
+    let anchorMode: 'full' | 'light' | 'none' = 'none';
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -573,6 +575,21 @@ Deno.serve(async (req) => {
         if (!reply) {
         // [v148] 战术判定已提前到检索前（549 行，phase 供弹药加权），此处直接复用
         // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
+        // [v183 锚点降频] 事件驱动三态（方案 A+B，替代"每轮注入+鼓励每轮用"）：
+        //   full = 本轮她的话含锚点词 → 完整锚点块（抓住做文章，最高优先级发挥点）
+        //   light = 最近 4 轮没提过且轮次为 4 的倍数 → 轻量提醒（防 LLM 忘掉连续剧线，但不再强制每轮塞）
+        //   none = 最近提过（history 可见，无需打扰）/无锚点/轮次未到 → 不注入（省 token + 消除"每轮硬塞"行为）
+        anchorMode = 'none';
+        const anchorKw = (memoryCard?.profile?.anchor || '').trim();
+        if (anchorKw) {
+          const userTexts = (Array.isArray(history) ? history : [])
+            .filter((h: any) => h && h.role === 'user' && typeof h.content === 'string')
+            .map((h: any) => String(h.content || ''));
+          const hitThis = !switchTopic && String(query || '').includes(anchorKw);
+          const hitRecent = userTexts.slice(-4).some((t) => t.includes(anchorKw));
+          if (hitThis) anchorMode = 'full';
+          else if (!hitRecent && userTexts.length % 4 === 0) anchorMode = 'light';
+        }
         const built = buildSystemContent({
           systemPrompt: effectivePrompt,
           userBio,
@@ -785,6 +802,8 @@ Deno.serve(async (req) => {
         // [v20260812 兴趣引擎] 验证：streak=连续低兴趣数 topic=当前话题
         interest_streak: memoryCard?.interest?.streak ?? 0,
         interest_topic: memoryCard?.interest?.topic || null,
+        // [v183] 锚点注入模式（验证三态：full=她提梗/light=每4轮提醒/none=不注入）
+        anchor_mode: anchorMode,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
@@ -2078,6 +2097,9 @@ function buildSystemContent(opts: {
   thinkingBudget?: boolean;
   // [v129] 本轮参考弹药是否含敏感词（高危词预检结果）→ 命中则注入【措辞底线】保味指令
   riskHit?: boolean;
+  // [v183 锚点降频] 锚点注入模式（调用处预判，事件驱动）：
+  //   full=本轮她的话含锚点词→完整块；light=每4轮轻量提醒；none=不注入
+  anchorMode?: 'full' | 'light' | 'none';
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -2172,11 +2194,20 @@ function buildSystemContent(opts: {
   }
 
   // [v75 缓存②] 【话题锚点】（记忆卡 profile.anchor，跨轮次变化）
+  // [v183 锚点降频] 三态注入（方案 A 措辞降频 + 方案 B 事件驱动）：
+  //   full（她本轮提到梗）：完整块，抓住做文章——这是锚点的核心价值（连续剧接续），只在此刻全力发挥
+  //   light（每4轮一次轻量提醒）：只提醒"梗还在"，措辞明确"自然时再提、不必刻意"→ 不再诱导 LLM 每轮硬塞
+  //   none（最近提过/轮次未到）：不注入 → 省 token，且消除"每轮强制连续剧"导致的重复腻感
   const anchor = opts.memoryCard?.profile?.anchor || '';
-  if (anchor) {
-    d += `\n\n【话题锚点】你和她的对话有一个长期共同梗：「${anchor}」——它是你俩的专属记忆，用来拉近距离。\n`
-      + `- 每轮尽量自然地把它挂进回复（提一嘴、延伸、用它当邀约由头），但不生硬、不每句都提；\n`
-      + `- 它出现在她的话里时，立刻抓住做文章（升级/调侃/延伸），别忽略。`;
+  const anchorMode = opts.anchorMode || 'none';
+  if (anchor && anchorMode !== 'none') {
+    if (anchorMode === 'full') {
+      d += `\n\n【话题锚点】你和她的对话有一个长期共同梗：「${anchor}」——她刚刚提到了它，这是你俩的专属记忆，拉近距离的利器。\n`
+        + `- 本轮必须自然地接住它：接梗/延伸/升级（调侃、回忆、拿它当邀约由头），这是本轮最高优先级的发挥点；\n`
+        + `- 接住之后自然收住，别在这一个梗上反复打转。`;
+    } else {
+      d += `\n\n【话题锚点】你和她有个共同梗：「${anchor}」（你俩的专属记忆）。最近没怎么提它了，自然相关时（她主动提、或话题天然搭得上）可以顺势提一嘴；不要刻意找机会硬提。`;
+    }
   }
 
   // [v75 缓存②] 【当前关系阶段】（按 stage 变化，放动态区）
