@@ -349,7 +349,9 @@ const Chat = {
         }
 
         // [多窗口会话] 将用户消息追加到本窗口（该好友）的对话历史
-        WindowSession.append(this.currentSessionId, 'user', text);
+        //   [v184] 携带 created_at（后端话题健康度"响应速度"维度数据源；DB 消息有则用，无则当前时间）
+        const userCreatedAt = (userMsg && userMsg.created_at) || new Date().toISOString();
+        WindowSession.append(this.currentSessionId, 'user', text, userCreatedAt);
 
         // 2. 显示加载中
         const container = document.getElementById('chat-messages');
@@ -398,7 +400,9 @@ const Chat = {
                 }
 
                 // [多窗口会话] 将助手回复追加到本窗口（该好友）的对话历史
-                WindowSession.append(this.currentSessionId, 'assistant', reply);
+                //   [v184] 携带 created_at（保持与用户消息一致的时间戳格式）
+                const aiCreatedAt = (assistantMsg && assistantMsg.created_at) || new Date().toISOString();
+                WindowSession.append(this.currentSessionId, 'assistant', reply, aiCreatedAt);
 
                 // [v20260805] 配额已在服务端原子扣次，移除本地计数
 
@@ -487,7 +491,9 @@ const Chat = {
                     this.messages.push(assistantMsg);
                     this.renderMessages();
                 }
-                WindowSession.append(this.currentSessionId, 'assistant', reply);
+                // [v184] 携带 created_at（与用户消息时间戳格式一致）
+                const swCreatedAt = (assistantMsg && assistantMsg.created_at) || new Date().toISOString();
+                WindowSession.append(this.currentSessionId, 'assistant', reply, swCreatedAt);
                 await DB.updateSessionTime(this.currentSessionId);
             } else {
                 Utils.toast(reply === '掉线了' ? '军师掉线了，稍后再试' : '换话题失败，请重试');

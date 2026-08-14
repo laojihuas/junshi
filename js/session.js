@@ -89,7 +89,8 @@ const WindowSession = {
     },
 
     // 追加一条对话记录（role: 'user' | 'assistant'）
-    append(friendSessionId, role, content) {
+    // [v184] 第三参数 created_at：后端话题健康度"响应速度"维度数据源（缺省不存，向后兼容旧历史）
+    append(friendSessionId, role, content, created_at) {
         this._ensureInit();
         const fid = friendSessionId || this._data.activeFriend;
         if (!fid || !content) return;
@@ -98,7 +99,9 @@ const WindowSession = {
         }
         // 限制单好友历史长度，防止 sessionStorage 溢出（保留最近 50 条）
         const history = this._data.conversations[fid];
-        history.push({ role: role, content: content });
+        const item = { role: role, content: content };
+        if (created_at) item.created_at = created_at;
+        history.push(item);
         if (history.length > 50) {
             history.splice(0, history.length - 50);
         }
