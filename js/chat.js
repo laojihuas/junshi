@@ -153,7 +153,8 @@ const Chat = {
         const facts = Array.isArray(mc.facts) ? mc.facts : [];
         const goal = mc.goal || '';
 
-        const STAGE_COLORS = { '吸引': '#185FA5', '舒适': '#993556', '恋爱': '#A32D2D' };
+        // [v190] 舒适 #993556(粉) → #C9971C(黄)：与好友列表头像一致
+        const STAGE_COLORS = { '吸引': '#185FA5', '舒适': '#C9971C', '恋爱': '#A32D2D' };
         const stageColor = STAGE_COLORS[p.stage] || '#5F5E5A';
         const stageTag = (p.stage && p.stage !== '')
             ? `<span class="memory-tag" style="background:${stageColor}">${this._escapeHtml(p.stage)}</span>`

@@ -1322,6 +1322,16 @@ function topicHit(topic: TopicDef | undefined, text: string): boolean {
   if (!topic || !text) return false;
   return topic.kws.some((k) => String(text).includes(k));
 }
+
+// [v190 资料型投喂识别] 用户把女生背景资料（第三人称描述："她叫XX，25岁，住XX…"）
+//   粘贴给军师 → 非女生原话，不参与话题打钩；但资料仍进记忆卡（画像提取可见）
+//   特征：以"她叫/她今年/她住/她喜欢…"等第三人称描述开头，且不是简短反问
+function isProfileFeed(text: string): boolean {
+  const t = String(text || '').trim();
+  if (!t || t.length < 6) return false;
+  return /(^|[，。；\n])(她叫|她今年|她现在|她住|她家在|她名字|她是.{0,6}(岁|人|的)|她喜欢|她爱|她生日|她星座|她属|她爸妈|她家|她工作|她在).{0,10}(岁|住|区|市|县|村|镇|家|名字|名|工作|公司|学校|大学|喜欢|爱|生日|星座|属)/.test(t)
+    || /(^|[，。；\n])(女生|女孩|妹子)(叫|今年|现在|住|是|在|喜欢|爱)/.test(t);
+}
 // [v20260811] 权重话题"聊出结果"判定（年龄/照片/住哪必须拿到具体信息才打钩）
 const TOPIC_RESULT_RE: Record<string, RegExp> = {
   'age': /我(今年|现在)?\s?[0-9一二三四五六七八九十]{1,2}\s?岁|生日|属[鼠牛虎兔龙蛇马羊猴鸡狗猪]|星座|我是[0-9]{2}年/,
@@ -1789,10 +1799,13 @@ async function updateMemoryCard(ctx: {
   // [v20260813 攻略已砍] 话题打钩：她本轮的话命中"当前关系话题清单"里未完成话题 → 打钩
   //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
   //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
+  //   [v190 资料型投喂] 本轮消息是"她叫XX/25岁/住XX"第三人称资料描述 → 不打钩
+  //     （资料仅供画像提取/展开聊天，不代表"聊过"该话题）
   {
     const stage = (card.profile && card.profile.stage) || '吸引';
     const list = stageTopicList(stage, card);
-    const herText = firstRound ? '' : String(ctx.currentQuery || '');
+    const herText = (firstRound || isProfileFeed(ctx.currentQuery || ''))
+      ? '' : String(ctx.currentQuery || '');
     const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
     let changed = false;
     if (herText) {
@@ -1833,18 +1846,23 @@ async function updateMemoryCard(ctx: {
 async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[]; topics_done: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
   const curTopics = JSON.stringify(Array.isArray(card.topics_done) ? card.topics_done : []);
-  // [v20260812 仅评价过滤] 首条 user 消息是用户投喂的女生资料（"她叫XX，25岁…"），非女生原话：
-  //   只在本函数（关系阶段/画像判定）剔除首条——主回复上下文/记忆/检索仍保留资料供展开聊天
+  // [v20260812 仅评价过滤] 首条 user 消息多为用户投喂的女生资料（"她叫XX，25岁…"）
+  // [v190 修正] 首条资料【保留】喂画像提取（age/region/personality 需从资料读到 →
+  //   用户要求"资料记入记忆卡"）；但 prompt 明确资料行不算已聊话题、不推进阶段
   const userMsgs = (Array.isArray(history) ? history : [])
     // [v20260809 归属加固] 只取对方（role=user）的话喂画像提取：
     //   把军师/用户自己发的（assistant）也喂进去 → LLM 偶尔把"自己说的话"当对方画像
     .filter((h) => h && h.role === 'user' && typeof h.content === 'string');
-  const recentDialogue = (userMsgs.length > 1 ? userMsgs.slice(1) : [])
+  const recentDialogue = userMsgs
     .slice(-6)
-    .map((h) => `对方：${truncateText(String(h.content || ''), 200)}`)
+    .map((h) => {
+      const text = String(h.content || '');
+      // [v190] 资料行标注：第三人称背景资料（供提取静态画像），与真实对话区分
+      return (isProfileFeed(text) ? '[背景资料] ' : '[对话] ') + `对方：${truncateText(text, 200)}`;
+    })
     .join('\n');
   const topicShortList = TOPIC_LIBRARY.map((t) => t.short).join('/');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近对话：\n${recentDialogue || '（无）'}\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近内容：\n${recentDialogue || '（无）'}\n说明：[背景资料] 行是你的用户粘贴的对方背景资料（非对方原话），可用于提取静态画像字段（age/region/personality 等），但**不算真实对话，不得据此判定"聊过某个话题"、不得作为关系阶段推进依据**；[对话] 行才是对方本人说的话。\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——只在 [对话] 里判定，[背景资料] 提及的内容不算；不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
     + `[v60→v182 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"吸引→舒适→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级到"吸引"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -2371,8 +2389,14 @@ function buildSystemContent(opts: {
     : '你是用户本人，一个有趣、有脾气、有底线的真人。请根据对方的原话，用你自己的语气给出可直接发出的回复：口语化、有态度、像个真人发微信。';
   s += `\n\n【附加规则】\n${extraRule}`;
 
+  // [v190 检索引用强化] 用户简介 = 用户真实资料的唯一事实源：
+  //   对方问及自身情况（年龄/工作/城市/学历/家庭/爱好/收入等）→ 必须先在本简介中检索对应项，
+  //   有则照实引用回答；简介没有的项不得编造（用模糊带过/反问她/转移）；与简介冲突的说法一律禁止
   if (opts.userBio && opts.userBio.trim()) {
-    s += `\n\n【用户个人简介】（以下是你自己的个人信息，回复涉及自身情况时以此为准，不编造不虚构）\n${opts.userBio.trim()}`;
+    s += `\n\n【用户个人简介】（这是你自己的真实资料，是聊天中一切"关于你的事实"的唯一来源）\n${opts.userBio.trim()}\n`
+      + `- 对方问到你的个人信息（年龄/工作/城市/学历/家庭/爱好/收入/经历等）时，先从本简介检索对应信息，有就如实引用；\n`
+      + `- 简介里没有的信息：不编造，用含糊带过、反问对方或转移话题的方式处理；\n`
+      + `- 你回复中出现的任何个人事实（几岁/哪人/做什么/家庭情况/兴趣）必须与本简介一致，禁止自相矛盾。`;
   }
 
   // [v20260813 缓存重构] ===== 动态区（注入最后一条 user 消息的【军师内参】，不占 system）=====
