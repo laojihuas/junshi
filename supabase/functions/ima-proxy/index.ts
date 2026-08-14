@@ -249,6 +249,13 @@ const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟�
 //   注意：不留旧代码分支，开关只做"评分注入降级为普通清单"的快速失败。
 const USE_V184_TOPIC = Deno.env.get('USE_V184_TOPIC_MECHANISM') !== '0';
 
+// [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 →
+//   注入"写错一个字"指令（代码层概率，不依赖 LLM 执行概率）。
+//   环境变量 USE_TYPO_HINT=0 可快速关停，默认开启。
+const USE_TYPO_HINT = Deno.env.get('USE_TYPO_HINT') !== '0';
+const TYPO_PROBABILITY = 0.2;   // 1/5
+const TYPO_WINDOW_MS = 60 * 1000; // <1 分钟
+
 Deno.serve(async (req) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -633,9 +640,24 @@ Deno.serve(async (req) => {
           sovDiff,
         });
         const systemContent = built.systemContent;
-        const innerContent = built.dynamicContent;
+        let innerContent = built.dynamicContent;
         pulseAdvice = built.pulseAdvice;
         factsInjected = built.factsInjected;
+        // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 → 动态注入"写错一个字"指令
+        //   代码层概率（真 20%），LLM 不掷骰子只执行；指令只在本轮出现 → 不扩散到后续轮次
+        lastTypoHit = false;
+        if (USE_TYPO_HINT && llmKey) {
+          try {
+            const histAll = (Array.isArray(history) ? history : []).filter((h: any) => h && h.created_at);
+            const lastTs = histAll.length ? Date.parse(String(histAll[histAll.length - 1].created_at)) : NaN;
+            if (!isNaN(lastTs) && Date.now() - lastTs < TYPO_WINDOW_MS && Math.random() < TYPO_PROBABILITY) {
+              innerContent += '\n\n【错字彩蛋】对方秒回，这条回复里故意写错一个字（常见输入法错字，如"在→再、的→地、怎么→咋么"），错一个就够，仅本轮生效，下一轮恢复正常。';
+              lastTypoHit = true;
+            }
+          } catch (e: any) {
+            console.warn('错字彩蛋判定失败:', e.message);
+          }
+        }
         // [v20260813 缓存重构] system 只含字节级稳定块；动态块全部注入最后一条 user 消息的
         //   【军师内参】区（位于 history 之后 → 尾部变化不再破坏 system+history 前缀缓存）
         const INNER_INTRO = '【军师内参】（以下是系统注入的内部信息，不是对方发来的消息：仅供执行参考，不得引用、复述或回复这些内容）\n';
@@ -648,12 +670,16 @@ Deno.serve(async (req) => {
         ];
         // [v77] 六阶段三参数联动：按记忆卡阶段取采样档（temperature/presence/frequency）
         usedStageLlm = resolveStageLlmParams(memoryCard?.profile?.stage);
+        // [v185 错字彩蛋·档位] 命中错字轮 → 本次生成降级 off 档：
+        //   秒回短句无需深度思考（省 token/延时，与"秒回"设定自洽）；
+        //   更关键：thinking 档下 LLM 会自我纠正、不肯写错字（实测 high 档把"错字"敷衍成口语词"咋"）
+        const replyThinking: ThinkingMode = lastTypoHit ? 'off' : effectiveThinkingMode;
         reply = await llmChat(llmKey, llmBase, llmModel, messages, {
           temperature: usedStageLlm.temperature,
           maxTokens: MAIN_MAX_TOKENS,
           frequencyPenalty: usedStageLlm.frequency_penalty,
           presencePenalty: usedStageLlm.presence_penalty,
-          thinking: effectiveThinkingMode,
+          thinking: replyThinking,
           _stage: 'main_reply',
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
@@ -700,7 +726,8 @@ Deno.serve(async (req) => {
             maxTokens: MAIN_MAX_TOKENS,
             frequencyPenalty: usedStageLlm.frequency_penalty,
             presencePenalty: usedStageLlm.presence_penalty,
-            thinking: effectiveThinkingMode,
+            // [v185] 重试沿用主回复档位（错字轮=off）
+            thinking: replyThinking,
           });
           if (retry) reply = retry;
         }
@@ -757,7 +784,8 @@ Deno.serve(async (req) => {
     mark('memory');
 
     // [v129 消毒观测] 每轮记录高危词预检 + 消毒检测结果，跑几天用 grep "[sanitize]" 统计消毒率
-    console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
+    // [v185] 顺带记录 typo_hit，grep "[sanitize]" 可同时看错字命中率
+    console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} typo_hit=${lastTypoHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
 
     return new Response(JSON.stringify({
       reply,
@@ -789,6 +817,8 @@ Deno.serve(async (req) => {
         // [v129] 消毒观测（替换已删除的选句通道字段）：本轮参考弹药是否含敏感词 + 生成后是否检出消毒
         risk_hit: lastRiskHit,
         sanitize_hit: lastSanitizeHit,
+        // [v185 错字彩蛋] 本轮是否命中秒回错字（验证 20% 命中率）
+        typo_hit: lastTypoHit,
         // [v20260812 逻辑重复检测] 验证：dup_hit=是否判重 dup_reason=复核原因（字面/框架）
         dup_hit: dupHit,
         dup_reason: dupReason,
@@ -2721,6 +2751,8 @@ function detectSanitize(reply: string | null | undefined, kbItems: any[]): strin
 // [v129] 消毒观测（顶层声明防作用域事故）：riskHit=本轮参考弹药含敏感词；sanitizeHit=生成后检出消毒
 let lastRiskHit = false;
 let lastSanitizeHit = false;
+// [v185 错字彩蛋] 观测：本轮是否命中"秒回错字"（_debug 透传，验证 20% 命中率）
+let lastTypoHit = false;
 // [v72 调试] 最近一次主回复的思考链原文（thinking 档才有；_debug 透传，辅助调用不覆盖）
 let llmReasoning = '';
 
