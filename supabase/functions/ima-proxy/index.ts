@@ -1345,7 +1345,8 @@ function topicResultHit(topic: TopicDef, text: string): boolean {
 //     ③ 情绪锚点：含情绪词（开心/烦/累/笑死/绝了/无语/emoji）+1
 //     ④ 接梗/延续：本轮内容含上轮军师回复的关键词（bigram 重合 ≥1）+1
 //     ⑤ 上下文深度：本轮字数 > 她上轮字数 ×1.2（被激发了）+1
-//     ⑥ 响应速度：距她上条消息 ≤60s +1；≥5min -1（依赖前端 history 携带 created_at，
+//     ⑥ 响应速度：距她上条消息 ≤120s +1；≥5min -1（[v188] 60s→120s 放宽：用户手动
+//        复制女生消息投喂占时间，1 分钟窗口误伤真·秒回；依赖前端 history 携带 created_at，
 //        无时间戳则该项 0 分，不误伤）
 //   判定：≥2 → none（聊得火热，继续深挖）；=1 → mild（略有降温，预埋钩子）；
 //   ≤0 → force（明显敷衍，下轮软过渡）；并对比上轮分数输出趋势 up/flat/down，
@@ -1389,7 +1390,9 @@ function assessTopicHealth(
   if (lastTwo.length >= 2 && lastTwo[1].at && lastTwo[0].at) {
     const gapSec = (new Date(lastTwo[1].at).getTime() - new Date(lastTwo[0].at).getTime()) / 1000;
     if (!isNaN(gapSec)) {
-      if (gapSec <= 60) score += 1;
+      // [v188 放宽] 加分窗口 60s→120s：用户手动复制女生消息投喂军师占时间，
+      //   1 分钟窗口会把真·秒回误判成普通回复（少拿 +1）。2 分钟内仍算秒回热度。
+      if (gapSec <= 120) score += 1;
       else if (gapSec >= 300) score -= 1;
     }
   }
