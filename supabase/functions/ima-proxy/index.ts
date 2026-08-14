@@ -275,6 +275,9 @@ Deno.serve(async (req) => {
     const mark = (name: string) => perfMark.push([name, Date.now()]);
     mark('start');
 
+    // [v186] 本轮唯一 ID（usage 落库聚合口径：一轮 = 一个 request_id）
+    currentRequestId = crypto.randomUUID();
+
     const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
 
@@ -787,7 +790,8 @@ Deno.serve(async (req) => {
     // [v185] 顺带记录 typo_hit，grep "[sanitize]" 可同时看错字命中率
     console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} typo_hit=${lastTypoHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
 
-    return new Response(JSON.stringify({
+    // [v186] 先构造响应体，落库成功后再返回（usage 写库失败不影响主回复）
+    const payload = {
       reply,
       from_knowledge_base: hitKnowledge,
       // [v20260805] 配额已在 RPC 内原子扣次，此处透传扣次信息（不暴露免费档上限以外的敏感值）
@@ -908,7 +912,10 @@ Deno.serve(async (req) => {
         // [v72] 思考链原文（thinking 档才有；完整保留，调试/教学用）
         llm_reasoning: llmReasoning || null,
       },
-    }), { headers, status: 200 });
+    };
+    // [v186] 批量落库 LLM usage（写库失败只记日志，不影响已构造的响应）
+    await persistLlUsage();
+    return new Response(JSON.stringify(payload), { headers, status: 200 });
 
   } catch (error: any) {
     console.error('Error:', error.message);
@@ -2694,14 +2701,51 @@ async function llmChat(
     throw new Error('LLM 返回内容为空');
   }
   // [vB] usage 采集（token 测量用，_debug 透传）
+  // [v186] 补记 model/thinking → persistLlUsage 落库 llm_usage_log
   if (data?.usage) {
-    llmUsageLog.push({ stage: (opts as any)._stage || 'llm', usage: data.usage });
+    llmUsageLog.push({ stage: (opts as any)._stage || 'llm', usage: data.usage, model: llmModel, thinking });
   }
   return content.trim();
 }
 
 // [vB] LLM usage 日志（token 测量；顶层声明防作用域事故）
-const llmUsageLog: { stage: string; usage: any }[] = [];
+// [v186] 扩展：补记 model/thinking；响应返回前由 persistLlUsage 批量写库 llm_usage_log
+const llmUsageLog: { stage: string; usage: any; model?: string; thinking?: string }[] = [];
+// [v186] 一轮一个 request_id（Edge Function 每请求独立沙箱，顶层变量安全）
+let currentRequestId = '';
+
+// [v186] 批量落库 LLM usage（在主流程返回前调用；写库失败只记日志，不影响回复）
+async function persistLlUsage() {
+  if (llmUsageLog.length === 0) return;
+  const u = Deno.env.get('SUPABASE_URL') || '';
+  const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+  if (!u || !key) return;
+  const rows = llmUsageLog.map((e) => {
+    const us = e.usage || {};
+    const prompt = Number(us.prompt_tokens) || 0;
+    const hit = Number(us.prompt_cache_hit_tokens) || 0;
+    return {
+      request_id: currentRequestId || 'unknown',
+      stage: e.stage || 'llm',
+      model: e.model || '',
+      prompt_tokens: prompt,
+      completion_tokens: Number(us.completion_tokens) || 0,
+      cache_hit_tokens: hit,
+      cache_miss_tokens: Math.max(Number(us.prompt_cache_miss_tokens) || 0, prompt - hit),
+      thinking: e.thinking || '',
+    };
+  });
+  try {
+    const resp = await fetch(`${u}/rest/v1/llm_usage_log`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${key}`, 'apikey': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify(rows),
+    });
+    if (!resp.ok) console.warn(`[usage] 落库失败 HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  } catch (e: any) {
+    console.warn('[usage] 落库异常:', e.message);
+  }
+}
 
 // ============================================================
 // [v117b 归属标签清洗] 剥掉 LLM 输出里偶发复制的上下文归属标签

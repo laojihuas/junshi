@@ -237,6 +237,57 @@
             </div>
         </div>
 
+        <!-- [v187] LLM 成本统计（数据源 llm_usage_log；口径=一轮 request_id 合计；精确计价 峰谷×三档） -->
+        <div class="card" id="llm-cost-card" style="margin-top:20px;">
+            <div class="card-title">
+                <span>LLM 成本统计 <span style="font-size:12px;color:var(--muted);font-weight:400;">（近 7 天逐日 · 每小时自动刷新 · V4-Flash 精确计价）</span></span>
+                <span style="font-size:12px;color:var(--muted);" id="llm-refresh-time">-</span>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">本周轮数</div>
+                    <div class="value" style="font-size:22px;" id="llm-week-calls">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">本周平均 token/轮</div>
+                    <div class="value" style="font-size:22px;" id="llm-week-avg-tokens">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">本周平均 元/轮</div>
+                    <div class="value" style="font-size:22px;" id="llm-week-avg-cost">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">缓存命中率</div>
+                    <div class="value" style="font-size:22px;" id="llm-week-hit-rate">-</div>
+                    <div style="height:6px;background:#ECEFF1;border-radius:3px;margin-top:8px;overflow:hidden;">
+                        <div id="llm-week-hit-bar" style="height:100%;width:0%;background:var(--green);border-radius:3px;transition:width .4s;"></div>
+                    </div>
+                </div>
+            </div>
+            <div style="overflow-x:auto;margin-top:16px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>日期</th>
+                            <th>轮数</th>
+                            <th>总 token</th>
+                            <th>平均 token/轮</th>
+                            <th>总费用（元）</th>
+                            <th>平均 元/轮</th>
+                            <th>缓存命中率</th>
+                        </tr>
+                    </thead>
+                    <tbody id="llm-daily-tbody">
+                        <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div style="display:flex;gap:24px;margin-top:12px;font-size:12px;color:var(--muted);">
+                <span id="llm-month-summary">本月：-</span>
+                <span>计价：缓存命中/未命中/输出三档 × 峰谷（高峰 9-12、14-18 双倍）</span>
+            </div>
+        </div>
+
         <!-- Tabs -->
         <div class="tabs">
             <div class="tab active" data-tab="users">用户管理</div>
@@ -512,6 +563,52 @@
                 const { data: { user } } = await sb.auth.getUser();
                 return user?.user_metadata?.is_admin === true;
             }
+        }
+
+        // [v187] LLM 成本统计（admin_llm_stats RPC：近7天逐日 + 本周 + 本月）
+        //   缓存命中率 = hit/(hit+miss)，未命中=0 显示 "-"
+        async function loadLlmStats() {
+            if (!sb) return;
+            const { data, error } = await sb.rpc('admin_llm_stats');
+            if (error || !data || data.error) {
+                console.warn('admin_llm_stats 失败:', error || data);
+                return;
+            }
+            const fmt = (v, d = 0) => v == null ? '-' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: d });
+            const fmtCost = (v) => v == null ? '-' : '¥' + Number(v).toFixed(4);
+            const hitRate = (r) => r == null ? null : (Number(r) * 100).toFixed(1) + '%';
+
+            const w = data.weekly || {};
+            document.getElementById('llm-week-calls').textContent = fmt(w.calls);
+            document.getElementById('llm-week-avg-tokens').textContent = fmt(w.avg_tokens);
+            document.getElementById('llm-week-avg-cost').textContent = fmtCost(w.avg_cost);
+            const hitPct = w.cache_hit_rate == null ? null : Math.round(Number(w.cache_hit_rate) * 100);
+            document.getElementById('llm-week-hit-rate').textContent = hitPct == null ? '-' : hitPct + '%';
+            document.getElementById('llm-week-hit-bar').style.width = (hitPct == null ? 0 : hitPct) + '%';
+
+            const m = data.monthly || {};
+            document.getElementById('llm-month-summary').textContent =
+                '本月：' + fmt(m.calls) + ' 轮 · ' + fmt(m.total_tokens) + ' token · ' + fmtCost(m.total_cost) +
+                ' 元 · 平均 ' + fmt(m.avg_tokens) + ' token/轮 · 平均 ' + fmtCost(m.avg_cost) + ' 元/轮 · 命中率 ' + hitRate(m.cache_hit_rate);
+
+            const daily = Array.isArray(data.daily) ? data.daily : [];
+            const tbody = document.getElementById('llm-daily-tbody');
+            if (daily.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">暂无数据（从部署起累计，先跑几天）</td></tr>';
+            } else {
+                tbody.innerHTML = daily.map(d => `
+                    <tr>
+                        <td>${d.period || '-'}</td>
+                        <td>${fmt(d.calls)}</td>
+                        <td>${fmt(d.total_tokens)}</td>
+                        <td>${fmt(d.avg_tokens)}</td>
+                        <td>${fmtCost(d.total_cost)}</td>
+                        <td>${fmtCost(d.avg_cost)}</td>
+                        <td>${hitRate(d.cache_hit_rate) || '-'}</td>
+                    </tr>`).join('');
+            }
+            document.getElementById('llm-refresh-time').textContent =
+                '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
         }
 
         // 获取统计数据（[v20260805] 改走 admin_stats RPC：设备维度真实口径）
@@ -952,6 +1049,9 @@
                     loadCodes();
                     loadFeedback();
                     loadPrompt();
+                    loadLlmStats();
+                    // [v187] LLM 成本每小时自动刷新
+                    setInterval(loadLlmStats, 60 * 60 * 1000);
                 }
             }
 
@@ -979,6 +1079,8 @@
                 loadCodes();
                 loadFeedback();
                 loadPrompt();
+                loadLlmStats();
+                setInterval(loadLlmStats, 60 * 60 * 1000);
             });
 
             // 退出
