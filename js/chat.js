@@ -2,17 +2,6 @@
 // 军师 - 聊天窗口模块
 // ============================================================
 
-// [v20260811 话题] 话题库 short 名清单（与后端 TOPIC_LIBRARY 对齐，话题打钩判断用）
-//   顺序与后端一致：破冰15/升温15/暧昧10/恋爱10
-const TOPIC_LIBRARY_SHORTS = [
-    '名字', '年龄', '照片', '住哪', '工作', '作息', '通勤', '饮食', '做饭', '运动',
-    '爱好', '追剧', '音乐', '电影', '看书',
-    '周末', '社交', '酒量', '抽烟', '宠物', '旅游', '季节', '穿衣', '手机', '睡眠',
-    '怕什么', '学生时代', '童年', '家庭', '父母关系',
-    '感情经历', '前任', '分手原因', '前任态度', '择偶标准', '恋爱观', '第一印象', '关系状态', '同事关系', '压力',
-    '约会', '敏感面', '金钱观', '消费', '未来', '结婚', '孩子', '定居', '吵架', '我们',
-];
-
 const Chat = {
     currentSessionId: null,
     currentFriendName: '',
@@ -53,9 +42,6 @@ const Chat = {
         } catch (e) {
             this._prevStage = '';
         }
-        // [v20260813 攻略已砍] 话题清单面板：进会话默认折叠；打开时无 topics 数据，首轮响应后渲染
-        if (typeof this._guideExpanded !== 'boolean') this._guideExpanded = false;
-        this._updateTopicPanel(null, null);
 
         // [多窗口会话] 记录当前窗口正在对话的好友，
         // 该好友在本窗口中的 AI 对话上下文（history）独立维护于 sessionStorage
@@ -176,17 +162,6 @@ const Chat = {
         // [v20260805c 摘除关系词] 摘除 stageTag（关系阶段区色点旁大字），但保留目标+文字推进链
         const stageSec = sec('关系阶段', stageColor, goalHtml + (chainHtml || '<div class="memory-empty">暂无</div>'));
 
-        // [v20260811 话题] 已聊话题进度（话题打钩来源：话题 short 名列表）
-        const doneTopics = Array.isArray(mc.topics_done) ? mc.topics_done : [];
-        let topicHtml = '';
-        if (doneTopics.length > 0 || (p.stage && p.stage !== '')) {
-            topicHtml = '<div class="memory-chain" style="flex-wrap:wrap;gap:4px;">'
-                + (doneTopics.length > 0
-                    ? doneTopics.map(t => `<span class="chain-node done">✓${this._escapeHtml(t)}</span>`).join('')
-                    : '<span class="chain-node" style="opacity:.5;">聊过的话题会显示在这里</span>')
-                + '</div>';
-        }
-
         const factsHtml = facts.length > 0
             ? `<ul class="memory-items">${facts.slice(0, 10).map(f => `<li>${this._escapeHtml(f.text || '')}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无长期事实。对方提到生日/约定/偏好等关键信息时，军师会自动记住。</div>';
@@ -200,12 +175,8 @@ const Chat = {
             ? `<ul class="memory-items">${profileBits.map(x => `<li>${x}</li>`).join('')}</ul>`
             : '<div class="memory-empty">暂无画像信息</div>';
 
-        // [v20260811 话题] 已聊话题（记忆面板展示）
-        const topicSec = topicHtml
-            ? sec('已聊话题', '#BA7517', topicHtml)
-            : '';
+        // [v20260811 话题] 已聊话题（记忆面板展示）已随话题清单机制整体移除（2026-08-15）
         return stageSec
-            + topicSec
             + sec('长期记忆', '#1D9E75', factsHtml)
             + sec('她的画像', '#378ADD', profileHtml);
     },
@@ -736,7 +707,7 @@ const Chat = {
             }
 
             const data = await response.json();
-            // [v20260805] 保存 _debug 供阶段提示/话题清单渲染（后端零成本白送字段，非 LLM 内容）
+            // [v20260805] 保存 _debug 供阶段提示渲染（后端零成本白送字段，非 LLM 内容）
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
             if (this.lastDebug) {
                 // [v182] 阶段升级提示：按正常顺序前进时 toast（回退/无阶段不提示）
@@ -751,85 +722,11 @@ const Chat = {
                 }
                 this._prevStage = ns || this._prevStage;
             }
-            // [v20260813 攻略已砍] 话题清单（后端透传 data.topics + pick_topic）→ 渲染面板
-            this._updateTopicPanel(data || null, (data && data.pick_topic) || null);
             return data.reply || data.answer || data.response || JSON.stringify(data);
         } catch (e) {
             console.error('[军师] IMA API 调用失败，提示掉线:', e);
             // [v20260802] API 调用失败/未接入 AI：直接回复"掉线了"，不再返回模拟回复
             return '掉线了';
-        }
-    },
-
-    // [v20260813 攻略已砍] 话题清单面板：聊天页顶部显示当前关系话题清单（三权重优先 + 打钩态）
-    //   输入：src=后端响应对象（含 data.topics 数组）；pickTopic=本轮建议话题 short（data.pick_topic）
-    //   折叠态默认只显示"🎯 本轮建议话题：聊XX"；展开显示完整清单（聊过的显示 ✓，三权重话题 ★）
-    //   [v182 用户打钩] 清单话题可点击手动打钩/取消（写 memory_card.topics_done，用户自行标记聊过）
-    _updateTopicPanel(src, pickTopic) {
-        const el = document.getElementById('chat-guide');
-        if (!el) return;
-        const topics = (src && Array.isArray(src.topics)) ? src.topics : null;
-        if (!topics || topics.length === 0) {
-            el.classList.remove('show');
-            el.innerHTML = '';
-            return;
-        }
-        const stage = (src._debug && src._debug.memory_stage) || '';
-        const stageLabel = stage ? '（' + this._escapeHtml(stage) + '）' : '';
-        const pendingCount = topics.filter(t => !t.done).length;
-        const listHtml = topics.map(t => {
-            const mark = t.weight ? '★' : '○';
-            return '<div class="guide-sig' + (t.done ? ' done' : '') + '" data-topic="' + this._escapeHtml(t.short) + '" title="点击手动标记聊过/取消" style="cursor:pointer;">' + (t.done ? '✓' : mark) + ' 聊' + this._escapeHtml(t.short) + '</div>';
-        }).join('');
-        const fullHtml =
-            '<div class="guide-head"><span class="guide-name">话题清单' + stageLabel + '</span>'
-            + '<span class="guide-status running">' + pendingCount + ' 个待聊</span></div>'
-            + '<div class="guide-sigs">' + listHtml + '</div>'
-            + '<div class="guide-hint" style="font-size:11px;color:rgba(255,255,255,.35);margin-top:4px;">点击话题可手动打钩/取消</div>';
-        const expanded = !!this._guideExpanded;
-        // 折叠态主体：显示"本轮建议话题"；无建议时给一行极简清单状态
-        const pickKnown = pickTopic && TOPIC_LIBRARY_SHORTS.indexOf(pickTopic) > -1;
-        const pickHtml = pickKnown
-            ? '<div class="guide-mini" style="display:flex;align-items:center;gap:6px;"><span style="font-size:12px;">🎯</span><span>本轮建议话题：<b style="color:#FFD54F;">聊' + this._escapeHtml(pickTopic) + '</b></span></div>'
-            : '';
-        const mainHtml = expanded
-            ? fullHtml
-            : (pickHtml || '<div class="guide-mini">话题清单' + stageLabel + ' · ' + pendingCount + ' 个待聊</div>');
-        const toggleHtml = '<button class="guide-toggle" data-toggle="1">' + (expanded ? '收起清单 ▴' : '展开清单 ▾') + '</button>';
-        el.innerHTML = mainHtml + toggleHtml;
-        el.classList.add('show');
-        // 展开/收起切换（重渲染保持状态）
-        const tb = el.querySelector('.guide-toggle');
-        if (tb) tb.onclick = () => {
-            this._guideExpanded = !this._guideExpanded;
-            this._updateTopicPanel(src, pickTopic);
-        };
-        // [v182 用户打钩] 话题点击 → 手动打钩/取消
-        el.querySelectorAll('.guide-sig[data-topic]').forEach(sig => {
-            sig.onclick = () => this._toggleTopicDone(sig.dataset.topic);
-        });
-    },
-
-    // [v182 用户打钩] 手动打钩/取消话题（直接改 chat_sessions.memory_card.topics_done）
-    async _toggleTopicDone(short) {
-        if (!this.currentSessionId) return;
-        let mc = this.memoryCard
-            ? (typeof this.memoryCard === 'string' ? (() => { try { return JSON.parse(this.memoryCard); } catch (e) { return null; } })() : this.memoryCard)
-            : null;
-        if (!mc || typeof mc !== 'object') mc = {};
-        const done = new Set(Array.isArray(mc.topics_done) ? mc.topics_done : []);
-        const nowDone = !done.has(short);
-        if (nowDone) done.add(short); else done.delete(short);
-        mc.topics_done = [...done];
-        try {
-            const sb = getSupabaseClient();
-            const { error } = await sb.from('chat_sessions').update({ memory_card: JSON.stringify(mc) }).eq('id', this.currentSessionId);
-            if (error) throw error;
-            this.memoryCard = mc;
-            Utils.toast(nowDone ? '已标记聊过「' + short + '」' : '已取消「' + short + '」');
-        } catch (e) {
-            console.error('[军师] 手动打钩失败:', e);
-            Utils.toast('保存失败，请重试');
         }
     },
 

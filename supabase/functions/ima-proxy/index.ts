@@ -62,14 +62,14 @@
 //     挑 top4（FACTS_INJECT_MAX），不全量塞——像人按话题想起相关记忆
 //   - _debug 新增 facts_len
 //
-// [v58→v141→v20260813 战略层演进]（目标引导已删，攻略已砍 → 关系话题清单接管）
+// [v58→v141→v20260813→2026-08-15 战略层演进]（目标引导已删，攻略已砍，话题清单已砍）
 //   - [v141] GOAL_HINTS 目标引导与 ESCALATION 默认推进已删除（从未见效且与攻略重复，浪费 token）
 //   - memory_card.goal 仅剩两个语义：'保持当前关系'（不升级）或 空（默认推进，前端只剩这两个选项）
-//   - [v20260813 攻略已砍] 战略驱动 = 关系话题清单（stageTopicList）：消息 → 关系阶段 → 战术 →
-//     关系话题清单（三权重年龄/照片/住哪置顶 + 当前关系期话题）→ 每轮话题建议（pickNearestTopic 纯规则）→ 话术参考
-//   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 追求→暧昧→恋爱
+//   - [v20260813 攻略已砍] 战略驱动 = 关系话题清单；[2026-08-15 话题清单已砍]（用户拍板）
+//     推进改由战术卡组 + 知识库弹药 + 机会窗口承担，战略层不再注入方向指令
+//   - extractProfile 阶段推进：信号密集(主动追问/发照片/秒回/约你)按 吸引→舒适→恋爱
 //     最多升一级；冷淡/回避可降级；拿不准保持
-//   - 战略层(话题清单) > 弹药层(锚点/幽默/IOI) 两层叠加（战术层套路已于 2026-08-11 移除）
+//   - 战略层(目标/清单已删) > 弹药层(锚点/幽默/IOI) 两层叠加（战术层套路已于 2026-08-11 移除）
 //
 // [v11 迷男OS]（线下技巧 → 线上场景深度融合，2026-08）
 //   - 架构：战略层(记忆卡 stage 定基调) + 引擎层(pulse/balance/emotion_tone 实时输入)
@@ -245,11 +245,6 @@ const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 
 const RECENT_FULL = 8;          // 近详远略：最近 N 条全文（v70 10→8，回复 ≤30 字衔接够用）
 const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟（v70 3→5 降频）
 
-// [v184 灰度开关] 话题健康度机制（assessTopicHealth/rankTopicList/过渡策略）：
-//   环境变量 USE_V184_TOPIC_MECHANISM=0 可快速关停（回到旧话题清单逻辑），默认开启。
-//   注意：不留旧代码分支，开关只做"评分注入降级为普通清单"的快速失败。
-const USE_V184_TOPIC = Deno.env.get('USE_V184_TOPIC_MECHANISM') !== '0';
-
 // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 →
 //   注入"写错一个字"指令（代码层概率，不依赖 LLM 执行概率）。
 //   环境变量 USE_TYPO_HINT=0 可快速关停，默认开启。
@@ -410,18 +405,6 @@ Deno.serve(async (req) => {
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
 
-    // [v20260812 兴趣引擎] 每轮判定她对当前话题的投入度（聊得开心继续 / 连续 2 次低兴趣切清单新话题）
-    //   规则初判 + 疑似低兴趣时 LLM 复核；首轮（无对方历史）跳过；结果随 updateMemoryCard 落库
-    if (memoryCard && !switchTopic && rawQuery && llmKey
-      && (Array.isArray(history) ? history : []).some((h) => h && h.role === 'user')) {
-      try {
-        const interest = await judgeInterest(llmKey, llmBase, llmModel, memoryCard, rawQuery, history);
-        if (interest) memoryCard.interest = interest;
-      } catch (e: any) {
-        console.warn('兴趣判定失败:', e.message);
-      }
-    }
-
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
 
@@ -429,25 +412,6 @@ Deno.serve(async (req) => {
     //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
     const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
-
-    // [v184 话题健康度] 每轮纯规则评分（替代旧 detectTopicStagnation）：
-    //   紧迫度 none/mild/force 驱动 深挖/预埋钩子/软过渡；趋势防断崖
-    //   [v183] anchorMode 顶层声明，此处同时用于评分与注入
-    //   [v184 灰度开关] USE_V184_TOPIC_MECHANISM=0 → 降级为"永不触发过渡"（回退旧行为）
-    const health = USE_V184_TOPIC
-      ? assessTopicHealth(memoryCard, switchTopic ? '' : query, history)
-      : { score: 2, urgency: 'none' as const, trend: 'flat' as const };
-    // 话题主权计数（她主动发起 vs 我拉回清单）——由 updateMemoryCard 增量维护
-    const sovereignty = memoryCard?.topic_sovereignty || { her_initiate: 0, my_transition: 0 };
-    const sovDiff = (sovereignty.her_initiate || 0) - (sovereignty.my_transition || 0);
-
-    // [v20260815 话题门槛] 话题清单按"新会话对方回应 ≥5 条"才启动（用户定稿）：
-    //   不按关系阶段（新会话 stage 默认即吸引=零门槛），只按本会话对方(user)消息数计；
-    //   前端 history 来自 sessionStorage 50 条窗口，对"前 5 条"的判断足够可靠。
-    //   门槛期内：不注入话题清单/主权块、响应透传空 topics、不打钩，前端面板自动隐藏。
-    const userMsgCount = (Array.isArray(history) ? history : [])
-      .filter((h: any) => h && h.role === 'user').length;
-    const topicGate = userMsgCount >= 5;
 
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
@@ -533,15 +497,6 @@ Deno.serve(async (req) => {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
-        // [v184 检索配合] 紧迫度驱动检索词增强：
-        //   force → 追加"桥接话术/过渡金句"（软过渡弹药）
-        //   mild → 追加"预埋钩子/开放式结尾"（钩子弹药）
-        //   none → 不增强（继续深挖，弹药维持原方向）
-        if (!switchTopic && health.urgency === 'force') {
-          semanticKws = [...semanticKws, '桥接话术', '过渡金句'];
-        } else if (!switchTopic && health.urgency === 'mild') {
-          semanticKws = [...semanticKws, '预埋钩子', '开放式结尾'];
-        }
         // [B] 3. 检索词序列：语义词(语义路) > bigram/规则词 > 原句垫底
         //   统一走本地 kb_blocks_recall 块级召回（块内词频加权）
         // [v79 语义切块] 主回复统一纯弹药检索（v79.4）：5 块话术弹药
@@ -550,9 +505,6 @@ Deno.serve(async (req) => {
         //   phase 参与 recallBlocks 排序（同阶段文档加权、异阶段降权），
         //   保证"嗯"在吸引期拿到冷读/打压类弹药、舒适期拿到联系感/共鸣类弹药
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
-
-        // [v20260813 攻略已砍] 关系话题清单即行动指南：
-        //   每轮"聊哪个话题"由 buildTopicListBlock 注入的本轮话题建议（pickNearestTopic 纯规则）承担
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
         kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
@@ -647,11 +599,6 @@ Deno.serve(async (req) => {
           riskHit: lastRiskHit,
           // [v183] 锚点三态（调用处已预判）
           anchorMode,
-          // [v184] 话题健康度（紧迫度驱动过渡策略）+ 主权差（≥2 注入主权回收）
-          topicHealth: health,
-          sovDiff,
-          // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题清单（门槛期内不注入清单/主权块）
-          topicGate,
         });
         const systemContent = built.systemContent;
         let innerContent = built.dynamicContent;
@@ -764,16 +711,6 @@ Deno.serve(async (req) => {
       reply = '掉线了';
     }
 
-    // [v20260812 兴趣引擎] 本轮建议话题回写 interest.topic（供下轮"继续聊/切换"判定；
-    //   buildTopicListBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
-    //   [v184] 统一用 rankTopicList 排序结果（与注入块/响应透传一致）
-    //   [v20260815 话题门槛] 门槛期内清单未启用 → 不回写 topic（避免下轮误用未启用的清单）
-    if (memoryCard && memoryCard.interest && topicGate) {
-      const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard.profile?.anchor || '', switchTopic ? '' : query);
-      const pickTopic = ranked.find((t) => !t.done);
-      if (pickTopic) memoryCard.interest.topic = pickTopic.short;
-    }
-
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
     //   [v20260812 仅评价过滤] 记忆/统计走原始 history（资料正常记录，供主回复基于资料展开聊天）；
     //   只有 extractProfile（关系阶段/画像判定）在函数内部剔除首条资料
@@ -786,13 +723,6 @@ Deno.serve(async (req) => {
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
           // [v127] 掉线信号不入库：避免"掉线了"污染 recent_self_messages 防重复窗口
           currentReply: (reply && reply !== '掉线了') ? reply : null,
-          // [v20260811 话题] 本轮对方原话（打钩判定用：她本轮刚聊到话题 → 本轮就打钩，不滞后一轮）
-          currentQuery: query,
-          // [v184 话题健康度] 本轮评分 → 历史记录；过渡类型：force→软过渡，none→深挖
-          topicHealth: health,
-          transitionType: switchTopic ? 'hard_switch' : null,
-          // [v20260815 话题门槛] 对方回复 <5 条 → 话题机制未启动，打钩/主权计数跳过
-          topicGate,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -815,18 +745,6 @@ Deno.serve(async (req) => {
         limit: quotaInfo.limit,
         bonus: quotaInfo.bonus ?? null,
       } : null,
-      // [v20260813 攻略已砍 → v184 健康度] 当前关系话题清单透传（rankTopicList 动态排序结果；含打钩态）
-      //   [v20260815 话题门槛] 门槛期内（对方回复 <5 条）→ 空数组，前端面板自动隐藏
-      topics: topicGate
-        ? rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query)
-        : [],
-      // [v20260813] 本轮建议话题透传（前端折叠态显示"聊XX"；null=清单聊完）
-      //   [v184] 改为 rankTopicList 排序后第一个未打钩话题（与注入块一致）
-      pick_topic: topicGate ? (() => {
-        const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query);
-        const pending = ranked.find((t) => !t.done);
-        return pending ? pending.short : null;
-      })() : null,
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
         offline: reply === '掉线了',
@@ -874,21 +792,11 @@ Deno.serve(async (req) => {
         thinking_budget: rawThinkingBudget,
         budget_active: effectiveThinkingBudget,
         budget_peak: budgetPeak,
-        // [v20260812 兴趣引擎] 验证：streak=连续低兴趣数 topic=当前话题
-        interest_streak: memoryCard?.interest?.streak ?? 0,
-        interest_topic: memoryCard?.interest?.topic || null,
         // [v183] 锚点注入模式（验证三态：full=她提梗/light=每4轮提醒/none=不注入）
         anchor_mode: anchorMode,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
-        // [v20260811 话题] 已聊话题进度（验证清单打钩）
-        topics_done: Array.isArray(memoryCard?.topics_done) ? memoryCard!.topics_done! : [],
-        // [v184] 话题健康度（验证评分/紧迫度/趋势/主权差）
-        health_score: health.score,
-        health_urgency: health.urgency,
-        health_trend: health.trend,
-        sov_diff: sovDiff,
         // [v20260809] 机会窗口命中验证（null=未命中；命中显示话题名，排查"她问军师没反问"用）
         open_window: switchTopic ? null : detectOpenWindow(query),
         // [v62] 切换话题模式（验证【切换话题】注入）
@@ -915,15 +823,6 @@ Deno.serve(async (req) => {
         balance_direction: memoryCard?.balance?.direction || null,
         emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
-        // [v20260813 攻略已砍 → v184] 话题清单验证：未聊数 + 本轮建议话题（rankTopicList 排序后第一个）
-        topic_pending: topicGate
-          ? rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query).filter((t) => !t.done).length
-          : 0,
-        pick_topic: topicGate ? (() => {
-          const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query);
-          const pending = ranked.find((t) => !t.done);
-          return pending ? pending.short : null;
-        })() : null,
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
         // [vB] LLM token 用量（token 测量用）
@@ -1227,26 +1126,10 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：'保持当前关系' / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
-  // [v20260811 话题清单] 已聊过话题（short 名，如 '名字'/'年龄'）——话题清单"聊过XX"打钩用
-  //   由 extractProfile LLM 低频判定 + 每轮规则打钩（topicHit + 权重话题 topicResultHit）共同写入
-  topics_done?: string[];
-  // [v11] 迷男OS 引擎层：节奏 / 话题主权 / 情绪基线（毫秒级规则统计，随记忆卡落库）
+  // [v11] 迷男OS 引擎层：节奏 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
   emotion_tone?: EmotionTone;
-  // [v20260812 兴趣引擎] 她对当前话题的投入度状态（兴趣驱动切换：聊得开心继续/连续2次低兴趣切新话题）
-  interest?: InterestState;
-  // [v184 话题健康度] 当前在聊话题 short + 最近 5 轮健康度评分记录 + 话题主权计数
-  current_topic_id?: string | null;             // 当前在聊的话题 short（可空）
-  topic_health_history?: {                      // 最近 5 轮健康度评分（轮次/分数/时间）
-    round: number; score: number; at: string;
-  }[];
-  topic_sovereignty?: {                         // 话题主权：她主动发起 vs 我拉回清单
-    her_initiate: number;                       // 她主动发起新话题次数
-    my_transition: number;                      // 我成功拉回清单话题次数
-  };
-  last_transition_type?: 'deepen' | 'soft_switch' | 'hard_switch' | null;  // 上轮实际过渡类型
-  bridge_hook_planted?: boolean;                // 本轮是否已预埋过渡钩子（防重复埋）
   updated_at?: string;
 };
 
@@ -1254,96 +1137,9 @@ type MemoryCard = {
 const FACTS_MAX = 20;          // 长期记忆上限（超了淘汰最久没提的）
 const FACTS_INJECT_MAX = 3;    // 每轮按相关度最多注入几条（v79.2 4→3 收紧）
 
-// [v20260813 攻略已砍] 话题库改为按关系阶段直接取清单（不再经攻略包装）
-
-// [v20260811 话题清单] 话题库（源文件 话题.txt，共 50 个）
-//   [v182 三阶段统一] 3 阶段分组：吸引15 / 舒适15 / 恋爱20（原暧昧期+恋爱期并入 seduce）；
-//   每话题带打钩关键词 kws
-//   weight：'age'|'photo'|'region' = 权重话题（年龄/照片/住哪，好友列表昵称旁可见，
-//   信息最容易自然拿到）——未聊出结果跨阶段置顶、每轮话题建议优先、必须"聊出结果"才打钩
-type TopicDef = {
-  name: string;         // 话题名（话题清单/面板显示用，如 '聊名字'）
-  short: string;        // 短名（话题建议/打钩引用用，如 '名字'）
-  stage: 'attract' | 'comfort' | 'seduce';  // 所属阶段
-  kws: string[];        // 打钩预检关键词（她的话命中任一即视为"聊过"）
-  weight?: 'age' | 'photo' | 'region';      // 权重话题标记
-  // [v184 健康度] depth：深水区（价值观/情感/筛选类）vs 浅水区（兴趣/日常破冰类）
-  //   ——高兴趣时深水置顶（权重×2.0）、低兴趣时浅水置顶（×1.8）
-  depth?: 'deep' | 'shallow';
-  // [v184 健康度] taboo：禁忌话题（前任/收入/家庭矛盾）——light 锚点时沉底（权重×0.1）
-  taboo?: boolean;
-};
-const TOPIC_LIBRARY: TopicDef[] = [
-  // ---- 相识破冰期（15）----
-  { name: '聊名字', short: '名字', stage: 'attract', kws: ['名字', '全名', '昵称', '外号', '叫啥', '怎么称呼'] },
-  { name: '聊年龄', short: '年龄', stage: 'attract', weight: 'age', kws: ['年龄', '多大', '几岁', '生日', '生肖', '星座', '属'] },
-  { name: '聊照片', short: '照片', stage: 'attract', weight: 'photo', kws: ['照片', '自拍', '长相', '本人', '发张', '看看你'] },
-  { name: '聊住哪', short: '住哪', stage: 'attract', weight: 'region', kws: ['住哪', '哪里人', '城市', '区域', '租房', '买房', '合租', '独居'] },
-  { name: '聊工作/学业', short: '工作', stage: 'attract', kws: ['工作', '上班', '职业', '做什么', '学业', '上学', '专业', '实习'] },
-  { name: '聊作息时间', short: '作息', stage: 'attract', kws: ['作息', '几点起', '几点睡', '熬夜', '早睡', '失眠'] },
-  { name: '聊日常通勤', short: '通勤', stage: 'attract', kws: ['通勤', '地铁', '公交', '开车', '上班路', '路上'] },
-  { name: '聊饮食习惯', short: '饮食', stage: 'attract', kws: ['吃', '饮食', '辣', '火锅', '口味', '忌口', '爱吃'] },
-  { name: '聊会不会做饭', short: '做饭', stage: 'attract', kws: ['做饭', '做菜', '拿手菜', '厨艺', '下厨', '黑暗料理'] },
-  { name: '聊运动健身', short: '运动', stage: 'attract', kws: ['运动', '健身', '跑步', '打球', '健身房', '瑜伽', '户外'] },
-  { name: '聊兴趣爱好', short: '爱好', stage: 'attract', kws: ['爱好', '兴趣', '空闲', '平时干嘛', '业余', '打发时间'] },
-  { name: '聊最近在追的剧/综艺/动漫', short: '追剧', stage: 'attract', kws: ['追剧', '综艺', '动漫', '最近看', '剧'] },
-  { name: '聊喜欢的音乐类型和歌手', short: '音乐', stage: 'attract', kws: ['音乐', '歌手', '歌单', '听歌', '演唱会', '曲风'] },
-  { name: '聊电影口味', short: '电影', stage: 'attract', kws: ['电影', '影院', '大片', '看电影', '片单'] },
-  { name: '聊看书吗', short: '看书', stage: 'attract', kws: ['看书', '读书', '书', '小说', '电子书', '纸质书'] },
-  // ---- 好感升温期（15）----
-  { name: '聊周末怎么过', short: '周末', stage: 'comfort', kws: ['周末', '放假', '宅', '出门', '休息日'] },
-  { name: '聊社交习惯', short: '社交', stage: 'comfort', kws: ['聚会', '社恐', '朋友多', '社交', '交际'] },
-  { name: '聊酒量', short: '酒量', stage: 'comfort', kws: ['喝酒', '酒量', '酒', '微醺', '喝醉'] },
-  { name: '聊抽不抽烟', short: '抽烟', stage: 'comfort', kws: ['抽烟', '吸烟', '烟瘾'] },
-  { name: '聊养宠物', short: '宠物', stage: 'comfort', kws: ['宠物', '猫', '狗', '养猫', '养狗'] },
-  { name: '聊旅游', short: '旅游', stage: 'comfort', kws: ['旅游', '旅行', '去过', '想去', '度假', '自驾'] },
-  { name: '聊喜欢的季节和天气', short: '季节', stage: 'comfort', kws: ['季节', '天气', '冬天', '夏天', '下雨', '下雪'] },
-  { name: '聊穿衣风格', short: '穿衣', stage: 'comfort', kws: ['穿衣', '穿搭', '风格', '打扮', '衣服'] },
-  { name: '聊手机', short: '手机', stage: 'comfort', kws: ['手机', '苹果', '安卓', 'app', '刷手机'] },
-  { name: '聊睡眠习惯', short: '睡眠', stage: 'comfort', kws: ['睡眠', '睡觉', '睡姿', '呼噜', '认床', '失眠', '做梦'] },
-  { name: '聊怕什么', short: '怕什么', stage: 'comfort', kws: ['怕', '害怕', '怕黑', '怕虫', '怕高', '怕鬼', '胆小'] },
-  { name: '聊学生时代', short: '学生时代', stage: 'comfort', kws: ['学生', '上学', '成绩', '逃课', '老师', '学校', '同学'] },
-  { name: '聊童年', short: '童年', stage: 'comfort', kws: ['童年', '小时候', '长大', '老家', '回忆'] },
-  { name: '聊家庭情况', short: '家庭', stage: 'comfort', kws: ['家庭', '爸妈', '父母', '兄弟姐妹', '独生', '家里'] },
-  { name: '聊和父母的关系', short: '父母关系', stage: 'comfort', kws: ['父母', '爸妈', '瞒着', '说心里话', '跟家里'], taboo: true },
-  // ---- 暧昧期（10）----
-  { name: '聊感情经历', short: '感情经历', stage: 'seduce', kws: ['感情', '谈过', '恋爱史', '交往过', '几段'], depth: 'deep' },
-  { name: '聊前任', short: '前任', stage: 'seduce', kws: ['前任', 'ex', '前男友', '前女友', '分手后'], taboo: true, depth: 'deep' },
-  { name: '聊分手原因', short: '分手原因', stage: 'seduce', kws: ['分手', '分开', '异地', '出轨', '性格不合', '闹掰'], depth: 'deep' },
-  { name: '聊对前任的态度', short: '前任态度', stage: 'seduce', kws: ['放下', '恨', '释怀', '忘不了', '翻篇'], depth: 'deep' },
-  { name: '聊择偶标准', short: '择偶标准', stage: 'seduce', kws: ['择偶', '标准', '理想型', '喜欢什么样', '对象标准'], depth: 'deep' },
-  { name: '聊对恋爱的看法', short: '恋爱观', stage: 'seduce', kws: ['恋爱', '爱情', '感情观', '谈恋爱', '爱是什么'], depth: 'deep' },
-  { name: '聊第一次见面什么印象', short: '第一印象', stage: 'seduce', kws: ['第一印象', '初见', '见面印象'], depth: 'deep' },
-  { name: '聊现在的关系状态', short: '关系状态', stage: 'seduce', kws: ['关系', '我们', '算什么', '进展', '怎么看我'], depth: 'deep' },
-  { name: '聊和同事/同学的关系', short: '同事关系', stage: 'seduce', kws: ['同事', '同学', '讨厌的人', '关系好'], depth: 'deep' },
-  { name: '聊压力来源', short: '压力', stage: 'seduce', kws: ['压力', '焦虑', '烦', '心事', '累'], depth: 'deep' },
-  // ---- 正式恋爱期（10）----
-  { name: '聊约会', short: '约会', stage: 'seduce', kws: ['约会', '见面', '出来', '约', '下次', '安排'] },
-  { name: '聊敏感面', short: '敏感面', stage: 'seduce', kws: ['脆弱', '敏感', '不安', '不敢提', '软肋'], depth: 'deep' },
-  { name: '聊金钱观', short: '金钱观', stage: 'seduce', kws: ['钱', '金钱', '花钱', '存钱', 'AA', '买单', '消费观'], taboo: true, depth: 'deep' },
-  { name: '聊消费习惯', short: '消费', stage: 'seduce', kws: ['消费', '舍得', '贵', '便宜', '购物', '买东西'] },
-  { name: '聊未来规划', short: '未来', stage: 'seduce', kws: ['未来', '规划', '发展', '五年', '以后', '打算'], depth: 'deep' },
-  { name: '聊结婚', short: '结婚', stage: 'seduce', kws: ['结婚', '婚姻', '嫁', '婚房', '想结'], depth: 'deep' },
-  { name: '聊孩子', short: '孩子', stage: 'seduce', kws: ['孩子', '小孩', '宝宝', '要几个'], depth: 'deep' },
-  { name: '聊定居', short: '定居', stage: 'seduce', kws: ['定居', '房子', '买房', '城市', '落户'], depth: 'deep' },
-  { name: '聊吵架', short: '吵架', stage: 'seduce', kws: ['吵架', '生气', '冷战', '和好', '闹矛盾', '哄'], depth: 'deep' },
-  { name: '聊我们', short: '我们', stage: 'seduce', kws: ['我们', '合适', '未来', '爱不爱', '在一起'], depth: 'deep' },
-];
-const TOPIC_STAGE_LABEL: Record<string, string> = { attract: '吸引期', comfort: '舒适期', seduce: '恋爱期' };
-const TOPIC_WEIGHT_LABEL: Record<string, string> = { age: '年龄', photo: '照片', region: '住哪' };
-
-// [v20260811] 话题查找：按 short 找 TopicDef
-function topicDef(short: string): TopicDef | undefined {
-  return TOPIC_LIBRARY.find((t) => t.short === short);
-}
-// [v20260811] 打钩预检：她的话是否命中话题关键词（任一命中 = 可能聊过）
-function topicHit(topic: TopicDef | undefined, text: string): boolean {
-  if (!topic || !text) return false;
-  return topic.kws.some((k) => String(text).includes(k));
-}
 
 // [v190 资料型投喂识别] 用户把女生背景资料（第三人称描述："她叫XX，25岁，住XX…"）
-//   粘贴给军师 → 非女生原话，不参与话题打钩；但资料仍进记忆卡（画像提取可见）
+//   粘贴给军师 → 非女生原话，画像提取时与真实对话区分标注；但资料仍进记忆卡（画像提取可见）
 //   特征：以"她叫/她今年/她住/她喜欢…"等第三人称描述开头，且不是简短反问
 function isProfileFeed(text: string): boolean {
   const t = String(text || '').trim();
@@ -1351,239 +1147,12 @@ function isProfileFeed(text: string): boolean {
   return /(^|[，。；\n])(她叫|她今年|她现在|她住|她家在|她名字|她是.{0,6}(岁|人|的)|她喜欢|她爱|她生日|她星座|她属|她爸妈|她家|她工作|她在).{0,10}(岁|住|区|市|县|村|镇|家|名字|名|工作|公司|学校|大学|喜欢|爱|生日|星座|属)/.test(t)
     || /(^|[，。；\n])(女生|女孩|妹子)(叫|今年|现在|住|是|在|喜欢|爱)/.test(t);
 }
-// [v20260811] 权重话题"聊出结果"判定（年龄/照片/住哪必须拿到具体信息才打钩）
-const TOPIC_RESULT_RE: Record<string, RegExp> = {
-  'age': /我(今年|现在)?\s?[0-9一二三四五六七八九十]{1,2}\s?岁|生日|属[鼠牛虎兔龙蛇马羊猴鸡狗猪]|星座|我是[0-9]{2}年/,
-  'photo': /发(张|个)?(照片|自拍)|这是我|你看(看)?(我|这张)|加个(微信|好友)|相册/,
-  'region': /我(住|家在|在|是).{0,8}(区|市|这边|附近|租房|买房|合租|独居|本地|外地)|住在|上班(在|去|到)/,
-};
-// 权重话题必须"聊出结果"：命中关键词 + 命中结果正则 才打钩
-function topicResultHit(topic: TopicDef, text: string): boolean {
-  if (!topic.weight) return true;              // 非权重话题：聊过即打钩
-  const re = TOPIC_RESULT_RE[topic.weight];
-  return re ? re.test(String(text)) : true;
-}
 
-// ============================================================
-// [v184 话题健康度] assessTopicHealth：纯规则评分（零 LLM），替代旧 detectTopicStagnation
-//   核心主张（用户拍板）：不强制跟话题清单走，以她当下的情绪能量为准绳——
-//   当前话题健康分高就陪她深挖，分低了丝滑转移到清单里最合适的话题。
-//   评分维度（6 项独立累加，满分 6）：
-//     ① 字数：≥15 字 +1；4-14 不加不减；≤3 字 -1（纯敷衍）
-//     ② 问句：带问号或疑问词（吗/呢/怎么/为什么/啥）+1
-//     ③ 情绪锚点：含情绪词（开心/烦/累/笑死/绝了/无语/emoji）+1
-//     ④ 接梗/延续：本轮内容含上轮军师回复的关键词（bigram 重合 ≥1）+1
-//     ⑤ 上下文深度：本轮字数 > 她上轮字数 ×1.2（被激发了）+1
-//     ⑥ 响应速度：距她上条消息 ≤90s +1；≥5min -1（[v188] 60s→120s 放宽、[v189] 回调为 90s：
-//        用户手动复制女生消息投喂占时间，1 分钟窗口误伤真·秒回，但 2 分钟又偏多，折中 90s；
-//        依赖前端 history 携带 created_at，无时间戳则该项 0 分，不误伤）
-//   判定：≥2 → none（聊得火热，继续深挖）；=1 → mild（略有降温，预埋钩子）；
-//   ≤0 → force（明显敷衍，下轮软过渡）；并对比上轮分数输出趋势 up/flat/down，
-//   趋势 down 时 none→mild 防断崖。
-// ============================================================
-const TOPIC_EMOTION_RE = /开心|高兴|烦|累|难过|笑死|绝了|无语|哈哈|嘿嘿|太好|不错|喜欢|讨厌|生气|委屈|无聊|期待|害怕|紧张|惊喜|😀|😄|😂|🤣|😍|🥰|😘|😭|😡|🤯|😴|🙄|😏|😉/;
-const TOPIC_ASK_RE = /[?？]|吗|呢|怎么|为什么|啥|是不是|有没有|会不会|要不要/;
 
-// 每轮评分：返回分数 + 紧迫度 + 趋势
-function assessTopicHealth(
-  card: MemoryCard | null,
-  query: string,
-  history: any[]
-): { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' } {
-  const q = String(query || '').trim();
-  let score = 0;
-  const userMsgs = (Array.isArray(history) ? history : [])
-    .filter((h: any) => h && h.role === 'user' && typeof h.content === 'string')
-    .map((h: any) => ({ text: String(h.content || '').trim(), at: h.created_at || '' }));
-  const len = [...q].length;
-  // ① 字数
-  if (len >= 15) score += 1;
-  else if (len <= 3) score -= 1;
-  // ② 问句
-  if (TOPIC_ASK_RE.test(q)) score += 1;
-  // ③ 情绪锚点
-  if (TOPIC_EMOTION_RE.test(q)) score += 1;
-  // ④ 接梗/延续：与上轮军师回复的关键词重合
-  const lastSelf = (Array.isArray(history) ? history : [])
-    .filter((h: any) => h && h.role === 'assistant' && typeof h.content === 'string')
-    .slice(-1).map((h: any) => String(h.content || ''))[0] || '';
-  if (lastSelf) {
-    const selfKws = extractKeywords(lastSelf).filter((k) => k.length >= 2);
-    if (selfKws.some((k) => q.includes(k))) score += 1;
-  }
-  // ⑤ 上下文深度：本轮 vs 她上轮
-  const herPrev = userMsgs.length >= 2 ? userMsgs[userMsgs.length - 2].text : '';
-  if (herPrev && [...herPrev].length > 0 && len > [...herPrev].length * 1.2) score += 1;
-  // ⑥ 响应速度：她本条 vs 上一条的时间差
-  const lastTwo = userMsgs.slice(-2);
-  if (lastTwo.length >= 2 && lastTwo[1].at && lastTwo[0].at) {
-    const gapSec = (new Date(lastTwo[1].at).getTime() - new Date(lastTwo[0].at).getTime()) / 1000;
-    if (!isNaN(gapSec)) {
-      // [v188 放宽] 加分窗口 60s→120s：用户手动复制女生消息投喂军师占时间，
-      //   1 分钟窗口会把真·秒回误判成普通回复（少拿 +1）。2 分钟内仍算秒回热度。
-      // [v189 回调] 120s→90s：用户实测 2 分钟加得有点多，折中为 90 秒。
-      if (gapSec <= 90) score += 1;
-      else if (gapSec >= 300) score -= 1;
-    }
-  }
-  // 紧迫度
-  let urgency: 'none' | 'mild' | 'force' = score >= 2 ? 'none' : (score === 1 ? 'mild' : 'force');
-  // 趋势：对比记忆卡最近一次评分
-  const hist = Array.isArray(card?.topic_health_history) ? card!.topic_health_history! : [];
-  const prev = hist.length > 0 ? hist[hist.length - 1].score : null;
-  let trend: 'up' | 'flat' | 'down' = 'flat';
-  if (prev !== null) trend = score > prev ? 'up' : (score < prev ? 'down' : 'flat');
-  if (urgency === 'none' && trend === 'down') urgency = 'mild';  // 防断崖
-  return { score, urgency, trend };
-}
 
-// ============================================================
-// [v184 话题健康度] rankTopicList：动态重排话题清单（纯规则），给每个话题打优先级
-//   排序权重（按序执行，高优先级覆盖低优先级）：
-//     ① health_score≥2 且 interest high → 深水区（价值观/情感/筛选）置顶 ×2.0
-//     ② health_score≤0 或 interest low → 浅水区（兴趣/日常破冰）置顶 ×1.8
-//     ③ anchor_mode=full 且她提到锚点相关 → 锚点相关话题置前 ×1.5
-//     ④ 主权差（her_initiate - my_transition）≥2 → 强筛选/冷读类置顶 ×2.5（回收主导权）
-//     ⑤ anchor_mode=light → 禁忌话题（前任/收入/家庭矛盾）沉底 ×0.1
-//   输出：排序后数组（done 过滤），每话题附 priority（0-100）+ transition_hint
-// ============================================================
-function rankTopicList(
-  card: MemoryCard | null,
-  health: { score: number; urgency: 'none' | 'mild' | 'force' },
-  anchorMode: 'full' | 'light' | 'none',
-  anchor: string,
-  query: string
-): Array<{ short: string; name: string; done: boolean; weight?: string; priority: number; transition_hint: 'deepen' | 'soft_switch' | 'hard_switch' }> {
-  const stage = (card?.profile && card.profile.stage) || '吸引';
-  const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
-  const sovereignty = card?.topic_sovereignty || { her_initiate: 0, my_transition: 0 };
-  const sovDiff = (sovereignty.her_initiate || 0) - (sovereignty.my_transition || 0);
-  const highEnergy = health.score >= 2 && health.urgency === 'none';
-  const lowEnergy = health.score <= 0;
-  const interestLow = (card?.interest?.streak || 0) >= 2;
-  const anchorHit = anchorMode === 'full' && anchor && String(query || '').includes(anchor);
-  // 阶段清单（未打钩）：常规 = 当前期 + 权重话题；高能量时跨期引入深水话题（提前推高价值话题）
-  const phase = (stage === '舒适' ? 'comfort' : stage === '恋爱' ? 'seduce' : 'attract');
-  let list = TOPIC_LIBRARY.filter((t) => !done.has(t.short)
-    && (t.stage === phase || t.weight || (highEnergy && t.depth === 'deep')));
-  // 评分并排序
-  const scored = list.map((t) => {
-    let p = 50;
-    if (USE_V184_TOPIC) {
-      if (highEnergy && t.depth === 'deep') p = 100;               // ① 高能量推深水
-      else if ((lowEnergy || interestLow) && t.depth !== 'deep') p = 90;  // ② 低能量推浅水
-      if (anchorHit && anchor && (t.name.includes(anchor) || t.kws.some((k) => anchor.includes(k)))) p = Math.max(p, 85);  // ③ 锚点相关置前
-      if (sovDiff >= 2 && t.depth === 'deep') p = Math.max(p, 95); // ④ 主权被抢推筛选/冷读
-      if (anchorMode === 'light' && t.taboo) p = 5;                // ⑤ 禁忌沉底
-    }
-    if (t.weight) p = Math.max(p, 80);                           // 权重话题（年龄/照片/住哪）始终优先
-    return { short: t.short, name: t.name, done: false, weight: t.weight, priority: p };
-  }).sort((a, b) => b.priority - a.priority);
-  // 打钩态补回（聊过的也显示 ✓，但排最后）
-  const doneTopics = TOPIC_LIBRARY.filter((t) => done.has(t.short)).map((t) => ({
-    short: t.short, name: t.name, done: true, weight: t.weight, priority: 0,
-  }));
-  const hint: 'deepen' | 'soft_switch' | 'hard_switch' =
-    health.urgency === 'none' ? 'deepen' : (health.urgency === 'mild' ? 'soft_switch' : 'hard_switch');
-  return [...scored, ...doneTopics].map((t) => ({ ...t, transition_hint: hint }));
-}
-
-// ============================================================
-// [v20260812 兴趣引擎] 她对"当前话题"的投入度 → 驱动话题切换
-//   规则初判（零 LLM）+ 疑似低兴趣时 LLM 复核（准确区分"接梗/傲娇"与"真敷衍"）
-//   streak: 连续低兴趣轮数（0/1/2；≥2 下一轮硬切清单新话题）；topic: 正在聊的话题 short
-//   设计决策（用户确认）：聊得开心就继续不切；连续第 2 次低兴趣 → 启用攻略清单新话题
-// ============================================================
-type InterestState = {
-  streak: number;       // 连续低兴趣次数（0-2，≥2 触发切换）
-  topic: string | null; // 正在聊/上轮建议的话题 short
-  at: string;           // 最近一次判定时间
-};
-
-// 规则初判兴趣：明确高信号 → 'high'（零 LLM，长回复/问句/积极词/接梗/主动话题）
-//   明确低信号（短/敷衍）→ 'low'（需 LLM 复核）；中间地带 → 'high'（保守，宁可不切，避免打断热络）
-const INTEREST_HIGH_RE = /[?？吗呢吧]|开心|喜欢|可爱|好呀|没问题|期待|笑死|有意思|绝了|真的假的|我也是|我也|原来|诶|哎|哇|天哪|你(说|讲|猜)|说说|聊聊|然后|后来|之后|确实|对呀|可以啊|行啊|嗯嗯|懂|明白|知道了|好嘞|必须|安排|走走走|下次|改天|有时间|想听|想看|想去|哈哈|嘿嘿/;
-const INTEREST_FOB_WORDS = /^(嗯|哦|额|哈|啊|好吧|随便|不知道|没有|行吧|嗯嗯|哦哦|呵呵|是嘛|对呀|算了吧|都行|先忙|再说|睡觉了|累了|没啥|没想|就这样|还好|还行|就那样)[。！!~～…]*$/;
-const INTEREST_FOB_PREFIX = /^(嗯|哦|额|哈|啊|好吧|行吧|哦哦|嗯嗯|呵呵|无语|服了|随便|算了吧|都行|再说)[,，。！!~～…\s]/;
-
-function quickInterestSignal(query: string, lastSelf: string): 'high' | 'low' {
-  const q = String(query || '').trim();
-  if (!q) return 'low';
-  if (q.length >= 15) return 'high';            // 长回复 = 投入
-  if (INTEREST_HIGH_RE.test(q)) return 'high';  // 问句/积极词/接梗词
-  if (lastSelf) {
-    // 她的话里出现军师上一句的关键词（接梗）→ 投入
-    const kws = extractKeywords(lastSelf);
-    if (kws.some((k) => k.length >= 2 && q.includes(k))) return 'high';
-  }
-  if (INTEREST_FOB_WORDS.test(q) || INTEREST_FOB_PREFIX.test(q)) return 'low'; // 纯敷衍
-  return 'high'; // 中间地带保守判高
-}
-
-// LLM 复核：疑似低兴趣时精确判断（短回是"接梗/傲娇/语气词"还是"真敷衍"）
-async function judgeInterestLow(
-  llmKey: string, llmBase: string, llmModel: string,
-  topicShort: string | null, query: string, history: any[]
-): Promise<boolean> {
-  try {
-    const self = (Array.isArray(history) ? history : [])
-      .filter((h) => h && h.role === 'assistant' && typeof h.content === 'string')
-      .slice(-1)[0]?.content || '';
-    const her = (Array.isArray(history) ? history : [])
-      .filter((h) => h && h.role === 'user' && typeof h.content === 'string')
-      .slice(-2)
-      .map((h) => `她：${truncateText(String(h.content), 60)}`)
-      .join('\n');
-    const prompt = `你是恋爱聊天节奏评估助手，判断她对当前话题是"投入"还是"敷衍"。\n`
-      + `当前话题：${topicShort || '未指定'}\n`
-      + `军师刚发的：${truncateText(self, 80) || '（无）'}\n`
-      + `最近她说的：\n${her || '（无）'}\n`
-      + `她本轮这句话：${truncateText(query, 80)}\n`
-      + `判定规则：\n`
-      + `- 接梗（提到你说的内容/顺着延伸）、反问、带情绪语气（"嗯哼~""哈哈绝了"）、给出新信息 → 投入 high\n`
-      + `- 傲娇式反驳（"才没有""谁要啊"）也算投入（她在跟你互动）\n`
-      + `- 纯敷衍（嗯/哦/随便/不想聊/转移话题但完全不接）→ 敷衍 low\n`
-      + `- 短句但有承接关系（回应你的话）→ 投入\n`
-      + `只输出 JSON：{"interest":"high"|"low","reason":"≤12字"}，不要任何其他文字。`;
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 60, _stage: 'interest_judge',
-    });
-    const m = content.match(/"interest"\s*:\s*"(high|low)"/);
-    return m ? m[1] === 'low' : false;
-  } catch (e: any) {
-    console.warn('judgeInterestLow failed:', e.message);
-    return false; // LLM 失败保守判高（不误切）
-  }
-}
-
-// 每轮兴趣判定入口：更新 interest 状态（streak 递增/归零），不落库（随 updateMemoryCard 写回）
-//   返回更新后的 InterestState；无卡/换话题/无 query → 返回原状态
-//   [v20260813 攻略已砍] 去掉 guide 依赖：话题机制独立运行（连续低兴趣切换由话题清单驱动）
-async function judgeInterest(
-  llmKey: string, llmBase: string, llmModel: string,
-  card: MemoryCard | null, query: string, history: any[]
-): Promise<InterestState | null> {
-  if (!card) return null;
-  const q = String(query || '').trim();
-  if (!q) return null;
-  const prev: InterestState = card.interest || { streak: 0, topic: null, at: '' };
-  const lastSelf = (Array.isArray(history) ? history : [])
-    .filter((h) => h && h.role === 'assistant' && typeof h.content === 'string')
-    .slice(-1)[0]?.content || '';
-  const sig = quickInterestSignal(q, lastSelf);
-  let low = false;
-  if (sig === 'low' && llmKey) {
-    low = await judgeInterestLow(llmKey, llmBase, llmModel, prev.topic, q, history);
-    if (!low) console.info(`[interest] 规则低→LLM判高（接梗/傲娇），不计数: "${truncateText(q, 20)}"`);
-  }
-  const streak = low ? Math.min((prev.streak || 0) + 1, 2) : 0;
-  return { streak, topic: prev.topic, at: new Date().toISOString() };
-}
-
-// [v20260809 机会窗口] 对方主动问起话题库相关话题 = 她亲手递来的窗口（纯规则，零 LLM）
+// [v20260809 机会窗口] 对方主动问起相关话题 = 她亲手递来的窗口（纯规则，零 LLM）
 //   命中 → buildSystemContent 注入【机会窗口】块：回答后必须单次镜像反问
 //   她先开口后的镜像反问 = 社交互惠，不是查户口（查户口 = 连环盘问不回应）
-//   [v20260811 话题] 返回值改为话题 short 名（TOPIC_LIBRARY 对齐），命中=该话题顺势完成
 //   数组顺序 = 匹配优先级（先命中者胜）
 const OPEN_WINDOW_PATTERNS: Array<[string, RegExp]> = [
   ['年龄', /你多大|你几岁|你多大了|你几岁了|你今年多大|你哪年|你是哪年|你是哪一年|你哪一年|哪一年生|你属[什么啥]/],
@@ -1645,10 +1214,19 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
     if (parsed && typeof parsed === 'object') {
       // [2026-08-11] 存量清洗：旧套路字段 strategy、旧里程碑字段 milestones 已废弃，读入即剥离，写回时自然消失
       // [2026-08-13] 攻略 guide 已砍，存量卡读入即剥离
+      // [2026-08-15 话题清单已砍] topics_done/interest/current_topic_id/topic_health_history/
+      //   topic_sovereignty/last_transition_type/bridge_hook_planted 一并剥离（写回自然消失）
       // [v182 三阶段统一] 存量 stage 六阶段 → 换算三阶段
       delete parsed.strategy;
       delete parsed.milestones;
       delete parsed.guide;
+      delete parsed.topics_done;
+      delete parsed.interest;
+      delete parsed.current_topic_id;
+      delete parsed.topic_health_history;
+      delete parsed.topic_sovereignty;
+      delete parsed.last_transition_type;
+      delete parsed.bridge_hook_planted;
       if (parsed.profile && typeof parsed.profile.stage === 'string') {
         parsed.profile.stage = normalizeStage(parsed.profile.stage);
       }
@@ -1687,18 +1265,10 @@ async function updateMemoryCard(ctx: {
   //   导致它在"重生请求"和下一轮防重复判定时不在 recent_self_messages 防重复窗口内
   //   → 重生时仍可能生成同一句。生成后立即写入。
   currentReply?: string | null;
-  // [v20260811] 本轮对方原话（打钩判定用：她本轮刚聊到话题 → 本轮就打钩，不滞后一轮）
-  currentQuery?: string;
-  // [v184 话题健康度] 本轮评分结果 → 追加 topic_health_history（最近 5 轮）
-  topicHealth?: { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' };
-  // [v184 话题主权] 本轮实际过渡类型 → 记入 last_transition_type + 主权计数
-  transitionType?: 'deepen' | 'soft_switch' | 'hard_switch' | null;
-  // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题机制；false=门槛期内（打钩/评分/主权跳过）
-  topicGate?: boolean;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
   // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
-  //   → 话题打钩等"关系进展评价"跳过（资料不触发打钩）；其余记忆/统计不受影响
+  //   → 画像提取等"关系进展评价"跳过；其余记忆/统计不受影响
   const firstRound = !(Array.isArray(ctx.history) && ctx.history.some((h) => h && h.role === 'user'));
 
   // 1) 规则追加对方最近说过的话（去重：与最后一条相同则跳过）
@@ -1809,55 +1379,8 @@ async function updateMemoryCard(ctx: {
       card.profile = profile;
       // [v57] 长期事实合并（去重 + 上限淘汰）
       mergeFacts(card, extracted.facts || []);
-      // [v20260811 话题] 已聊话题合并（LLM 判定 + 已有并集）
-      if (Array.isArray(extracted.topics_done)) {
-        card.topics_done = extracted.topics_done;
-      }
     }
     card.updated_at = new Date().toISOString();
-  }
-
-  // [v20260813 攻略已砍] 话题打钩：她本轮的话命中"当前关系话题清单"里未完成话题 → 打钩
-  //   权重话题（年龄/照片/住哪）必须聊出结果（topicResultHit），其余聊过即钩
-  //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
-  //   [v190 资料型投喂] 本轮消息是"她叫XX/25岁/住XX"第三人称资料描述 → 不打钩
-  //     （资料仅供画像提取/展开聊天，不代表"聊过"该话题）
-  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 清单未启用，不打钩
-  if (ctx.topicGate !== false) {
-    const stage = (card.profile && card.profile.stage) || '吸引';
-    const list = stageTopicList(stage, card);
-    const herText = (firstRound || isProfileFeed(ctx.currentQuery || ''))
-      ? '' : String(ctx.currentQuery || '');
-    const done = new Set(Array.isArray(card.topics_done) ? card.topics_done : []);
-    let changed = false;
-    if (herText) {
-      for (const t of list) {
-        if (done.has(t.short)) continue;
-        if (topicHit(t, herText) && topicResultHit(t, herText)) {
-          done.add(t.short);
-          changed = true;
-        }
-      }
-    }
-    if (changed) card.topics_done = [...done];
-  }
-
-  // [v184 话题健康度] 每轮追加评分记录（保留最近 5 轮）+ 过渡类型 + 主权计数
-  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 话题机制未启动：
-  //   评分历史/过渡类型/主权计数全部跳过（清单都没启用，这些字段无意义）
-  if (ctx.topicHealth && ctx.topicGate !== false) {
-    const hist = Array.isArray(card.topic_health_history) ? card.topic_health_history.slice() : [];
-    hist.push({ round: hist.length + 1, score: ctx.topicHealth.score, at: new Date().toISOString() });
-    if (hist.length > 5) hist.splice(0, hist.length - 5);
-    card.topic_health_history = hist;
-    // 实际过渡类型：none→deepen（深挖）；mild→soft_switch（预埋钩子）；force→soft_switch（软过渡）
-    //   hard_switch 仅 /换话题 时由主流程传入
-    card.last_transition_type = ctx.transitionType || (ctx.topicHealth.urgency === 'none' ? 'deepen' : 'soft_switch');
-    // 主权计数：force 轮视为成功拉回清单（my_transition+1）
-    if (ctx.topicHealth.urgency === 'force') {
-      const sov = card.topic_sovereignty || { her_initiate: 0, my_transition: 0 };
-      card.topic_sovereignty = { her_initiate: sov.her_initiate || 0, my_transition: (sov.my_transition || 0) + 1 };
-    }
   }
 
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
@@ -1865,11 +1388,8 @@ async function updateMemoryCard(ctx: {
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
 // [v57] 返回 {profile, facts}：profile=画像对象；facts=本轮新提取的长期事实（string[]）
-// [v20260811 话题] 返回新增 topics_done：已实质聊过的话题 short 列表（LLM 兜底判定，
-//   规则打钩漏判时补上；与每轮 topicHit 规则打钩合并去重）
-async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[]; topics_done: string[] } | null> {
+async function extractProfile(llmKey: string, llmBase: string, llmModel: string, card: MemoryCard, history: any[]): Promise<{ profile: any; facts: string[] } | null> {
   const cur = JSON.stringify(card.profile || {});
-  const curTopics = JSON.stringify(Array.isArray(card.topics_done) ? card.topics_done : []);
   // [v20260812 仅评价过滤] 首条 user 消息多为用户投喂的女生资料（"她叫XX，25岁…"）
   // [v190 修正] 首条资料【保留】喂画像提取（age/region/personality 需从资料读到 →
   //   用户要求"资料记入记忆卡"）；但 prompt 明确资料行不算已聊话题、不推进阶段
@@ -1885,8 +1405,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       return (isProfileFeed(text) ? '[背景资料] ' : '[对话] ') + `对方：${truncateText(text, 200)}`;
     })
     .join('\n');
-  const topicShortList = TOPIC_LIBRARY.map((t) => t.short).join('/');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n当前已聊话题：${curTopics}\n最近内容：\n${recentDialogue || '（无）'}\n说明：[背景资料] 行是你的用户粘贴的对方背景资料（非对方原话），可用于提取静态画像字段（age/region/personality 等），但**不算真实对话，不得据此判定"聊过某个话题"、不得作为关系阶段推进依据**；[对话] 行才是对方本人说的话。\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）、topics_done（已实质聊过的话题 short 列表：从下面话题库清单里挑出"已经聊出实质内容"的话题——只在 [对话] 里判定，[背景资料] 提及的内容不算；不只是她提了一嘴，而是互相聊了 2 句以上或有具体信息交换；权重话题必须聊出结果才算：年龄=知道她具体年龄/生日/星座，照片=她发过照片/自拍，住哪=知道她具体城市/区域/居住情况。保留当前已有的项并加上本轮新聊过的，去重；没有则空数组）。\n话题库清单（short 名）：${topicShortList}\n`
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近内容：\n${recentDialogue || '（无）'}\n说明：[背景资料] 行是你的用户粘贴的对方背景资料（非对方原话），可用于提取静态画像字段（age/region/personality 等），但**不算真实对话，不得据此判定"聊过某个话题"、不得作为关系阶段推进依据**；[对话] 行才是对方本人说的话。\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）。\n`
     + `[v60→v182 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"吸引→舒适→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级到"吸引"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
@@ -1900,15 +1419,6 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       .map((t: any) => (typeof t === 'string' ? t.trim().slice(0, 40) : ''))
       .filter((t: string) => t.length > 0)
       .slice(0, 3);
-    // [v20260811 话题] 已聊话题：LLM 判定 + 合并已有（并集兜底），只保留库里存在的 short
-    const validShorts = new Set(TOPIC_LIBRARY.map((t) => t.short));
-    const llmTopics = (Array.isArray(p.topics_done) ? p.topics_done : [])
-      .map((m: any) => (typeof m === 'string' ? m.trim() : ''))
-      .filter((m: string) => validShorts.has(m));
-    const mergedTopics = Array.from(new Set([
-      ...(Array.isArray(card.topics_done) ? card.topics_done : []),
-      ...llmTopics,
-    ])).filter((m) => validShorts.has(m));
     return {
       profile: {
         stage: typeof p.stage === 'string' && p.stage ? normalizeStage(p.stage) : '吸引',
@@ -1922,7 +1432,6 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
         region: typeof p.region === 'string' ? p.region.trim().slice(0, 20) : '',
       },
       facts,
-      topics_done: mergedTopics,
     };
   } catch (e: any) {
     console.warn('extractProfile failed:', e.message);
@@ -1930,65 +1439,10 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
   }
 }
 
-// ============================================================
-// [v20260813 攻略已砍] 关系话题清单（替代攻略 signals）
-//   链路：消息 → 关系阶段(stage) → 战术 → 关系话题清单 → 话术切块参考
-//   清单构成：三权重话题（年龄/照片/住哪，未聊）置顶 + 当前阶段话题（未聊）
-//   打钩/每轮话题建议/切换话题全部基于该清单（纯规则零 LLM，无攻略状态机）
-// ============================================================
-
-// [v182 三阶段统一] stage 即三阶段（吸引/舒适/恋爱），直接与 TOPIC_LIBRARY.stage 对齐，无需映射表
-
-// 当前阶段的话题清单（未打钩的）：三权重话题置顶 + 当前阶段话题
-//   权重话题跨阶段保留：无论当前阶段，年龄/照片/住哪没聊出结果就一直在清单最前
-function stageTopicList(stage: string, card: MemoryCard | null): TopicDef[] {
-  const phase = (stage === '舒适' ? 'comfort' : stage === '恋爱' ? 'seduce' : 'attract');
-  const done = new Set(Array.isArray(card?.topics_done) ? card!.topics_done! : []);
-  const weighted = TOPIC_LIBRARY.filter((t) => t.weight && !done.has(t.short));
-  const rest = TOPIC_LIBRARY.filter((t) => t.stage === phase && !t.weight && !done.has(t.short));
-  return [...weighted, ...rest];
-}
-
-// [v20260811] 她的话是否让某话题"实质聊过"（规则打钩）：命中关键词 + 权重话题需聊出结果
-function topicDoneByText(topic: TopicDef | undefined, text: string): boolean {
-  if (!topic || !text) return false;
-  return topicHit(topic, text) && topicResultHit(topic, text);
-}
-
 // [v20260813 攻略已砍] advanceGuide / updateGuideProgress / evalGuideSignals / extractGuide 已整体删除
 //   （攻略状态机 + LLM 制定攻略 + LLM 低频评估全部移除，省 ~900 token/次 的攻略生成与定期评估调用）
-
-// [v20260813 攻略已砍 → v184 健康度] 关系话题清单注入块（buildSystemContent 用）：
-//   rankTopicList 动态重排（健康分驱动：高能量推深水、低能量推浅水、主权被抢推筛选、light 禁忌沉底），
-//   带打钩态 + 过渡策略（none 深挖 / mild 预埋钩子 / force 软过渡）
-function buildTopicListBlock(
-  card: MemoryCard | null,
-  health: { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' },
-  anchorMode: 'full' | 'light' | 'none',
-  anchor: string,
-  recentText?: string,
-  switchTopic?: boolean
-): string {
-  const stage = (card?.profile && card.profile.stage) || '吸引';
-  const ranked = rankTopicList(card, health, anchorMode, anchor, switchTopic ? '' : (recentText || ''));
-  const pending = ranked.filter((t) => !t.done);
-  const listHtml = pending.length > 0
-    ? pending.map((t) => `  ${t.weight ? '★' : (t.priority >= 85 ? '▸' : '○')} 聊${t.short}${t.taboo ? '(谨慎)' : ''}`).join('\n')
-    : '  （本阶段话题已全部聊过 ✓）';
-  // 本轮建议话题：rankTopicList 排序后第一个未打钩（权重话题天然靠前）
-  const pick = pending.length > 0 ? pending[0].short : null;
-  const pickLine = pick
-    ? `\n- 【本轮话题建议】优先自然把话题往「聊${pick}」上带（结合当前对话顺势引出，别生硬；她聊到相关就直接深入）。\n`
-    : '';
-  // 过渡策略（紧迫度驱动）
-  const UR = { none: '深挖当前话题，禁止主动切换', mild: '回复末尾预埋一个开放式问句指向推荐清单第一的话题（只埋钩子，不展开新话题）', force: '本轮必须软过渡到「聊' + (pick || '推荐话题') + '」：先承接她上句情绪，再用"不过说到这个我突然想到…"或"其实比起这个我更好奇…"自然挂载，禁止生硬转折（如"换个话题吧"）、禁止评价她的话题"无聊"' };
-  const trendLine = health.trend === 'down' ? '（健康分较上轮下降，注意防断崖，别硬撑一个话题）' : '';
-  return `\n\n【本轮话题清单】(当前关系：${stage}，战略方向)\n`
-    + `- 话题清单（★=优先话题，▸=高优先级；聊过的自动打钩✓）：\n${listHtml}\n${pickLine}`
-    + `- 【过渡策略】(本轮最高优先级)健康分 ${health.score}/6，紧迫度：${health.urgency === 'none' ? '火热' : health.urgency === 'mild' ? '略降温' : '明显敷衍'}${trendLine}：${UR[health.urgency]}\n`
-    + `- 权重话题「年龄/照片/住哪」要聊出结果才算完成（知道她具体年龄/拿到照片/知道她住哪），其余话题聊出实质内容即可打钩。\n`
-    + `- 你带着方向感在推进，但进攻藏在话术里，绝不暴露计划、绝不显得急；她冷淡/回避就降速换话题养氛围再找机会，绝不硬推、绝不表白、绝不逼问。`;
-}
+// [2026-08-15 话题清单已砍] TOPIC_LIBRARY/rankTopicList/assessTopicHealth/兴趣引擎/打钩/主权/门槛
+//   已整体删除（用户拍板）；话题推进改由战术卡组 + 知识库弹药 + 机会窗口承担
 
 // [v57] 合并新事实到长期记忆：去重(互含视为同条并刷新提及时间) + 上限淘汰(按提及新旧)
 function mergeFacts(card: MemoryCard, newFacts: string[]): void {
@@ -2007,70 +1461,6 @@ function mergeFacts(card: MemoryCard, newFacts: string[]): void {
   facts.sort((a, b) => ((b.last_mention || '').localeCompare(a.last_mention || '')));
   if (facts.length > FACTS_MAX) facts.splice(FACTS_MAX);
   card.facts = facts;
-}
-
-// ============================================================
-// [v20260813 攻略已砍] 每轮话题建议（纯规则零 LLM）
-//   基于"关系话题清单"（三权重置顶 + 当前关系期话题）：
-//   每轮按当前对话从清单未聊话题里挑"最接近"的一个注入 buildTopicListBlock
-//   供主回复"优先聊它"；聊过即打钩，清单聊完显示已完成
-// ============================================================
-
-// [v20260811] 从关系话题清单选"本轮建议话题"：
-//   [v20260812 兴趣驱动改造] 优先级（用户在聊的高兴话题不被强行打断）：
-//   ① 兴趣高（interest.streak<2）且有正在聊的话题未打钩 → 继续聊它（权重话题也让路）
-//   ② 连续 2 次低兴趣（streak≥2）→ 排除当前话题，从清单选下一个（权重优先/重叠/兜底）
-//   ③ 无正在聊话题 → 原逻辑：权重话题优先 → 关键词重叠 → 兜底清单第一个
-//   返回 null = 无未聊话题（清单聊完）
-function pickNearestTopic(card: MemoryCard, recentText?: string): string | null {
-  if (!card) return null;
-  const stage = (card.profile && card.profile.stage) || '吸引';
-  const list = stageTopicList(stage, card);
-  const pending = list.map((t) => t.short);
-  if (pending.length === 0) return null;
-  const cur = card.interest?.topic || null;
-  const streak = card.interest?.streak || 0;
-  const text = String(recentText || '');
-  // ① 兴趣未断 + 正在聊的话题还没聊完 → 继续聊（不打断热络；权重话题在此让路）
-  if (streak < 2 && cur && pending.includes(cur)) return cur;
-  // ② 连续 2 次低兴趣 → 切换：排除当前话题，从清单里挑下一个
-  const candidates = streak >= 2 && cur ? pending.filter((sig) => sig !== cur) : pending;
-  if (candidates.length === 0) return pending[0];
-  // 权重话题优先：年龄/照片/住哪 是列表页可见信息，最先引导聊
-  const weighted = candidates.filter((sig) => topicDef(sig)?.weight);
-  if (weighted.length > 0) return weighted[0];
-  // 无权重话题时：按当前对话匹配最接近的话题（关键词重叠最多者胜）
-  if (text.trim().length > 0) {
-    let best: string | null = null;
-    let bestHit = 0;
-    for (const sig of candidates) {
-      const t = topicDef(sig);
-      if (!t) continue;
-      const hits = t.kws.filter((k) => text.includes(k)).length;
-      if (hits > bestHit) { bestHit = hits; best = sig; }
-    }
-    if (best) return best;
-  }
-  return candidates[0]; // 兜底：取候选第一个未聊话题
-}
-
-// [v20260813] 用户点"换话题"按钮（/换话题）时专用选话题：
-//   优先从当前关系话题清单"未聊过"的话题里定一个（排除正在聊的，权重话题优先，兜底第一个），
-//   让【切换话题】开场白围绕清单话题抛，而不是 LLM 自由发挥；清单聊完 → 退回原逻辑
-function pickSwitchTopic(card: MemoryCard | null | undefined): string | null {
-  if (!card) return null;
-  const stage = (card.profile && card.profile.stage) || '吸引';
-  const list = stageTopicList(stage, card);
-  const cur = card.interest?.topic || null;
-  // 未聊 + 排除正在聊的（用户点换话题=不想聊当前这个）
-  const pending = list.map((t) => t.short).filter((sig) => sig !== cur);
-  if (pending.length === 0) {
-    // 没别的可换（只剩当前/清单已聊完）→ 退回 pickNearestTopic 原逻辑（可能继续聊或 null）
-    return pickNearestTopic(card, '');
-  }
-  // 权重话题优先（年龄/照片/住哪），再兜底第一个
-  const weighted = pending.filter((sig) => topicDef(sig)?.weight);
-  return weighted.length > 0 ? weighted[0] : pending[0];
 }
 
 // ============================================================
@@ -2335,11 +1725,6 @@ function buildSystemContent(opts: {
   // [v183 锚点降频] 锚点注入模式（调用处预判，事件驱动）：
   //   full=本轮她的话含锚点词→完整块；light=每4轮轻量提醒；none=不注入
   anchorMode?: 'full' | 'light' | 'none';
-  // [v184 话题健康度] 每轮评分结果（紧迫度驱动过渡策略）+ 主权差（≥2 注入主权回收）
-  topicHealth?: { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' };
-  sovDiff?: number;
-  // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题清单；false=门槛期内（不注入清单/主权块）
-  topicGate?: boolean;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -2496,41 +1881,22 @@ function buildSystemContent(opts: {
 
   // [v80 缓存优化] 【长期事实】块已后置到变化区尾部（按 query 相关度选，每轮变）
 
-  // [v58/v61→v145] 关系目标 + 已聊话题数据（战略层）：
-  //   goal 仅剩两个语义（'保持当前关系' / 空=默认推进）；topics_done 仅作话题清单打钩数据
+  // [v58] 关系目标（战略层）：'保持当前关系' / 空=默认推进
+  //   [2026-08-15 话题清单已砍] 默认推进不再由话题清单驱动，交给战术卡组 + 知识库弹药
   const goal = opts.memoryCard?.goal || '';
-  const doneTopics = Array.isArray(opts.memoryCard?.topics_done) ? (opts.memoryCard!.topics_done!) : [];
 
-  // [v20260813 攻略已砍 → v184 健康度] 注入【本轮话题清单】块（战略层唯一驱动）：
-  //   rankTopicList 动态重排 + 【过渡策略】（紧迫度驱动深挖/预埋钩子/软过渡）
-  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 不注入，等过门槛再启
-  if (goal !== '保持当前关系' && opts.topicGate !== false) {
-    d += buildTopicListBlock(opts.memoryCard, opts.topicHealth!, opts.anchorMode || 'none', opts.memoryCard?.profile?.anchor || '', opts.lastUserText, !!opts.switchTopic);
-    // [v184] 【主权状态】仅主权差 ≥2 时注入（她连续发起话题、我被带跑 → 回收主导权）
-    //   差值 ≤1 不注入（省 token；正常轮次无需提醒）
-    if ((opts.sovDiff || 0) >= 2) {
-      d += `\n\n【主权状态】(本轮最高优先级)她最近明显在带节奏（主动发起话题 ${
-        opts.memoryCard?.topic_sovereignty?.her_initiate || 0
-      } 次 vs 你拉回清单 ${opts.memoryCard?.topic_sovereignty?.my_transition || 0} 次）。\n`
-        + `- 本轮结尾必须用强筛选问句收尾（如"你平时遇到这种情况会怎么选？"），回收主导权；\n`
-        + `- 整条回复控制在 18 字以内（统一字数区间），结尾带筛选性问句（非闲聊式开放提问）。`;
-    }
-  } else {
-    // 停止升级：维持现状指令（不注入话题清单，不引导新话题）
+  // 停止升级：维持现状指令（不主动推进升级、不引导新话题）
+  if (goal === '保持当前关系') {
     d += `\n\n【关系状态】用户明确选择保持当前关系：本轮及后续都不主动推进升级、不引导新话题；正常聊天稳住温度即可，她主动聊就自然接住，但绝不主动发起试探/邀约/收集，情绪价值照给，绝不冷场。`;
   }
 
   // [v62 切换话题] 用户一键换话题：覆盖推进，本轮唯一任务 = 抛一个新话题开场
   //   放在所有目标/推进指令之后 = 最高优先级；检索词已切到"新话题/开场白"方向
   if (opts.switchTopic) {
-    // [v20260813] 从当前关系话题清单选新话题（排除正在聊的），不让 LLM 自由发挥
-    const stTopic = pickSwitchTopic(opts.memoryCard);
     d += `\n\n【切换话题】(本轮最高优先级，覆盖上面的所有目标与推进指令)\n`
       + `- 用户对当前话题不满意，要求换一个新话题继续聊。\n`
       + `- 本轮任务：给出一句可以直接发给对方的新话题开场白（1 句，≥5 且 ≤18 字，带钩子/情绪/好奇心）。\n`
-      + (stTopic
-        ? `- 本轮话题已定：「聊${stTopic}」——开场白围绕这个话题自然抛出（像随口想到一样），别绕开它换别的。\n`
-        : `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`)
+      + `- 新话题从哪来（按优先级）：①记忆卡/长期事实里她聊过、但还没深挖的兴趣点（如"你上次说的那家店"）；②话题锚点 anchor；③下面知识库参考资料里的开场白/惯例；④结合当前时间/位置的轻松日常话题（天气、最近热门、吃的）。\n`
       + `- 禁忌：不延续旧话题、不道歉、不解释为什么换话题、不提"换个话题吧"这种元话术；直接自然开场，像想到什么随口问一样。\n`
       + `- 输出只需这一句话术本体，不要任何附加说明。`;
   }
@@ -2544,19 +1910,15 @@ function buildSystemContent(opts: {
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const, cardIndex: -1 };
   d += buildTacticBlock(tactic.category, tactic.phase, typeof tactic.cardIndex === 'number' ? tactic.cardIndex : -1);
 
-  // [v20260809 机会窗口] 她主动聊起话题库话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
+  // [v20260809 机会窗口] 她主动问起相关话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
   //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
   const openWindow = detectOpenWindow(opts.lastUserText || '');
   if (openWindow) {
-    const t = topicDef(openWindow);
-    const kws = t ? t.kws.join('、') : '';
-    const tip = t ? `话题「${t.name}」：${kws}（聊到这些就算话题聊过${t.weight ? '，且必须聊出结果' : ''}）` : '';
     d += `\n\n【机会窗口】(本轮最高优先级，必须接住)\n`
       + `- 她主动问起了「${openWindow}」相关——这是她亲手递过来的窗口：说明她对你有兴趣，且大概率愿意等价交换信息。\n`
       + `- 本轮动作：先自然回答她的问题（自己也交换同等信息，别有保留），然后必须顺势镜像反问（"你呢？"），把「${openWindow}」这个话题顺势聊开。\n`
       + `- 区分查户口：查户口 = 连环盘问、她不回应还继续追问（禁止）；她先开口后的单次镜像反问 = 社交互惠（必须做），二者性质完全不同，别把互惠当查户口。\n`
       + `- 窗口只开这一轮，错过就没了：本轮必须接住，绝不只答不问、绝不让话题滑走。\n`
-      + (tip ? `- 话术方向参考：${tip}\n` : '')
       + `- 例外：若她以责备/挑衅语气问（如"你多大的人了还这样"）→ 语境不适用，正常回应即可，不强求反问。`;
   }
 
