@@ -245,6 +245,13 @@ const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 
 const RECENT_FULL = 8;          // 近详远略：最近 N 条全文（v70 10→8，回复 ≤30 字衔接够用）
 const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟（v70 3→5 降频）
 
+// [v195 逻辑记忆] 每轮用最近 N 条消息生成一句话逻辑脉络（≤80 字）落卡，
+//   下一轮注入动态区作"既定事实基准"，防模型前后矛盾/忘约定（胡言乱语）。
+//   环境变量 LOGIC_SUMMARY_ENABLED=0 可快速关停，默认开启。
+const LOGIC_SUMMARY_ENABLED = Deno.env.get('LOGIC_SUMMARY_ENABLED') !== '0';
+const LOGIC_SUMMARY_INPUT_N = 5;     // 输入：最近 5 条消息（含她+我，不足取全部）
+const LOGIC_SUMMARY_MAX = 80;        // 输出：一句话 ≤80 字
+
 // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 →
 //   注入"写错一个字"指令（代码层概率，不依赖 LLM 执行概率）。
 //   环境变量 USE_TYPO_HINT=0 可快速关停，默认开启。
@@ -462,6 +469,8 @@ Deno.serve(async (req) => {
     let usedStageLlm = DEFAULT_STAGE_LLM;
     // [v183 锚点降频] 锚点注入模式（_debug 用；提到顶层防作用域事故，块内赋值）
     let anchorMode: 'full' | 'light' | 'none' = 'none';
+    // [v195 逻辑记忆] 本轮生成的逻辑脉络（_debug 用；updateMemoryCard 前赋值，随卡落库）
+    let logicSummary: string | null = null;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -711,6 +720,16 @@ Deno.serve(async (req) => {
       reply = '掉线了';
     }
 
+    // [v195 逻辑记忆] 每轮用最近 5 条消息生成一句话逻辑脉络（下一轮注入用）：
+    //   放主回复之后（失败/掉线不影响主回复返回，保留上轮值降级无害）；随 updateMemoryCard 覆盖落库
+    if (LOGIC_SUMMARY_ENABLED && llmKey) {
+      try {
+        logicSummary = await buildLogicSummary(llmKey, llmBase, llmModel, history, memoryCard?.logic_summary?.text || null);
+      } catch (e: any) {
+        console.warn('逻辑记忆生成失败:', e.message);
+      }
+    }
+
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
     //   [v20260812 仅评价过滤] 记忆/统计走原始 history（资料正常记录，供主回复基于资料展开聊天）；
     //   只有 extractProfile（关系阶段/画像判定）在函数内部剔除首条资料
@@ -723,6 +742,8 @@ Deno.serve(async (req) => {
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
           // [v127] 掉线信号不入库：避免"掉线了"污染 recent_self_messages 防重复窗口
           currentReply: (reply && reply !== '掉线了') ? reply : null,
+          // [v195 逻辑记忆] 本轮生成的逻辑脉络（覆盖写入 logic_summary；null=保留旧值）
+          logicSummary,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -795,6 +816,8 @@ Deno.serve(async (req) => {
         // [v183] 锚点注入模式（验证三态：full=她提梗/light=每4轮提醒/none=不注入）
         anchor_mode: anchorMode,
         memory_stage: memoryCard?.profile?.stage || null,
+        // [v195 逻辑记忆] 本轮生成的逻辑脉络（验证生成/注入；null=未生成或关闭）
+        logic_summary: logicSummary || memoryCard?.logic_summary?.text || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
         // [v20260809] 机会窗口命中验证（null=未命中；命中显示话题名，排查"她问军师没反问"用）
@@ -862,6 +885,44 @@ function buildContextParts(history: any[]): { recent: any[]; summary: string } {
     ? '【更早对话要点（对方说过的话，供把握前因后果）】\n' + olderUsers.slice(-6).join('\n')
     : '';
   return { recent, summary };
+}
+
+// ============================================================
+// [v195 逻辑记忆] 每轮用最近 LOGIC_SUMMARY_INPUT_N 条消息生成一句话逻辑脉络
+//   目的：把"正在聊什么/立过的约定/她表明的态度/我方立场"固化成既定事实，
+//         注入下一轮动态区 → 模型不前后矛盾、不忘记约定（防胡言乱语）。
+//   输入：最近 5 条消息（含她+我，带归属前缀；不足 5 条取全部）；
+//         少于 2 条（纯首条投喂）→ 返回 null 跳过
+//   输出：一句话 ≤LOGIC_SUMMARY_MAX 字；失败/掉线 → null（调用方保留上轮值，降级无害）
+//   成本：输入 ~500 token + 输出 ~100 token ≈ 0.001 元/轮（未命中价）
+// ============================================================
+async function buildLogicSummary(
+  llmKey: string, llmBase: string, llmModel: string,
+  history: any[], prevSummary?: string | null
+): Promise<string | null> {
+  if (!llmKey) return null;
+  const valid = (Array.isArray(history) ? history : [])
+    .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
+  if (valid.length < 2) return null; // 无对话可总结（首条投喂/单条）
+  const recentText = valid.slice(-LOGIC_SUMMARY_INPUT_N)
+    .map((h) => (h.role === 'user' ? '【她】' : '【我】') + truncateText(String(h.content), HISTORY_ITEM_MAX))
+    .join('\n');
+  const prompt = `你是聊天逻辑记忆助手。把最近这段对话压缩成一句话逻辑脉络（≤${LOGIC_SUMMARY_MAX}字），供下一轮回复时保持前后一致。\n`
+    + `必须覆盖：①正在聊什么；②立过的约定/赌注/承诺（原文引用关键短语）；③她表明的态度或立场；④我方刚说过的话要点。\n`
+    + `铁律：只输出那一句话本身，不要引号、不要"总结："前缀、不要解释、不要分点。\n`
+    + (prevSummary ? `上一轮脉络（作延续参考，本轮在其基础上更新）：${truncateText(prevSummary, 120)}\n` : '')
+    + `最近对话：\n${recentText}`;
+  try {
+    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
+      temperature: 0.3, maxTokens: 150, _stage: 'logic_summary',
+    });
+    const t = (content || '').trim().replace(/^["'「]+|["'」]+$/g, '').replace(/\s+/g, ' ').slice(0, LOGIC_SUMMARY_MAX);
+    if (!t) return null;
+    return t;
+  } catch (e: any) {
+    console.warn('buildLogicSummary failed:', e.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -1126,6 +1187,9 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：'保持当前关系' / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
+  // [v195 逻辑记忆] 最近 N 条消息的逻辑脉络（一句话 ≤80 字，覆盖式单条）：
+  //   每轮 LLM 生成 → 下一轮注入动态区作既定事实基准（防前后矛盾/忘约定）
+  logic_summary?: { text: string; round: number; at: string };
   // [v11] 迷男OS 引擎层：节奏 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -1265,6 +1329,8 @@ async function updateMemoryCard(ctx: {
   //   导致它在"重生请求"和下一轮防重复判定时不在 recent_self_messages 防重复窗口内
   //   → 重生时仍可能生成同一句。生成后立即写入。
   currentReply?: string | null;
+  // [v195 逻辑记忆] 本轮生成的逻辑脉络（非空 → 覆盖写入 logic_summary；null=保留旧值）
+  logicSummary?: string | null;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
   // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
@@ -1381,6 +1447,12 @@ async function updateMemoryCard(ctx: {
       mergeFacts(card, extracted.facts || []);
     }
     card.updated_at = new Date().toISOString();
+  }
+
+  // [v195 逻辑记忆] 本轮生成成功 → 覆盖写入（单条，记录轮次/时间）；失败/未生成 → 保留旧值
+  if (ctx.logicSummary) {
+    const prevRound = (card.logic_summary && card.logic_summary.round) || 0;
+    card.logic_summary = { text: ctx.logicSummary, round: prevRound + 1, at: new Date().toISOString() };
   }
 
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
@@ -1855,6 +1927,15 @@ function buildSystemContent(opts: {
     if (profile.relationship_note) parts.push(`关系背景：${profile.relationship_note}`);
     if (profile.recent_events) parts.push(`最近事件：${profile.recent_events}`);
     d += `\n\n【对方画像记忆】（跨轮次记住，回答时不要重复询问这些已知信息）\n${parts.join('\n')}`;
+  }
+
+  // [v195 逻辑记忆] 最近几条消息的逻辑脉络（系统级既定事实基准）：
+  //   覆盖"正在聊什么/约定赌注/她表态/我方立场"，回答必须与其衔接一致，防前后矛盾
+  const logicSummary = opts.memoryCard?.logic_summary?.text || '';
+  if (logicSummary) {
+    d += `\n\n【逻辑记忆】(最近对话的逻辑脉络，系统级既定事实基准)\n${logicSummary}\n`
+      + `- 这是已经发生的既定事实：后续回复必须与此衔接一致，不得自相矛盾、不得推翻、不得假装不知道。\n`
+      + `- 立过的约定/赌注/梗/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），换话题也不许丢弃。`;
   }
 
   // [P0-3] 去冗余：llmHistory ≥4 条时，其内容已含对方近期话/自己发过话，不再注入
