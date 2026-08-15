@@ -441,6 +441,14 @@ Deno.serve(async (req) => {
     const sovereignty = memoryCard?.topic_sovereignty || { her_initiate: 0, my_transition: 0 };
     const sovDiff = (sovereignty.her_initiate || 0) - (sovereignty.my_transition || 0);
 
+    // [v20260815 话题门槛] 话题清单按"新会话对方回应 ≥5 条"才启动（用户定稿）：
+    //   不按关系阶段（新会话 stage 默认即吸引=零门槛），只按本会话对方(user)消息数计；
+    //   前端 history 来自 sessionStorage 50 条窗口，对"前 5 条"的判断足够可靠。
+    //   门槛期内：不注入话题清单/主权块、响应透传空 topics、不打钩，前端面板自动隐藏。
+    const userMsgCount = (Array.isArray(history) ? history : [])
+      .filter((h: any) => h && h.role === 'user').length;
+    const topicGate = userMsgCount >= 5;
+
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
     let lastGapText = '';
@@ -483,8 +491,8 @@ Deno.serve(async (req) => {
     let factsInjected = 0;
     // [v76] 输出后时间校验命中词（_debug 用；null=未触发）
     let lastTimeConflict: string | null = null;
-    // [v20260812 逻辑重复检测] 本轮防重复判定结果（_debug 用；提到顶层防作用域事故）
-    let dupHit = false;
+  // [v20260812 逻辑重复检测] 本轮防重复判定结果（_debug 用；提到顶层防作用域事故）
+  let dupHit = false;
     let dupReason = '';
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
@@ -642,6 +650,8 @@ Deno.serve(async (req) => {
           // [v184] 话题健康度（紧迫度驱动过渡策略）+ 主权差（≥2 注入主权回收）
           topicHealth: health,
           sovDiff,
+          // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题清单（门槛期内不注入清单/主权块）
+          topicGate,
         });
         const systemContent = built.systemContent;
         let innerContent = built.dynamicContent;
@@ -757,7 +767,8 @@ Deno.serve(async (req) => {
     // [v20260812 兴趣引擎] 本轮建议话题回写 interest.topic（供下轮"继续聊/切换"判定；
     //   buildTopicListBlock 与 pick_topic 各自读到的 topic 一致，且随 updateMemoryCard 落库）
     //   [v184] 统一用 rankTopicList 排序结果（与注入块/响应透传一致）
-    if (memoryCard && memoryCard.interest) {
+    //   [v20260815 话题门槛] 门槛期内清单未启用 → 不回写 topic（避免下轮误用未启用的清单）
+    if (memoryCard && memoryCard.interest && topicGate) {
       const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard.profile?.anchor || '', switchTopic ? '' : query);
       const pickTopic = ranked.find((t) => !t.done);
       if (pickTopic) memoryCard.interest.topic = pickTopic.short;
@@ -780,6 +791,8 @@ Deno.serve(async (req) => {
           // [v184 话题健康度] 本轮评分 → 历史记录；过渡类型：force→软过渡，none→深挖
           topicHealth: health,
           transitionType: switchTopic ? 'hard_switch' : null,
+          // [v20260815 话题门槛] 对方回复 <5 条 → 话题机制未启动，打钩/主权计数跳过
+          topicGate,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -803,14 +816,17 @@ Deno.serve(async (req) => {
         bonus: quotaInfo.bonus ?? null,
       } : null,
       // [v20260813 攻略已砍 → v184 健康度] 当前关系话题清单透传（rankTopicList 动态排序结果；含打钩态）
-      topics: rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query),
+      //   [v20260815 话题门槛] 门槛期内（对方回复 <5 条）→ 空数组，前端面板自动隐藏
+      topics: topicGate
+        ? rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query)
+        : [],
       // [v20260813] 本轮建议话题透传（前端折叠态显示"聊XX"；null=清单聊完）
       //   [v184] 改为 rankTopicList 排序后第一个未打钩话题（与注入块一致）
-      pick_topic: (() => {
+      pick_topic: topicGate ? (() => {
         const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query);
         const pending = ranked.find((t) => !t.done);
         return pending ? pending.short : null;
-      })(),
+      })() : null,
       _debug: {
         // [v127] 掉线标记：true=LLM 未产出（失败/超时/未配置），reply 为"掉线了"
         offline: reply === '掉线了',
@@ -900,12 +916,14 @@ Deno.serve(async (req) => {
         emotion_baseline: memoryCard?.emotion_tone?.baseline || null,
         pulse_delay_count: memoryCard?.pulse?.delay_count ?? null,
         // [v20260813 攻略已砍 → v184] 话题清单验证：未聊数 + 本轮建议话题（rankTopicList 排序后第一个）
-        topic_pending: rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query).filter((t) => !t.done).length,
-        pick_topic: (() => {
+        topic_pending: topicGate
+          ? rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query).filter((t) => !t.done).length
+          : 0,
+        pick_topic: topicGate ? (() => {
           const ranked = rankTopicList(memoryCard, health, anchorMode, memoryCard?.profile?.anchor || '', switchTopic ? '' : query);
           const pending = ranked.find((t) => !t.done);
           return pending ? pending.short : null;
-        })(),
+        })() : null,
         folder_hs: !!kbFolders?.hs,
         folder_jx: !!kbFolders?.jx,
         // [vB] LLM token 用量（token 测量用）
@@ -1675,6 +1693,8 @@ async function updateMemoryCard(ctx: {
   topicHealth?: { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' };
   // [v184 话题主权] 本轮实际过渡类型 → 记入 last_transition_type + 主权计数
   transitionType?: 'deepen' | 'soft_switch' | 'hard_switch' | null;
+  // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题机制；false=门槛期内（打钩/评分/主权跳过）
+  topicGate?: boolean;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
   // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
@@ -1802,7 +1822,8 @@ async function updateMemoryCard(ctx: {
   //   [v20260812 仅评价过滤] firstRound=true（本轮是首条资料投喂）→ 不打钩
   //   [v190 资料型投喂] 本轮消息是"她叫XX/25岁/住XX"第三人称资料描述 → 不打钩
   //     （资料仅供画像提取/展开聊天，不代表"聊过"该话题）
-  {
+  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 清单未启用，不打钩
+  if (ctx.topicGate !== false) {
     const stage = (card.profile && card.profile.stage) || '吸引';
     const list = stageTopicList(stage, card);
     const herText = (firstRound || isProfileFeed(ctx.currentQuery || ''))
@@ -1822,7 +1843,9 @@ async function updateMemoryCard(ctx: {
   }
 
   // [v184 话题健康度] 每轮追加评分记录（保留最近 5 轮）+ 过渡类型 + 主权计数
-  if (ctx.topicHealth) {
+  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 话题机制未启动：
+  //   评分历史/过渡类型/主权计数全部跳过（清单都没启用，这些字段无意义）
+  if (ctx.topicHealth && ctx.topicGate !== false) {
     const hist = Array.isArray(card.topic_health_history) ? card.topic_health_history.slice() : [];
     hist.push({ round: hist.length + 1, score: ctx.topicHealth.score, at: new Date().toISOString() });
     if (hist.length > 5) hist.splice(0, hist.length - 5);
@@ -2260,7 +2283,7 @@ function titleStage(title: string): 'attract' | 'comfort' | 'seduce' | 'general'
 const GLOBAL_TACTIC_PREAMBLE = `\n\n【战术指令】(本轮最高优先，先判断后回复)\n`
   + `执行顺序：①判断她这条消息属于防守/进攻/救场哪一类 ②匹配对应场景 ③按该场景的"态度+手法"临场输出一句话话术（措辞保留【参考资料】金句的直白度和意象，可换说法贴合语境，禁止软化成文明腔；整句照抄会被平台拦）。\n`
   + `全局原则（全程生效）：\n`
-  + `- 回复字数 ≤ 她字数的1.3倍，通常一句；整条 ≤20字，超20字=失败必须压缩。\n`
+  + `- 回复字数统一 ≥18 字（[v20260815 用户定稿] 打乱AI腔的最低信息量，通常 1-2 句短句合计；她明显敷衍时也保持 18 字左右、别长篇大论）；整条 ≤20 字，超 20 字=失败必须压缩。\n`
   + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
   + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落或真正受伤 → 收起锋芒先共情，此场景禁用调侃与反击。`;
 
@@ -2315,6 +2338,8 @@ function buildSystemContent(opts: {
   // [v184 话题健康度] 每轮评分结果（紧迫度驱动过渡策略）+ 主权差（≥2 注入主权回收）
   topicHealth?: { score: number; urgency: 'none' | 'mild' | 'force'; trend: 'up' | 'flat' | 'down' };
   sovDiff?: number;
+  // [v20260815 话题门槛] 对方回复 ≥5 条才启用话题清单；false=门槛期内（不注入清单/主权块）
+  topicGate?: boolean;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -2362,7 +2387,7 @@ function buildSystemContent(opts: {
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
-    + `- 密度范例：她"今天好无聊呀"→"这么闲？我有个消磨时间的绝招"（17字）。`;
+    + `- 密度范例：她"今天好无聊呀"→"你这也太闲了吧 我正好有个绝招对付无聊"（18字）。`;
 
   // [v75 缓存①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 前缀缓存白捡）
   s += GLOBAL_TACTIC_PREAMBLE;
@@ -2478,7 +2503,8 @@ function buildSystemContent(opts: {
 
   // [v20260813 攻略已砍 → v184 健康度] 注入【本轮话题清单】块（战略层唯一驱动）：
   //   rankTopicList 动态重排 + 【过渡策略】（紧迫度驱动深挖/预埋钩子/软过渡）
-  if (goal !== '保持当前关系') {
+  //   [v20260815 话题门槛] topicGate=false（对方回复 <5 条）→ 不注入，等过门槛再启
+  if (goal !== '保持当前关系' && opts.topicGate !== false) {
     d += buildTopicListBlock(opts.memoryCard, opts.topicHealth!, opts.anchorMode || 'none', opts.memoryCard?.profile?.anchor || '', opts.lastUserText, !!opts.switchTopic);
     // [v184] 【主权状态】仅主权差 ≥2 时注入（她连续发起话题、我被带跑 → 回收主导权）
     //   差值 ≤1 不注入（省 token；正常轮次无需提醒）
