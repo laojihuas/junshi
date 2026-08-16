@@ -2388,7 +2388,14 @@ async function recallBlocks(
       })
       .filter((it) => it._gem >= GEM_MIN)
       .sort((a, b) => ((b._ft_score || 0) + (b._gem || 0) * GEM_WEIGHT + (b._stageAdj || 0)) - ((a._ft_score || 0) + (a._gem || 0) * GEM_WEIGHT + (a._stageAdj || 0)));
-    if (scored.length > 0) items = scored;
+    // [v200 质量分定位] 质量分是"排序择优键"不是"绝对过滤阀"：
+    //   GEM_MIN=-1 只剔极端口水块（正常话术 0.5~3 分几乎不触发）；择优靠排序。
+    //   全被剔光（极端场景）→ 按相关分降序回退，绝不交付未排序列表（否则配额挑到最差块 = 知识库白干）
+    if (scored.length > 0) {
+      items = scored;
+    } else {
+      items = items.slice().sort((a, b) => (b._ft_score || 0) - (a._ft_score || 0));
+    }
 
     // 4. 状态感知配额（仅剩恋爱话术一类；jx 空时 hs 吃满，见 applyQuota）
     return opts ? applyQuota(items, {
