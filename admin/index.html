@@ -433,22 +433,22 @@
                 </p>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
                     <label style="font-size:12px;color:var(--muted);display:block;">
-                        思考模式默认档（用户前端可自行切换，此处为全局默认）
+                        思考模式（<b style="color:#FAC775;">控制是否思考</b>：普通=完全关闭思考链）
                         <select id="llm-thinking-mode" class="input" style="margin-top:4px;">
-                            <option value="off">普通（关闭思考，默认）</option>
+                            <option value="off">普通（完全关闭思考链，快省）</option>
                             <option value="low">轻度</option>
                             <option value="high">中度</option>
                             <option value="max">深度</option>
                         </select>
                     </label>
                     <label style="font-size:12px;color:var(--muted);display:block;">
-                        思考链压缩（v78 方案复活；压缩思考可省成本但可能"变笨"）
+                        思考链压缩（<b style="color:#FAC775;">只影响思考长度，不能关闭思考链</b>）
                         <select id="llm-thinking-budget" class="input" style="margin-top:4px;">
                             <option value="auto">自动（高峰压缩，默认）</option>
-                            <option value="off">关闭（自然思考）</option>
-                            <option value="on">开启（始终压缩）</option>
+                            <option value="off">不压缩（思考完整，质量优先）</option>
+                            <option value="on">始终压缩（省成本可能变笨）</option>
                         </select>
-                        <span style="display:block;margin-top:4px;color:#999;">自动 = 高峰时段（工作日 9:00-12:00 / 14:00-18:00，DeepSeek 价格翻倍）压缩，其余时间不压缩</span>
+                        <span style="display:block;margin-top:4px;color:#999;">想完全关掉思考链 → 在上方"思考模式"选「普通」，不是这里。自动 = 高峰时段（工作日 9:00-12:00 / 14:00-18:00）压缩，其余时间不压缩</span>
                     </label>
                 </div>
                 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
@@ -886,6 +886,8 @@
                 // [v20260812] 思考链压缩三档（auto/on/off）
                 document.getElementById('llm-thinking-budget').value =
                     ['auto', 'on', 'off'].includes(lp.thinking_budget) ? lp.thinking_budget : 'auto';
+                // [v200 联动] 思考模式=off（关闭思考链）→ 压缩开关无意义，禁用并提示
+                syncThinkingUi();
                 // [v20260812 配额参数] 填充（缺省回退原默认值）
                 const qp = data.quota_params || {};
                 document.getElementById('qp-guest').value = qp.guest_daily ?? 20;
@@ -904,6 +906,21 @@
                 textarea.disabled = false;
             }
         }
+
+        // [v200 联动] 思考模式=off（关闭思考链）→ 压缩开关无意义：禁用 + 提示
+        function syncThinkingUi() {
+            const mode = document.getElementById('llm-thinking-mode');
+            const budget = document.getElementById('llm-thinking-budget');
+            if (!mode || !budget) return;
+            const off = mode.value === 'off';
+            budget.disabled = off;
+            budget.style.opacity = off ? 0.5 : 1;
+        }
+        // [v200] 思考模式变化时实时联动（页面加载后绑定一次）
+        (function initThinkingUi() {
+            const mode = document.getElementById('llm-thinking-mode');
+            if (mode) mode.addEventListener('change', syncThinkingUi);
+        })();
 
         // 保存统一提示词（仅管理员，由后台校验权限）
         async function savePrompt() {
