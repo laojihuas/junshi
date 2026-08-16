@@ -203,9 +203,13 @@ const Chat = {
                     </div>
                 `;
             } else {
+                const reasoningHtml = (m.reasoning)
+                    ? '<details class="reasoning"><summary>军师分析 ▾（内部推理，勿直接发出）</summary><div class="reasoning-body">' + this._escapeHtml(m.reasoning) + '</div></details>'
+                    : '';
                 return `
                     <div class="message assistant">
                         <div class="message-content">${this._escapeHtml(m.content)}</div>
+                        ${reasoningHtml}
                         <div class="message-footer">
                             <span class="message-time">${time}</span>
                             <button class="message-regen-btn" data-msg-id="${m.id}">🔄 重生</button>
@@ -367,6 +371,8 @@ const Chat = {
                 // 添加回复消息
                 const assistantMsg = await DB.addMessage(this.currentSessionId, 'assistant', reply);
                 if (assistantMsg) {
+                    // [v196 思考链] 挂到消息对象（内存态，不落库；复制按钮仍只复制 content）
+                    assistantMsg.reasoning = this.lastReasoning || null;
                     this.messages.push(assistantMsg);
                     this.renderMessages();
                 }
@@ -541,6 +547,8 @@ const Chat = {
                 }
                 // 2) 内存替换
                 oldMsg.content = reply;
+                // [v196 思考链] 重生后同步更新思考链（内存态）
+                oldMsg.reasoning = this.lastReasoning || null;
                 // 3) 窗口历史：重生上下文 + 新回复（保持后续对话连贯）
                 const nextHistory = ctxHistory.slice();
                 nextHistory.push({ role: 'assistant', content: reply });
@@ -709,6 +717,10 @@ const Chat = {
             const data = await response.json();
             // [v20260805] 保存 _debug 供阶段提示渲染（后端零成本白送字段，非 LLM 内容）
             this.lastDebug = (data && typeof data === 'object' && data._debug) ? data._debug : null;
+            // [v196 思考链展示] 保存 LLM 思考链（仅本窗口内存态，刷新后不显示；不落库）
+            this.lastReasoning = (this.lastDebug && typeof this.lastDebug.llm_reasoning === 'string' && this.lastDebug.llm_reasoning.trim())
+                ? this.lastDebug.llm_reasoning.trim()
+                : null;
             if (this.lastDebug) {
                 // [v182] 阶段升级提示：按正常顺序前进时 toast（回退/无阶段不提示）
                 const ns = this.lastDebug.memory_stage;

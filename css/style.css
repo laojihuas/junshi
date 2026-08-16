@@ -1010,6 +1010,32 @@ textarea.input {
     margin-top: 4px;
 }
 
+/* [v196 思考链展示] 军师分析折叠块：只展示不参与复制（复制按钮用 data-content 字段） */
+.reasoning {
+    margin-top: 6px;
+    border: 0.5px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 4px 8px;
+}
+.reasoning summary {
+    cursor: pointer;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    user-select: none;
+    padding: 2px 0;
+}
+.reasoning-body {
+    margin-top: 4px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.55);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow-y: auto;
+}
+
 /* 聊天输入区 */
 .chat-input-area {
     background: var(--bg-header);

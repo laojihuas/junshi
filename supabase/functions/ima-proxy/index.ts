@@ -464,7 +464,6 @@ Deno.serve(async (req) => {
     let lastTimeConflict: string | null = null;
   // [v20260812 逻辑重复检测] 本轮防重复判定结果（_debug 用；提到顶层防作用域事故）
   let dupHit = false;
-    let dupReason = '';
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
     // [v183 锚点降频] 锚点注入模式（_debug 用；提到顶层防作用域事故，块内赋值）
@@ -654,26 +653,14 @@ Deno.serve(async (req) => {
         });
         // [v9] 防重复兜底：与"自己发过的话"高相似 → 带提示重生成一次
         // [v70 降本] 只与最近 5 条比较（全量 ≤20 条命中率高，误触发=多花一整轮重发成本）
-        // [v20260812 逻辑重复检测] dupHit 升级为三层：
+        // [v20260812 逻辑重复检测] dupHit 保留字面层：
         //   ①字面 bigram ≥0.85 → 直接判重（零额外 LLM）
-        //   ②疑似区间 bigram 0.4-0.85 或与近 2 条共享 ≥2 个"框架词"（赌/赔/罚/约…）
-        //     → LLM 复核"字面/意思/话术框架"是否重复（延续上轮的框架不算重复）
-        //   ③都没命中 → 不判重（零额外成本）
+        //   [v196 简化] ②LLM 复核层（judgeLogicDup）+ ③框架语义组（frameSuspicious）已砍：
+        //     逻辑记忆(v195) + 决策流程④ 已承担"换皮重复同一套框架"的拦截，LLM 复核冗余且费成本
         // [v76] 时间一致性兜底：回复出现与【当前时间】冲突的时段词（早安/晚安/这么晚等）→ 同上重生成
         //   （多触发源合并成一次重试，避免同一轮双重重生成）
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.slice(-5) : [];
         dupHit = !!(reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs));
-        dupReason = '';
-        if (!dupHit && reply && selfMsgs.length > 0 && llmKey) {
-          // 疑似：字面 0.4-0.85（换词但结构像）或框架语义组撞车（赌注/威胁/邀约换皮）
-          const litSusp = selfMsgs.some((p) => bigramScore(reply, p) >= 0.4);
-          const frameSusp = frameSuspicious(reply, selfMsgs.slice(-2));
-          if (litSusp || frameSusp) {
-            const v = await judgeLogicDup(llmKey, llmBase, llmModel, reply, selfMsgs);
-            if (v && v.dup) { dupHit = true; dupReason = v.reason; }
-            else if (v) console.info(`[logic_dup] 复核放行（延续/无重复）: "${truncateText(reply, 20)}"`);
-          }
-        }
         const timeHit = timeConflict(reply);
         lastTimeConflict = timeHit;
         // [v129 消毒检测] 参考句含强敏感词、回复里这些词全部消失 → 判定消毒 →
@@ -682,7 +669,7 @@ Deno.serve(async (req) => {
         lastSanitizeHit = sanitizedWords !== null;
         if ((dupHit || timeHit || sanitizedWords) && llmKey) {
           const notes: string[] = [];
-          if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了${dupReason ? '（' + dupReason + '）' : ''}。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
+          if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           if (sanitizedWords) notes.push(`你刚才的回复把参考话术里的直白措辞（${sanitizedWords.join('/')}）全软化了，这是消毒不是加分。保留直白度：只许改人称、加语气词、调句序、换种说法，禁止同义软化或删掉擦边意象。`);
           const retry = await llmChat(llmKey, llmBase, llmModel, [
@@ -779,9 +766,8 @@ Deno.serve(async (req) => {
         sanitize_hit: lastSanitizeHit,
         // [v185 错字彩蛋] 本轮是否命中秒回错字（验证 20% 命中率）
         typo_hit: lastTypoHit,
-        // [v20260812 逻辑重复检测] 验证：dup_hit=是否判重 dup_reason=复核原因（字面/框架）
+        // [v20260812 逻辑重复检测] 验证：dup_hit=是否字面判重（v196 起仅字面层）
         dup_hit: dupHit,
-        dup_reason: dupReason,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         // [2026-08-06] 整句路已移除，仅剩语义路命中统计
@@ -956,68 +942,6 @@ function isNearDuplicate(text: string, prev: string[]): boolean {
     if (bigramScore(t, p) >= 0.85) return true;
   }
   return false;
-}
-
-// [v20260812 逻辑重复检测] 话术框架语义组：同一组内换词（赌→赔→罚→记账）视为同一套框架
-//   与近 2 条自己话共享 ≥1 个"高信号组"（赌注/威胁）或 ≥2 个任意组 → 疑似换皮重复 → LLM 复核
-const FRAME_GROUPS: Array<{ name: string; words: string[] }> = [
-  { name: '赌注', words: ['赌', '赔', '罚', '输', '赢', '欠', '记账', '打赌', '双倍', '赌注'] },
-  { name: '邀约', words: ['约', '见面', '一起', '请', '请客', '买单', '接你', '陪', '来', '去', '下次', '改天'] },
-  { name: '威胁', words: ['不然', '否则', '小心', '别怪', '等着', '走着瞧', '没你好果子'] },
-  { name: '夸赞', words: ['好看', '帅', '可爱', '厉害', '绝了', '喜欢', '优秀'] },
-  { name: '推拉', words: ['才不', '谁要', '想得美', '再说吧', '少来', '别想'] },
-];
-function sharedFrameGroups(text: string, prevList: string[]): { groups: string[]; score: number } {
-  const t = String(text || '');
-  const hitGroups = new Set<string>();
-  let maxScore = 0;
-  for (const p of prevList) {
-    if (!p) continue;
-    let score = 0;
-    for (const g of FRAME_GROUPS) {
-      const tHit = g.words.some((w) => t.includes(w));
-      const pHit = g.words.some((w) => p.includes(w));
-      if (tHit && pHit) { hitGroups.add(g.name); score++; }
-    }
-    if (score > maxScore) maxScore = score;
-  }
-  return { groups: [...hitGroups], score: maxScore };
-}
-// 初筛判定：高信号组（赌注/威胁/邀约）共享 ≥1 或任意组共享 ≥2 → 疑似框架重复
-function frameSuspicious(reply: string, prevList: string[]): boolean {
-  const { groups, score } = sharedFrameGroups(reply, prevList);
-  if (score >= 2) return true;
-  if (score === 1 && (groups.includes('赌注') || groups.includes('威胁') || groups.includes('邀约'))) return true;
-  return false;
-}
-
-// [v20260812 逻辑重复复核] LLM 判定：字面/意思/话术框架（打赌/威胁/邀约/夸赞/推拉）是否重复
-//   延续上轮的框架（如接着"零食赌注"记账）不算重复——那是有连续感，判"延续"
-async function judgeLogicDup(
-  llmKey: string, llmBase: string, llmModel: string,
-  reply: string, selfMsgs: string[]
-): Promise<{ dup: boolean; reason: string } | null> {
-  try {
-    const prev = selfMsgs.slice(-3).map((m) => `你之前：${truncateText(String(m), 80)}`).join('\n');
-    const prompt = `你是对话质量检查助手。判断"你刚生成的这句回复"是否与"你之前发过的某句话"重复。\n`
-      + `${prev || '（无）'}\n`
-      + `你刚生成的回复：${truncateText(reply, 100)}\n`
-      + `判定规则（任一命中即重复）：\n`
-      + `- 字面重复：几乎一模一样或只改几个字；\n`
-      + `- 意思重复：换词说同一件事、同一个观点；\n`
-      + `- 框架/套路重复：同一套话术框架换皮再用——如又立一次赌注（"不好看你要赔"→"不好看罚你陪我吃饭"）、又威胁一次、又用一个同款邀约/夸赞/推拉套路。\n`
-      + `- 延续不算重复：接着之前立过的赌注/约定往下推（记账、加码、催兑现、回应她的接招）→ 这是连续感，判不重复。\n`
-      + `只输出 JSON：{"dup":true|false,"reason":"≤15字"}，不要任何其他文字。`;
-    const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.2, maxTokens: 60, _stage: 'logic_dup',
-    });
-    const m = content.match(/"dup"\s*:\s*(true|false)/);
-    const r = content.match(/"reason"\s*:\s*"([^"]*)"/);
-    return { dup: m ? m[1] === 'true' : false, reason: r ? r[1] : '' };
-  } catch (e: any) {
-    console.warn('judgeLogicDup failed:', e.message);
-    return null; // 失败保守判不重复（不误伤）
-  }
 }
 
 // ============================================================
@@ -1846,6 +1770,15 @@ function buildSystemContent(opts: {
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲啊 我正好有办法治你的无聊"（15字）。`;
 
+  // [v196 决策流程] 思考链脚手架（对齐 IMA 思路）：定卡→消化弹药→候选池→淘汰→决策
+  //   思考档（high/max）生效，思考过程不输出，最终只输出选定的话术本体
+  s += `\n\n【决策流程】(思考档生效，回复前按序完成，思考过程不输出)\n`
+    + `① 定卡：本轮属于哪张战术卡（防守/进攻/救场，具体到卡）？她这句话的真实意图是什么？\n`
+    + `② 消化弹药：把【参考资料】里的方案提炼成 2-3 个可执行方向（如"先赞同再曲解""反转测试""不解释离场"），选最贴合【用户个人简介】人设的一个方向——禁止直接抄参考句，要按方向重新创作。\n`
+    + `③ 生成候选：基于该方向快速生成 3-5 个候选回复，每个在心里标注（对应策略/字数/人设匹配度）。\n`
+    + `④ 淘汰：对照【用户个人简介】人设 + 字数 ≥5≤18 + 无标点 + 口语化，淘汰不符的，保留最稳最妙的一个。\n`
+    + `⑤ 决策：只输出最终选定的那一句话术本体，不要分析/说明/序号。`;
+
   // [v75 缓存①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 前缀缓存白捡）
   s += GLOBAL_TACTIC_PREAMBLE;
 
@@ -1879,7 +1812,8 @@ function buildSystemContent(opts: {
     s += `\n\n【用户个人简介】（这是你自己的真实资料，是聊天中一切"关于你的事实"的唯一来源）\n${opts.userBio.trim()}\n`
       + `- 对方问到你的个人信息（年龄/工作/城市/学历/家庭/爱好/收入/经历等）时，先从本简介检索对应信息，有就如实引用；\n`
       + `- 简介里没有的信息：不编造，用含糊带过、反问对方或转移话题的方式处理；\n`
-      + `- 你回复中出现的任何个人事实（几岁/哪人/做什么/家庭情况/兴趣）必须与本简介一致，禁止自相矛盾。`;
+      + `- 你回复中出现的任何个人事实（几岁/哪人/做什么/家庭情况/兴趣）必须与本简介一致，禁止自相矛盾；\n`
+      + `- 【v196 人设筛选】简介也定义你的说话风格与人设——候选回复必须"像这个人说的"，与简介人设冲突的候选一律淘汰（如人设沉稳，就淘汰咋咋呼呼的版本）。`;
   }
 
   // [v20260813 缓存重构] ===== 动态区（注入最后一条 user 消息的【军师内参】，不占 system）=====
@@ -2060,7 +1994,7 @@ function buildSystemContent(opts: {
     // [v129 保味] 引导语从"仅弹药/禁止照抄原文"改为"保留直白度、禁止软化"：
     //   选句通道已删，保味由主回复 prompt 承担；整句照抄仍禁止（v83：会触发平台安全过滤空回复降级），
     //   策略 = 近距改写：保留参考句的直白措辞/意象，换说法、改人称贴合语境
-    d += `\n\n【参考资料】（可直接复制的句子/金句：优先保留其直白措辞、意象和节奏，可改人称、调句序、加接话引子贴合语境，禁止软化成文明腔；整句原样照抄可能被平台拦截，要在保留直白度的前提下换种说法；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+    d += `\n\n【参考资料】（可直接复制的句子/金句：优先保留其直白措辞、意象和节奏，可改人称、调句序、加接话引子贴合语境，禁止软化成文明腔；整句原样照抄可能被平台拦截，要在保留直白度的前提下换种说法；与当前对话冲突时以对话上下文为准。\n[v196] 先按【决策流程】②把它消化成行动方向再创作，禁止整句搬运）\n${kbText}`;
     if (opts.kbFallback) {
       d += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
     }
