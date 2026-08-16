@@ -250,7 +250,7 @@ const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟�
 //   环境变量 LOGIC_SUMMARY_ENABLED=0 可快速关停，默认开启。
 const LOGIC_SUMMARY_ENABLED = Deno.env.get('LOGIC_SUMMARY_ENABLED') !== '0';
 const LOGIC_SUMMARY_INPUT_N = 5;     // 输入：最近 5 条消息（含她+我，不足取全部）
-const LOGIC_SUMMARY_MAX = 80;        // 输出：一句话 ≤80 字
+const LOGIC_SUMMARY_MAX = 100;       // 输出：过去+现在(≤60) + 未来方向(≤40) 合计 ≤100 字（v201）
 
 // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 →
 //   注入"写错一个字"指令（代码层概率，不依赖 LLM 执行概率）。
@@ -471,7 +471,7 @@ Deno.serve(async (req) => {
     // [v183 锚点降频] 锚点注入模式（_debug 用；提到顶层防作用域事故，块内赋值）
     let anchorMode: 'full' | 'light' | 'none' = 'none';
     // [v195 逻辑记忆] 本轮生成的逻辑脉络（_debug 用；updateMemoryCard 前赋值，随卡落库）
-    let logicSummary: string | null = null;
+    let logicSummary: { text: string; direction: string } | null = null;
 
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
@@ -815,7 +815,7 @@ Deno.serve(async (req) => {
         anchor_mode: anchorMode,
         memory_stage: memoryCard?.profile?.stage || null,
         // [v195 逻辑记忆] 本轮生成的逻辑脉络（验证生成/注入；null=未生成或关闭）
-        logic_summary: logicSummary || memoryCard?.logic_summary?.text || null,
+        logic_summary: (logicSummary && logicSummary.text) || memoryCard?.logic_summary?.text || null,
         // [v58] 关系目标（验证目标引导注入）
         goal: memoryCard?.goal || null,
         // [v20260809] 机会窗口命中验证（null=未命中；命中显示话题名，排查"她问军师没反问"用）
@@ -886,18 +886,19 @@ function buildContextParts(history: any[]): { recent: any[]; summary: string } {
 }
 
 // ============================================================
-// [v195 逻辑记忆] 每轮用最近 LOGIC_SUMMARY_INPUT_N 条消息生成一句话逻辑脉络
-//   目的：把"正在聊什么/立过的约定/她表明的态度/我方立场"固化成既定事实，
-//         注入下一轮动态区 → 模型不前后矛盾、不忘记约定（防胡言乱语）。
+// [v195→v201 逻辑记忆] 每轮用最近 LOGIC_SUMMARY_INPUT_N 条消息生成逻辑脉络
+//   目的：把"过去（在聊什么/约定）+ 现在（她态度/我方立场）+ 未来（推进方向）"
+//         撸顺成 ≤100 字既定事实，注入下一轮动态区 → 模型不前后矛盾、且知道往哪推进。
 //   输入：最近 5 条消息（含她+我，带归属前缀；不足 5 条取全部）；
 //         少于 2 条（纯首条投喂）→ 返回 null 跳过
-//   输出：一句话 ≤LOGIC_SUMMARY_MAX 字；失败/掉线 → null（调用方保留上轮值，降级无害）
+//   输出：JSON { text(过去现在，≤60 字), direction(未来推进线索，≤40 字，无价值留空) }；
+//         失败/掉线 → null（调用方保留上轮值，降级无害）
 //   成本：输入 ~500 token + 输出 ~100 token ≈ 0.001 元/轮（未命中价）
 // ============================================================
 async function buildLogicSummary(
   llmKey: string, llmBase: string, llmModel: string,
   history: any[], prevSummary?: string | null
-): Promise<string | null> {
+): Promise<{ text: string; direction: string } | null> {
   if (!llmKey) return null;
   const valid = (Array.isArray(history) ? history : [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
@@ -905,18 +906,25 @@ async function buildLogicSummary(
   const recentText = valid.slice(-LOGIC_SUMMARY_INPUT_N)
     .map((h) => (h.role === 'user' ? '【她】' : '【我】') + truncateText(String(h.content), HISTORY_ITEM_MAX))
     .join('\n');
-  const prompt = `你是聊天逻辑记忆助手。把最近这段对话压缩成一句话逻辑脉络（≤${LOGIC_SUMMARY_MAX}字），供下一轮回复时保持前后一致。\n`
-    + `必须覆盖：①正在聊什么；②立过的约定/赌注/承诺（原文引用关键短语）；③她表明的态度或立场；④我方刚说过的话要点。\n`
-    + `铁律：只输出那一句话本身，不要引号、不要"总结："前缀、不要解释、不要分点。\n`
+  const prompt = `你是聊天逻辑记忆助手。把最近这段对话压缩成一条逻辑记忆（合计 ≤${LOGIC_SUMMARY_MAX} 字），供下一轮回复保持前后一致、知道往哪推进。\n`
+    + `输出 JSON（只输出 JSON，不要其他文字）：\n`
+    + `{"text":"过去+现在（≤60字）：正在聊什么；立过的约定/赌注/承诺（引用关键短语）；她表明的态度；我方刚说过的话要点",`
+    + `"direction":"未来推进线索（≤40字）：哪条线索最有价值、可往哪延伸（如"猫是她的高频话题，可往性格或邀约看猫方向带"）；她敷衍/冷淡/无推进价值则留空字符串"}\n`
     + (prevSummary ? `上一轮脉络（作延续参考，本轮在其基础上更新）：${truncateText(prevSummary, 120)}\n` : '')
     + `最近对话：\n${recentText}`;
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
-      temperature: 0.3, maxTokens: 150, _stage: 'logic_summary',
+      temperature: 0.3, maxTokens: 200, _stage: 'logic_summary',
     });
-    const t = (content || '').trim().replace(/^["'「]+|["'」]+$/g, '').replace(/\s+/g, ' ').slice(0, LOGIC_SUMMARY_MAX);
-    if (!t) return null;
-    return t;
+    const start = (content || '').indexOf('{');
+    const end = (content || '').lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
+    let p: any = null;
+    try { p = JSON.parse(content.slice(start, end + 1)); } catch (e) { return null; }
+    const text = (typeof p.text === 'string' ? p.text : '').trim().replace(/\s+/g, ' ').slice(0, 60);
+    const direction = (typeof p.direction === 'string' ? p.direction : '').trim().replace(/\s+/g, ' ').slice(0, 40);
+    if (!text) return null;
+    return { text, direction };
   } catch (e: any) {
     console.warn('buildLogicSummary failed:', e.message);
     return null;
@@ -1123,9 +1131,9 @@ type MemoryCard = {
   // [v58] 关系目标（用户在前端设置）：'保持当前关系' / ''(未设置=默认推进)
   //   目标引导 = 战略层：决定军师每轮往哪使劲（M3 路线图）
   goal?: string;
-  // [v195 逻辑记忆] 最近 N 条消息的逻辑脉络（一句话 ≤80 字，覆盖式单条）：
-  //   每轮 LLM 生成 → 下一轮注入动态区作既定事实基准（防前后矛盾/忘约定）
-  logic_summary?: { text: string; round: number; at: string };
+  // [v195→v201 逻辑记忆] 最近 N 条消息的逻辑脉络（过去+现在 ≤60 字 + 未来推进方向 ≤40 字，覆盖式单条）：
+  //   每轮 LLM 生成 → 下一轮注入动态区作既定事实基准（防前后矛盾/忘约定）+ 推进线索（往哪想）
+  logic_summary?: { text: string; direction?: string; round: number; at: string };
   // [v11] 迷男OS 引擎层：节奏 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -1265,8 +1273,8 @@ async function updateMemoryCard(ctx: {
   //   导致它在"重生请求"和下一轮防重复判定时不在 recent_self_messages 防重复窗口内
   //   → 重生时仍可能生成同一句。生成后立即写入。
   currentReply?: string | null;
-  // [v195 逻辑记忆] 本轮生成的逻辑脉络（非空 → 覆盖写入 logic_summary；null=保留旧值）
-  logicSummary?: string | null;
+  // [v195→v201 逻辑记忆] 本轮生成的逻辑脉络（非空 → 覆盖写入 logic_summary；null=保留旧值）
+  logicSummary?: { text: string; direction: string } | null;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
   // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
@@ -1385,10 +1393,15 @@ async function updateMemoryCard(ctx: {
     card.updated_at = new Date().toISOString();
   }
 
-  // [v195 逻辑记忆] 本轮生成成功 → 覆盖写入（单条，记录轮次/时间）；失败/未生成 → 保留旧值
+  // [v195→v201 逻辑记忆] 本轮生成成功 → 覆盖写入（单条，记录轮次/时间）；失败/未生成 → 保留旧值
   if (ctx.logicSummary) {
     const prevRound = (card.logic_summary && card.logic_summary.round) || 0;
-    card.logic_summary = { text: ctx.logicSummary, round: prevRound + 1, at: new Date().toISOString() };
+    card.logic_summary = {
+      text: ctx.logicSummary.text,
+      direction: ctx.logicSummary.direction || '',
+      round: prevRound + 1,
+      at: new Date().toISOString(),
+    };
   }
 
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
@@ -1881,11 +1894,16 @@ function buildSystemContent(opts: {
     d += `\n\n【对方画像记忆】（跨轮次记住，回答时不要重复询问这些已知信息）\n${parts.join('\n')}`;
   }
 
-  // [v195 逻辑记忆] 最近几条消息的逻辑脉络（系统级既定事实基准）：
-  //   覆盖"正在聊什么/约定赌注/她表态/我方立场"，回答必须与其衔接一致，防前后矛盾
-  const logicSummary = opts.memoryCard?.logic_summary?.text || '';
+  // [v195→v201 逻辑记忆] 最近几条消息的逻辑脉络（过去+现在）+ 推进方向（未来）：
+  //   脉络 = 系统级既定事实基准（防前后矛盾/忘约定）；方向 = 跨轮推进线索（往哪想）
+  //   [v201] 防守/救场轮不注入方向（她敷衍/攻击时无推进可言，避免与战术卡冲突）
+  const ls = opts.memoryCard?.logic_summary;
+  const logicSummary = (ls && ls.text) || '';
   if (logicSummary) {
+    const isDefensive = opts.tactic?.category === 'defense' || opts.tactic?.category === 'rescue';
+    const direction = (!isDefensive && ls && ls.direction) || '';
     d += `\n\n【逻辑记忆】(最近对话的逻辑脉络，系统级既定事实基准)\n${logicSummary}\n`
+      + (direction ? `- 【推进方向】${direction}——仅作跨轮推进线索：本轮能自然带就往这个方向带，带不动不强求。\n` : '')
       + `- 这是已经发生的既定事实：后续回复必须与此衔接一致，不得自相矛盾、不得推翻、不得假装不知道。\n`
       + `- 立过的约定/赌注/梗/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），换话题也不许丢弃。`;
   }
