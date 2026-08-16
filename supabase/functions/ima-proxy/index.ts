@@ -242,7 +242,7 @@ const KB_AMMO_COUNT = 5;                      // 主回复统一弹药块数
 const KB_CONTENT_MAX = 2000;                  // 完整注入兜底（实际不触发截断）
 const HISTORY_ITEM_MAX = 800;   // 单条历史上限
 const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本）
-const RECENT_FULL = 8;          // 近详远略：最近 N 条全文（v70 10→8，回复 ≤30 字衔接够用）
+const RECENT_FULL = 5;          // 近详远略：最近 N 条全文（v70 10→8；v199 8→5：逻辑记忆 v195 已承担远期脉络，压缩省输入成本，与 LOGIC_SUMMARY_INPUT_N 对齐）
 const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟（v70 3→5 降频）
 
 // [v195 逻辑记忆] 每轮用最近 N 条消息生成一句话逻辑脉络（≤80 字）落卡，
@@ -464,6 +464,8 @@ Deno.serve(async (req) => {
     let lastTimeConflict: string | null = null;
   // [v20260812 逻辑重复检测] 本轮防重复判定结果（_debug 用；提到顶层防作用域事故）
   let dupHit = false;
+  // [v199] 本轮重试触发原因（_debug 用；''=未触发重试）
+  let retryReason = '';
     // [v77] 本轮实际使用的六阶段采样参数（_debug 用；按 memoryCard.profile.stage 取档）
     let usedStageLlm = DEFAULT_STAGE_LLM;
     // [v183 锚点降频] 锚点注入模式（_debug 用；提到顶层防作用域事故，块内赋值）
@@ -672,6 +674,12 @@ Deno.serve(async (req) => {
           if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           if (sanitizedWords) notes.push(`你刚才的回复把参考话术里的直白措辞（${sanitizedWords.join('/')}）全软化了，这是消毒不是加分。保留直白度：只许改人称、加语气词、调句序、换种说法，禁止同义软化或删掉擦边意象。`);
+          // [v199 重试原因落库] _stage 按触发原因标记（可多因合并），llm_usage_log 直接 group by 统计
+          const retryReasons: string[] = [];
+          if (dupHit) retryReasons.push('dup');
+          if (timeHit) retryReasons.push('time');
+          if (sanitizedWords) retryReasons.push('sanitize');
+          if (retryReasons.length > 0) retryReason = retryReasons.join('+');
           const retry = await llmChat(llmKey, llmBase, llmModel, [
             // [v20260813 缓存重构] system + 【军师内参】与主回复完全一致（复用同一 built →
             //   system+history 前缀缓存整段命中）；重试指令 notes 追加在 user 消息尾部
@@ -685,6 +693,8 @@ Deno.serve(async (req) => {
             presencePenalty: usedStageLlm.presence_penalty,
             // [v185] 重试沿用主回复档位（错字轮=off）
             thinking: replyThinking,
+            // [v199] 重试原因落库（retry_dup / retry_time / retry_sanitize / retry_dup+time ...）
+            _stage: ('retry_' + (retryReasons.join('+') || 'unknown')) as any,
           });
           if (retry) reply = retry;
         }
@@ -768,6 +778,8 @@ Deno.serve(async (req) => {
         typo_hit: lastTypoHit,
         // [v20260812 逻辑重复检测] 验证：dup_hit=是否字面判重（v196 起仅字面层）
         dup_hit: dupHit,
+        // [v199] 重试触发原因（''=本轮无重试；dup/time/sanitize 可叠加）
+        retry_reason: retryReason,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
         // [2026-08-06] 整句路已移除，仅剩语义路命中统计
@@ -1882,14 +1894,14 @@ function buildSystemContent(opts: {
   //   （仅窗口恢复等 llmHistory 缺失场景注入，防重复占用上下文）
   const hasRecent = opts.hasRecentHistory === true;
   // 记忆卡：对方近期说过的话
-  // [v79.2 收紧] 8→4：llmHistory 已含近 8 条全文，此处仅兜底窗口恢复场景，4 条足够
+  // [v79.2 收紧] 8→4：llmHistory 已含近 5 条全文（v199 8→5），此处仅兜底窗口恢复场景，4 条足够
   const msgs = opts.memoryCard?.recent_user_messages || [];
   if (!hasRecent && msgs.length > 0) {
     d += `\n\n【对方近期说过的话】（供判断语感与关系状态）\n${msgs.slice(-4).join('\n')}`;
   }
 
   // [v9] 记忆卡：军师(自己)发过的话（防重复 + 保自洽；窗口 history 丢失后仍有效）
-  // [v79.2 收紧] 8→4：llmHistory 已含近 8 条，兜底场景 4 条足够防重复
+  // [v79.2 收紧] 8→4：llmHistory 已含近 5 条，兜底场景 4 条足够防重复
   const selfMsgs = opts.memoryCard?.recent_self_messages || [];
   if (!hasRecent && selfMsgs.length > 0) {
     d += `\n\n【你之前发过的话】（跨轮次记住，严禁原样或意思重复，后续回复必须与之一致衔接）\n${selfMsgs.slice(-4).join('\n')}`;
