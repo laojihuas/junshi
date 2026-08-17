@@ -34,3 +34,9 @@ secret*.json
 
 # 安全加固(2026-08-07):记忆日志含内部架构情报,不再推送到公开仓库
 .workbuddy/memory/
+
+# 成本对账脚本（含 PAT 读取逻辑，禁止入库）
+cost_check.py
+# 部署脚本扩展名补充（mjs 与 js 同规则，禁止入库）
+deploy*.mjs
+deploy*.cjs

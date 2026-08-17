@@ -160,6 +160,22 @@
 //   - 未命中成本 = 2 条历史 + 2 块×50 字弹药 + 当前内容 + 输出（主回复唯一 LLM 调用）
 //   - 低配版不读不写记忆卡 → 无阶段联动采样（固定 DEFAULT_STAGE_LLM）
 // ============================================================
+// [v206 WB版]（2026-08-17，新增不改动普通版/低配版）
+//   - 后台 app_config.llm_params.mode 加一档：wb=WB版（完整复刻"消息分诊→知识库检索→
+//     策略决策→风格生成"链路；思考档位与普通版共用同一开关）
+//   - 消息分诊（纯规则零 LLM）：triageMessage 识别 消息类型/情绪/兴趣信号 + 意图解读
+//     （greeting/terse/excuse/status/sticker/question/share/attack/invite/invite_reject/mood/general）
+//   - 知识库检索：零改动（KB_AMMO_COUNT=5 块话术）；分诊类型词（WB_TRIAGE_KW）追加进
+//     检索词序列，类型映射阶段（wbPhaseOf）参与弹药阶段加权——弹药与策略同向
+//   - 策略决策（纯规则零 LLM）：WB_STRATEGY_TABLE 类型→招数（态度+手法），
+//     buildWbStrategyBlock 组装【消息分诊】+【策略指令】注入动态区（最高优先）
+//   - 风格生成：复用后台统一提示词（effectivePrompt，固定区【附加规则】），零新增风格指令
+//   - 与低配版相同的省配：不读不写记忆卡、跳过 LLM 语义拆解/rewrite/逻辑记忆/画像提取/
+//     错字彩蛋/会话间隔/重试（单次主回复为成本上限）
+//   - 与低配版不同：上下文完整（近 5 条全文 + 更早摘要）、弹药 5 块全量注入、
+//     动态区注入【消息分诊】+【策略指令】+【当前时间】
+//   - _debug 新增 wb_triage（分诊结果），mode 显示 wb
+// ============================================================
 
 // [v10 思考模式] 档位类型与合法集合（优先级：请求体 > 后台默认 > off）
 type ThinkingMode = 'off' | 'low' | 'high' | 'max';
@@ -167,8 +183,10 @@ const THINKING_MODES = new Set<string>(['off', 'low', 'high', 'max']);
 const THINKING_MAX_TOKENS = 2000; // 思考档输出预算下限：防思维链挤占最终回复
 
 // [v202 低配版] 版本档位：full=普通版（默认）/ lite=低配版（最省成本）
-type LiteMode = 'full' | 'lite';
-const LITE_MODES = new Set<string>(['full', 'lite']);
+// [v206 WB版] 新增 wb=WB版：复刻"消息分诊→知识库检索→策略决策→风格生成"链路
+//   full=普通版（完整能力）/ lite=低配版（最省成本）/ wb=WB版（规则分诊+策略路由）
+type RunMode = 'full' | 'lite' | 'wb';
+const RUN_MODES = new Set<string>(['full', 'lite', 'wb']);
 const LITE_HISTORY_COUNT = 2;      // 低配：仅最近 2 条历史全文
 const LITE_KB_COUNT = 2;           // 低配：检索 2 块话术弹药
 const LITE_KB_CONTENT_MAX = 50;    // 低配：每块弹药截断 50 字
@@ -410,8 +428,10 @@ Deno.serve(async (req) => {
     const llmParams = appConfig.llm_params;
     // [v202 低配版] 版本档位（app_config.llm_params.mode，后台"版本"切换按钮）
     //   lite：固定区 100% 缓存命中 + 2 块×50 字弹药 + 2 条历史 + 当前内容，其余机制全省
-    const liteMode: LiteMode = llmParams.mode === 'lite' ? 'lite' : 'full';
-    const isLite = liteMode === 'lite';
+    //   [v206 WB版] wb：消息分诊(纯规则) + 检索 5 块话术 + 策略路由 + 后台风格提示词生成
+    const runMode: RunMode = llmParams.mode === 'lite' ? 'lite' : llmParams.mode === 'wb' ? 'wb' : 'full';
+    const isLite = runMode === 'lite';
+    const isWb = runMode === 'wb';
 
     // ---- LLM 凭证（[B方案] 完全移除 IMA，仅保留 LLM）----
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
@@ -429,7 +449,8 @@ Deno.serve(async (req) => {
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     // [v202 低配版] 低配不读记忆卡：画像/逻辑记忆/锚点等动态机制全砍，省一次 DB 读
-    let memoryCard = isLite ? null : await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+    // [v206 WB版] WB 版同样不读记忆卡：分诊/策略纯规则驱动，零记忆卡依赖
+    let memoryCard = (isLite || isWb) ? null : await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
 
     const rawQuery = typeof query === 'string' ? query.trim() : '';
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
@@ -442,13 +463,15 @@ Deno.serve(async (req) => {
     //   recent  = 最近 N 条全文（单条 ≤800 字），作为 messages 发给 LLM
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
     //   [v202 低配版] lite：仅最近 2 条全文，无更早摘要
+    //   [v206 WB版] wb：与普通版一致（近 5 条全文 + 更早摘要），分诊需要足够上下文
     const { recent: llmHistory, summary: olderSummary } = buildContextParts(history, isLite);
 
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
     //   [v202 低配版] 低配跳过：省一次 DB 查询（该块属动态区，低配不注入）
+    //   [v206 WB版] WB 跳过：分诊/策略不依赖时间间隔，保持轻量
     let lastGapText = '';
-    if (!isLite && serviceRoleKey && supabaseUrl && session_id) {
+    if (!isLite && !isWb && serviceRoleKey && supabaseUrl && session_id) {
       try {
         const lastResp = await fetch(
           `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(session_id)}&select=created_at&role=eq.assistant&order=created_at.desc&limit=1`,
@@ -498,6 +521,16 @@ Deno.serve(async (req) => {
     // [v195 逻辑记忆] 本轮生成的逻辑脉络（_debug 用；updateMemoryCard 前赋值，随卡落库）
     let logicSummary: { text: string; direction: string } | null = null;
 
+    // [v206 WB版] 消息分诊（纯规则零 LLM，先于检索执行）：
+    //   复刻"消息分诊"层——识别消息类型/情绪/兴趣信号 → 驱动检索词与策略路由
+    let wbTriage: WbTriage | null = null;
+    let wbPhase: 'attract' | 'comfort' | 'seduce' = 'attract';
+    if (isWb) {
+      wbTriage = triageMessage(switchTopic ? '' : query);
+      wbPhase = wbPhaseOf(wbTriage.type);
+      tactic = { category: 'attack', phase: wbPhase, cardIndex: -1 };
+    }
+
     // ---- 知识库检索（[B方案] 纯本地块级检索，完全移除 IMA 依赖） ----
     if (serviceRoleKey && supabaseUrl) {
       mark('ready'); // 认证/配置/记忆卡读取完成
@@ -515,12 +548,13 @@ Deno.serve(async (req) => {
         // [v62 切换话题] 换话题时 query 是"/换话题"无实义，跳过 LLM 拆词（省 token），
         //   直接用"新话题/开场白"固定检索词，再叠加记忆卡里的喜好/兴趣当话题弹药
         // [v202 低配版] 低配跳过 LLM 语义拆解（零辅助 LLM 调用）：纯规则词 + 原句 bigram 检索
+        // [v206 WB版] WB 同样跳过 LLM 语义拆解：消息分诊已产出类型词（WB_TRIAGE_KW），零辅助调用
         const kw = extractKeywordsFromHistory(history, switchTopic ? '' : query);
         if (switchTopic) {
           semanticKws = ['新话题', '开场白', '话题', '破冰'];
           const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
           kw.push(...hobbyKws); // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
-        } else if (llmKey && !isLite) {
+        } else if (llmKey && !isLite && !isWb) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         mark('semantic');
@@ -529,8 +563,9 @@ Deno.serve(async (req) => {
         //   → 整句路纯浪费一次 LLM 调用，检索词序列收敛为 语义词 > 规则词 > 原句垫底
         // [v8] 2. 条件 query rewrite 降级：仅当语义词全空 且 规则词不足时触发
         //   [v202 低配版] 低配跳过 rewrite（零辅助 LLM 调用）
+        //   [v206 WB版] WB 同样跳过 rewrite：分诊类型词 + 原句 bigram 已够召回
         let searchQuery = query.trim();
-        if (!isLite && semanticKws.length === 0 && kw.length < 2 && llmKey) {
+        if (!isLite && !isWb && semanticKws.length === 0 && kw.length < 2 && llmKey) {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
@@ -541,18 +576,25 @@ Deno.serve(async (req) => {
         // [v148 弹药阶段加权] 战术判定提前到检索前（纯规则零 LLM）：
         //   phase 参与 recallBlocks 排序（同阶段文档加权、异阶段降权），
         //   保证"嗯"在吸引期拿到冷读/打压类弹药、舒适期拿到联系感/共鸣类弹药
-        tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
+        // [v206 WB版] WB 分诊已提前产出类型/阶段（wbTriage/wbPhase），不再走记忆卡战术判定
+        if (!isWb) {
+          tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
+        }
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
-        // [v202 低配版] 低配弹药 2 块（普通版 KB_AMMO_COUNT=5）；检索本身纯规则/RPC 零 LLM 成本
+        // [v206 WB版] WB 追加分诊类型词（如 敷衍→冷读/打压、借口→废物测试），让弹药与策略同向
+        if (isWb && wbTriage && WB_TRIAGE_KW[wbTriage.type] && WB_TRIAGE_KW[wbTriage.type]!.length > 0) {
+          searchQueries.push(...WB_TRIAGE_KW[wbTriage.type]!);
+        }
+        // [v202 低配版] 低配弹药 2 块（普通版/WB版 KB_AMMO_COUNT=5）；检索本身纯规则/RPC 零 LLM 成本
         const kbPick = isLite ? LITE_KB_COUNT : KB_AMMO_COUNT;
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: tactic.phase });
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: isWb ? wbPhase : tactic.phase });
         mark('kb1');
         // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: tactic.phase });
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: isWb ? wbPhase : tactic.phase });
             const merged = mergeDedup([...kbItems, ...items2]).slice(0, kbPick);
             if (merged.length > kbItems.length) kbItems = merged;
           }
@@ -594,7 +636,8 @@ Deno.serve(async (req) => {
         //   保味改由主回复 prompt 承担：【措辞底线】动态注入（riskHit 时）+ 参考资料引导语保留直白度
         // [v129] 高危词预检：本轮参考弹药含强敏感词 → 高风险消毒轮（注入保味指令 + 生成后消毒检测）
         // [v202 低配版] 低配跳过预检（弹药仅 2×50 字、无【措辞底线】注入、无消毒重试）
-        lastRiskHit = isLite ? false : kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
+        // [v206 WB版] WB 同样跳过：无【措辞底线】注入、无消毒重试
+        lastRiskHit = (isLite || isWb) ? false : kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
         lastSanitizeHit = false;
         if (!reply) {
         // [v148] 战术判定已提前到检索前（549 行，phase 供弹药加权），此处直接复用
@@ -641,6 +684,9 @@ Deno.serve(async (req) => {
           anchorMode,
           // [v202 低配版] 低配：动态区只保留【参考资料】(2块×50字)，其余动态块全省
           lite: isLite,
+          // [v206 WB版] WB：消息分诊结果 + 策略路由（动态区注入【消息分诊】+【策略指令】）
+          wb: isWb,
+          wbTriage: isWb ? wbTriage : null,
         });
         const systemContent = built.systemContent;
         let innerContent = built.dynamicContent;
@@ -649,8 +695,9 @@ Deno.serve(async (req) => {
         // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 → 动态注入"写错一个字"指令
         //   代码层概率（真 20%），LLM 不掷骰子只执行；指令只在本轮出现 → 不扩散到后续轮次
         //   [v202 低配版] 低配跳过（错字指令属动态区，低配不注入）
+        //   [v206 WB版] WB 跳过：风格提示词已由后台统一约束，不叠代码层错字指令
         lastTypoHit = false;
-        if (!isLite && USE_TYPO_HINT && llmKey) {
+        if (!isLite && !isWb && USE_TYPO_HINT && llmKey) {
           try {
             const histAll = (Array.isArray(history) ? history : []).filter((h: any) => h && h.created_at);
             const lastTs = histAll.length ? Date.parse(String(histAll[histAll.length - 1].created_at)) : NaN;
@@ -704,7 +751,8 @@ Deno.serve(async (req) => {
         lastSanitizeHit = sanitizedWords !== null;
         // [v202 低配版] 低配跳过重试（防重复/时间冲突/消毒检测）：重试=第二次主回复 LLM 调用，
         //   低配以"单次主回复"为成本上限，不引入任何二次调用
-        if (!isLite && (dupHit || timeHit || sanitizedWords) && llmKey) {
+        // [v206 WB版] WB 同样单次主回复：分诊/策略已前置到提示词层，不需要重试兜底
+        if (!isLite && !isWb && (dupHit || timeHit || sanitizedWords) && llmKey) {
           const notes: string[] = [];
           if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
@@ -755,7 +803,8 @@ Deno.serve(async (req) => {
     // [v195 逻辑记忆] 每轮用最近 5 条消息生成一句话逻辑脉络（下一轮注入用）：
     //   放主回复之后（失败/掉线不影响主回复返回，保留上轮值降级无害）；随 updateMemoryCard 覆盖落库
     //   [v202 低配版] 低配跳过（零辅助 LLM 调用；低配不读不写记忆卡）
-    if (!isLite && LOGIC_SUMMARY_ENABLED && llmKey) {
+    //   [v206 WB版] WB 同样跳过：分诊/策略纯规则，不生成逻辑脉络
+    if (!isLite && !isWb && LOGIC_SUMMARY_ENABLED && llmKey) {
       try {
         logicSummary = await buildLogicSummary(llmKey, llmBase, llmModel, history, memoryCard?.logic_summary?.text || null);
       } catch (e: any) {
@@ -767,7 +816,8 @@ Deno.serve(async (req) => {
     //   [v20260812 仅评价过滤] 记忆/统计走原始 history（资料正常记录，供主回复基于资料展开聊天）；
     //   只有 extractProfile（关系阶段/画像判定）在函数内部剔除首条资料
     //   [v202 低配版] 低配不写记忆卡（画像提取/规则统计/逻辑记忆回写全砍，省 DB 写 + 零画像 LLM）
-    if (session_id && !isLite) {
+    //   [v206 WB版] WB 同样不写记忆卡：零记忆卡依赖，保持链路轻量
+    if (session_id && !isLite && !isWb) {
       try {
         await updateMemoryCard({
           supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
@@ -845,7 +895,10 @@ Deno.serve(async (req) => {
         })(),
         thinking_mode: effectiveThinkingMode,
         // [v202 低配版] 版本档位（full=普通版 / lite=低配版；验证后台切换生效）
-        mode: liteMode,
+        // [v206 WB版] wb=WB版
+        mode: runMode,
+        // [v206 WB版] 消息分诊结果（验证分诊命中：type=类型 / signal=兴趣信号 / mood=情绪）
+        wb_triage: wbTriage ? { type: wbTriage.type, signal: wbTriage.signal, mood: wbTriage.mood, intent: wbTriage.intent } : null,
         // [v20260812 思考预算三档] 验证：raw=后台档位(off/on/auto) active=实际是否压缩 peak=auto 档高峰命中
         thinking_budget: rawThinkingBudget,
         budget_active: effectiveThinkingBudget,
@@ -1681,6 +1734,145 @@ const DEFENSE_WEAK_RE = /^(嗯|哦|呵呵|哈{2,}|随便|不知道|没意思|无
 const SELF_NEED_RE = /(想你|喜欢你|很想你|舍不得|爱你|好想|离不开|一定要见|求你了)/;
 const INVITE_REJECT_RE = /(不去|算了|没空|改天|再说吧|别约|不想见|拒绝|呵呵不了)/;
 
+// ============================================================
+// [v206 WB版] 消息分诊 + 策略决策路由（复刻"分诊→检索→路由→生成"链路的规则引擎）
+//   - 消息分诊：纯规则零 LLM，识别 类型/情绪/兴趣信号，输出意图解读
+//   - 策略决策：JSON 规则表 类型→招数（态度+手法），随检索弹药一并注入提示词
+//   - 知识库：检索逻辑零改动（KB_AMMO_COUNT=5 块话术）；分诊类型词只追加检索词
+//   - 风格生成：复用后台统一提示词（effectivePrompt），不新增风格指令
+// ============================================================
+type WbTriageType =
+  | 'greeting'   // 破冰问候
+  | 'terse'      // 单字敷衍
+  | 'excuse'     // 借口解释
+  | 'status'     // 状态陈述
+  | 'sticker'    // 表情包/图片
+  | 'question'   // 主动提问（机会窗口）
+  | 'share'      // 主动分享（自述）
+  | 'attack'     // 攻击/挑衅
+  | 'invite'     // 主动邀约/好感
+  | 'invite_reject' // 邀约被拒
+  | 'mood'       // 情绪低落
+  | 'general';   // 常态
+
+type WbTriage = {
+  type: WbTriageType;
+  mood: 'warm' | 'cold' | 'neutral';
+  signal: 'ioi' | 'low' | 'none';
+  intent: string;
+};
+
+// 分诊正则（按优先级组织，先精确后宽松）
+const WB_EMOJI_RE = /\p{Extended_Pictographic}/u;
+const WB_GREETING_RE = /^(哈喽|你好|嗨|hi|hello|hey|hei|哟|早呀|早|晚上好|中午好|下午好|在吗|在嘛|在不在|好久不见|终于等到你)/i;
+const WB_TERSE_RE = /^(嗯|哦|呵呵|哈哈|哈|额|行|好|对|是|没|随便|不知道|哦哦|嗯嗯|好的|知道了|好吧|那算了|噢|emm|emmm|呃|hmm|ok|okay|嗯哼|对呀|是吧)$/i;
+const WB_EXCUSE_RE = /(没电|关机|在忙|有事|忙|开会|上班|加班|开车|洗澡|睡着|信号不好|网络差|不方便|刚回来|刚到家|手机|充电|回头|晚点再说|改天再说|下次再聊|累了先睡|在外面有事)/;
+const WB_MOOD_RE = /(难过|伤心|委屈|烦死|压力大|崩溃|哭|失眠|焦虑|emo|不开心|郁闷|低落|好烦|好累|生气|吵架|分手|被骂|辞职|倒霉|好丧|心累|破防)/;
+const WB_QUESTION_RE = /(你呢|那你|你(?:觉得|认为|喜欢|爱|会|敢|想|要不要|会不会|是不是|有没有|在干嘛|在吗|吃了吗|忙不忙|最近|怎么|为什么|哪|什么|谁|几时)|[？?]$|(?:吗|呢|嘛)$)/;
+const WB_INVITE_RE = /(约我|一起|见面|出来|找你|接你|请你|请我|看电影|吃饭|喝咖啡|去玩|带你去|来我家|来我这|下次约|好想见你|想见你)/;
+const WB_STATUS_RE = /^(我在|我刚|今天|现在|外面|公司|家里|刚下班|下班了|好困|好饿|好无聊|没事做|在听歌|在看|下雨了|天气)/;
+const WB_IOI_RE = /(喜欢你|想你了|想你|有点想|照片|自拍|好看|帅|有意思|下次|愿意|好呀|好啊|可以啊|当然|期待|答应|发你|给你看)/;
+const WB_COLD_RE = /(呵呵|随便|没意思|无聊|不想|别烦|滚|懒得|敷衍|不想聊|算了|再说吧)/;
+const WB_WARM_RE = /(哈哈|嘻嘻|嘿嘿|好啊|好呀|开心|可爱|喜欢|想你|咯咯)/;
+
+function triageMessage(query: string): WbTriage {
+  const q = String(query || '').trim();
+  let type: WbTriageType = 'general';
+  if (!q) return { type, mood: 'neutral', signal: 'none', intent: WB_INTENT[type] };
+
+  // 攻击 > 情绪低落 > 邀约被拒 > 单字敷衍 > 破冰问候 > 表情包 > 主动邀约 > 借口 > 提问 > 分享 > 状态
+  if (ATTACK_RE.test(q)) type = 'attack';
+  else if (WB_MOOD_RE.test(q)) type = 'mood';
+  else if (INVITE_REJECT_RE.test(q)) type = 'invite_reject';
+  else if (q.length <= 4 && WB_TERSE_RE.test(q)) type = 'terse';
+  else if (WB_GREETING_RE.test(q)) type = 'greeting';
+  else if (WB_EMOJI_RE.test(q) && q.length <= 16) type = 'sticker';
+  else if (WB_INVITE_RE.test(q)) type = 'invite';
+  else if (WB_EXCUSE_RE.test(q)) type = 'excuse';
+  else if (WB_QUESTION_RE.test(q)) type = 'question';
+  else if (detectSelfDisclosure(q)) type = 'share';
+  else if (WB_STATUS_RE.test(q)) type = 'status';
+
+  // 兴趣信号：主动投入（提问/分享/邀约/表情包/好感词）= ioi；冷淡/敷衍/攻击 = low
+  let signal: WbTriage['signal'] = 'none';
+  if (type === 'question' || type === 'share' || type === 'invite' || type === 'sticker' || WB_IOI_RE.test(q)) signal = 'ioi';
+  else if (type === 'terse' || type === 'attack' || type === 'invite_reject' || WB_COLD_RE.test(q)) signal = 'low';
+
+  // 情绪：暖词 = warm；冷词/敷衍 = cold；其余中性
+  let mood: WbTriage['mood'] = 'neutral';
+  if (WB_WARM_RE.test(q)) mood = 'warm';
+  else if (WB_COLD_RE.test(q) || type === 'terse' || type === 'attack') mood = 'cold';
+
+  return { type, mood, signal, intent: WB_INTENT[type] };
+}
+
+// 分诊类型 → 一句话意图解读（供提示词内参与 _debug）
+const WB_INTENT: Record<WbTriageType, string> = {
+  greeting: '她主动破冰打招呼，兴趣开场，期待轻松有趣的回应',
+  terse: '她单字应付，兴趣度低，可能在试探或敷衍，别追问别跪舔',
+  excuse: '她抛出一个借口/理由，多半在测试你的反应，别当真也别拆穿',
+  status: '她在陈述自己的状态或日常，想被接住，是拉近距离的入口',
+  sticker: '她发来表情包/图片，是兴趣信号，可以顺着玩起来',
+  question: '她主动提问，是机会窗口，回答后要镜像反问把话题聊开',
+  share: '她在主动分享/袒露自己，信任信号，先接情绪再深挖',
+  attack: '她在攻击/挑衅/阴阳怪气，需要先稳住再反击',
+  invite: '她在主动邀约或表达好感，高兴趣信号，接住顺势推进',
+  invite_reject: '她拒绝或回避了邀约，别纠缠，保持框架留后路',
+  mood: '她情绪低落或受伤，先共情给情绪价值，收起套路',
+  general: '常态聊天，接住她的点再带一点张力或钩子',
+};
+
+// 分诊类型 → 知识库检索追加词（让弹药与策略同向；零 LLM 成本）
+const WB_TRIAGE_KW: Partial<Record<WbTriageType, string[]>> = {
+  greeting: ['开场白', '搭讪'],
+  terse: ['冷读', '打压'],
+  excuse: ['废物测试', '化解IOD'],
+  status: ['聊天话题', '幽默'],
+  sticker: ['趣味', '幽默', '互动'],
+  question: ['互动', '追问'],
+  share: ['共鸣', '联系感', '情感链接'],
+  attack: ['废物测试', '框架'],
+  invite: ['邀约', '约会', '搭讪与邀约'],
+  invite_reject: ['异议', '化解IOD'],
+  mood: ['安慰', '哄', '情感链接'],
+};
+
+// 分诊类型 → 弹药阶段加权（question/share/mood 偏舒适、invite/sticker 偏恋爱、其余吸引）
+function wbPhaseOf(t: WbTriageType): 'attract' | 'comfort' | 'seduce' {
+  if (t === 'mood' || t === 'share' || t === 'question') return 'comfort';
+  if (t === 'invite' || t === 'sticker') return 'seduce';
+  return 'attract';
+}
+
+// [v206 WB版] 策略决策路由表：消息类型 → 招数（态度 + 手法）
+//   复刻聊天架构的"策略路由"层：类型映射招数，招数决定回复方向
+const WB_STRATEGY_TABLE: Record<WbTriageType, { name: string; directive: string }> = {
+  greeting: { name: '破冰带起', directive: '她主动打招呼：别一本正经回"你好"，用轻松的语气把气氛带起来（可接表情/调侃/顺势开个话题），让她觉得你有趣不端着。' },
+  terse: { name: '曲解调侃', directive: '她只回一两个字（敷衍/试探）：别顺着接，用"抓关键词、曲解意思"的方式调侃回去（把她的话往好玩的方向理解），引她解释、把话题续上；保持高价值，不追问、不跪舔。' },
+  excuse: { name: '幽默拆穿', directive: '她在给借口/解释（没电、在忙之类）：别信以为真也别较真戳穿，用"曲解意思"幽默地拆一下（把借口往离谱了想），化解借口同时让气氛轻松，不冷场。' },
+  status: { name: '接话升温', directive: '她在陈述自己的状态/日常：接住她的话（认可/共情/顺势自嘲），自然带一点钩子或自夸，让她感觉到被接住，把话题往下带。' },
+  sticker: { name: '认领归属', directive: '她发来表情包/图片（兴趣信号）：用"认领归属"的惯例——把表情/照片里的东西认成自己的（如"这猫挺可爱，一看就随我"），引她反驳接梗，一来一回拉近距离。' },
+  question: { name: '镜像反问', directive: '她主动问了你一个问题（兴趣信号/机会窗口）：先自然回答（同等交换信息），然后必须顺势镜像反问回去（"你呢？"），把话题聊开；区分查户口——她先开口后的单次互惠反问必须做。' },
+  share: { name: '接住分享', directive: '她在主动分享/袒露自己：三步——①先接住（认可/共鸣，先给情绪价值）；②再自然深挖一句（追问细节或关联自己的相似经历）；③可以轻升级往"咱俩"方向带；禁止交易式接话（带咖啡/请客）、禁止只回"确实/哈哈"。' },
+  attack: { name: '先反击', directive: '对方在攻击/挑衅/阴阳怪气：不卑微解释、不讨好，先带笑地顶回去制造张力，再自然收尾；安全边界内不人格侮辱、不贬低外貌/价值。' },
+  invite: { name: '接住邀约', directive: '她在主动邀约/表达好感（高兴趣信号）：接住并顺势推进一档（确认时间/加码/调情），别端着，也别太急吓到人。' },
+  invite_reject: { name: '不纠缠', directive: '她拒绝了邀约/表示没空：不纠缠、不解释、不追问原因，轻松带过（如"那改天再说"），保持框架和风度，留后路。' },
+  mood: { name: '先共情', directive: '她情绪低落/难过：先收起调侃和套路，认真共情接住情绪（理解+陪伴+给安全感），别急着讲道理或转移话题；此场景禁用调侃与反击。' },
+  general: { name: '常态进攻', directive: '常态聊天：按"接住+推进"来——先回应她的话，再带一点调侃/钩子/冷读，让对话有张力有温度，别聊死。' },
+};
+
+// [v206 WB版] 组装【消息分诊】+【策略指令】动态块（注入最后一条 user 消息的【军师内参】区）
+function buildWbStrategyBlock(t: WbTriage): string {
+  const s = WB_STRATEGY_TABLE[t.type] || WB_STRATEGY_TABLE.general;
+  const signalText = t.signal === 'ioi' ? '高（她在主动投入）' : t.signal === 'low' ? '低（冷淡/敷衍）' : '中性';
+  const moodText = t.mood === 'warm' ? '好（轻松积极）' : t.mood === 'cold' ? '冷（有距离/不爽）' : '中性';
+  return `\n\n【消息分诊】(系统对"她这句话"的判断，仅供执行参考，不得复述或引用)\n`
+    + `- 消息类型：${t.type}（${s.name}）\n`
+    + `- 情绪：${moodText}　兴趣信号：${signalText}\n`
+    + `- 意图解读：${t.intent}\n`
+    + `\n【策略指令】(本轮最高优先，先按此判断再回复)\n${s.directive}`;
+}
+
 // [v73→v182 三阶段统一] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
 //   [v182] 战术阶段 = 关系阶段直接映射（吸引→attract、舒适→comfort、恋爱→seduce），
 //   不再用回合数/温度计推导——阶段由 extractProfile 自动升级或用户长按手动指定；
@@ -1790,6 +1982,10 @@ function buildSystemContent(opts: {
   anchorMode?: 'full' | 'light' | 'none';
   // [v202 低配版] lite=true：动态区只保留【参考资料】(2块×50字)，其余动态块/机制全部省掉
   lite?: boolean;
+  // [v206 WB版] wb=true：WB 版动态区（消息分诊 + 策略指令 + 参考资料5块 + 当前时间）
+  wb?: boolean;
+  // [v206 WB版] WB 消息分诊结果（由主流程 triageMessage 产出，供策略路由块组装）
+  wbTriage?: WbTriage | null;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -1848,15 +2044,28 @@ function buildSystemContent(opts: {
 
   // [v196 决策流程] 思考链脚手架（对齐 IMA 思路）：定卡→消化弹药→候选池→淘汰→决策
   //   思考档（high/max）生效，思考过程不输出，最终只输出选定的话术本体
-  s += `\n\n【决策流程】(思考档生效，回复前按序完成，思考过程不输出)\n`
-    + `① 定卡：本轮属于哪张战术卡（防守/进攻/救场，具体到卡）？她这句话的真实意图是什么？\n`
-    + `② 消化弹药：把【参考资料】里的方案提炼成 2-3 个可执行方向（如"先赞同再曲解""反转测试""不解释离场"），选最贴合【角色定位】人设的一个方向——禁止直接抄参考句，要按方向重新创作。\n`
-    + `③ 生成候选：基于该方向快速生成 3-5 个候选回复，每个在心里标注（对应策略/字数/人设匹配度）。\n`
-    + `④ 淘汰：对照【角色定位】人设（高价值自信、幽默轻调侃、不讨好不黏人）+ 字数 ≥5≤18 + 无标点 + 口语化，淘汰不符的，保留最稳最妙的一个。\n`
-    + `⑤ 决策：只输出最终选定的那一句话术本体，不要分析/说明/序号。`;
+  // [v206 WB版] WB 版：① 定招 锚定【消息分诊】类型与【策略指令】招数（替代战术卡）
+  if (opts.wb) {
+    s += `\n\n【决策流程】(思考档生效，回复前按序完成，思考过程不输出)\n`
+      + `① 定招：看【消息分诊】给的类型和【策略指令】给的招数，确认她这句话的真实意图；\n`
+      + `② 消化弹药：把【参考资料】里的方案提炼成 2-3 个可执行方向（如"先赞同再曲解""反转测试""不解释离场"），选最贴合【角色定位】人设的一个方向——禁止直接抄参考句，要按方向重新创作。\n`
+      + `③ 生成候选：基于该方向快速生成 3-5 个候选回复，每个在心里标注（对应策略/字数/人设匹配度）。\n`
+      + `④ 淘汰：对照【角色定位】人设（高价值自信、幽默轻调侃、不讨好不黏人）+ 字数 ≥5≤18 + 无标点 + 口语化，淘汰不符的，保留最稳最妙的一个。\n`
+      + `⑤ 决策：只输出最终选定的那一句话术本体，不要分析/说明/序号。`;
+  } else {
+    s += `\n\n【决策流程】(思考档生效，回复前按序完成，思考过程不输出)\n`
+      + `① 定卡：本轮属于哪张战术卡（防守/进攻/救场，具体到卡）？她这句话的真实意图是什么？\n`
+      + `② 消化弹药：把【参考资料】里的方案提炼成 2-3 个可执行方向（如"先赞同再曲解""反转测试""不解释离场"），选最贴合【角色定位】人设的一个方向——禁止直接抄参考句，要按方向重新创作。\n`
+      + `③ 生成候选：基于该方向快速生成 3-5 个候选回复，每个在心里标注（对应策略/字数/人设匹配度）。\n`
+      + `④ 淘汰：对照【角色定位】人设（高价值自信、幽默轻调侃、不讨好不黏人）+ 字数 ≥5≤18 + 无标点 + 口语化，淘汰不符的，保留最稳最妙的一个。\n`
+      + `⑤ 决策：只输出最终选定的那一句话术本体，不要分析/说明/序号。`;
+  }
 
   // [v75 缓存①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 前缀缓存白捡）
-  s += GLOBAL_TACTIC_PREAMBLE;
+  // [v206 WB版] WB 不走战术卡体系（由【消息分诊】+【策略指令】替代），跳过该前导
+  if (!opts.wb) {
+    s += GLOBAL_TACTIC_PREAMBLE;
+  }
 
   // [v73] 【兴趣信号与升级】已删除：被进攻类战术卡（升高关系/推拉/筛选）覆盖
 
@@ -1910,6 +2119,20 @@ function buildSystemContent(opts: {
         .join('\n\n');
       d += `\n\n【参考资料】（可复制句子/金句：保留直白措辞、可改人称/句序/加接话引子；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
     }
+  } else if (opts.wb) {
+    // [v206 WB版] ===== WB 版动态区：消息分诊 + 策略指令 + 参考资料(5块) + 当前时间 =====
+    //   复刻"分诊→策略路由→检索弹药→风格生成"链路：分诊结果与招数指令先行注入，
+    //   参考资料(5块话术，知识库零改动)随后，风格由后台提示词(固定区【附加规则】)统一约束
+    if (opts.wbTriage) {
+      d += buildWbStrategyBlock(opts.wbTriage);
+    }
+    if (opts.kbItems.length > 0) {
+      const kbText = opts.kbItems.slice(0, KB_AMMO_COUNT)
+        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', KB_CONTENT_MAX)}`)
+        .join('\n\n');
+      d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+    }
+    d += `\n\n【当前时间】（所有时刻/时段表述以此为准）\n${formatCurrentTime()}`;
   } else {
   // [v80 缓存优化] 【上次聊天】块已后置到变化区尾部（每轮变，放前面会打断后续稳定块缓存）
 
@@ -2625,7 +2848,8 @@ type LlmParams = {
   thinking_mode: ThinkingMode;
   thinking_budget?: 'auto' | 'on' | 'off';
   // [v202 低配版] 版本档位：full=普通版（默认）；lite=低配版（后台"版本"切换按钮）
-  mode?: LiteMode;
+  // [v206 WB版] wb=WB版（消息分诊+策略决策链路）
+  mode?: RunMode;
 };
 const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'auto', mode: 'full' };
 
@@ -2687,7 +2911,8 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
       ? raw.thinking_budget as 'auto' | 'on'
       : 'off' as const;
     // [v202 低配版] mode：full=普通版 / lite=低配版（枚举校验，非法回退 full）
-    const mode: LiteMode = (raw.mode === 'lite') ? 'lite' : 'full';
+    // [v206 WB版] wb=WB版
+    const mode: RunMode = (raw.mode === 'lite') ? 'lite' : (raw.mode === 'wb') ? 'wb' : 'full';
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
       llm_params: { thinking_mode: tm, thinking_budget: tb, mode },
