@@ -17,9 +17,11 @@
 // [v10] 数值区间 或 字符串枚举（thinking_mode：off/low/high/max）
 // [v77] 采样参数（temperature/惩罚系数/max_tokens）已由 ima-proxy 六阶段联动表接管，后台不再接收
 // [v20260812] thinking_budget 思考链压缩三档（auto=高峰自动/on=始终压缩/off=不压缩）
+// [v202 低配版] mode 版本档位（full=普通版/lite=低配版）
 const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
   thinking_mode: ['off', 'low', 'high', 'max'],
   thinking_budget: ['auto', 'on', 'off'],
+  mode: ['full', 'lite'],
 };
 
 // [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（v20260813：加 guest_daily；cap 允许 0=不封顶）

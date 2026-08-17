@@ -431,6 +431,16 @@
                     思考档下 temperature/惩罚系数官方强制不生效，输出上限自动放宽到 2000+。
                     <br>temperature / 惩罚系数 / max_tokens 已由后端按六关系阶段（陌生/朋友/追求/暧昧/恋爱/挽回）自动联动，无需手动配置。
                 </p>
+                <!-- [v202 低配版] 版本切换（full=普通版 / lite=低配版） -->
+                <label style="font-size:12px;color:var(--muted);display:block;margin-bottom:14px;">
+                    版本（<b style="color:#FAC775;">低配 = 最省成本</b>：主回复固定区 100% 前缀缓存命中 + 检索 2 块话术切块（每块截断 50 字）+ 最近 2 条历史 + 当前内容；
+                    语义拆解/逻辑记忆/画像提取/战术卡/锚点等机制与记忆卡读写全部省掉，未命中成本仅剩 弹药+历史+当前内容 与输出；
+                    <b style="color:#FAC775;">思考模式切换对低配版同样生效</b>）
+                    <select id="llm-mode" class="input" style="margin-top:4px;">
+                        <option value="full">普通版（完整能力：记忆卡/战术卡/逻辑记忆/机会窗口/防重复重试等）</option>
+                        <option value="lite">低配版（最省成本：固定区 + 2块×50字弹药 + 2条历史 + 当前内容）</option>
+                    </select>
+                </label>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
                     <label style="font-size:12px;color:var(--muted);display:block;">
                         思考模式（<b style="color:#FAC775;">控制是否思考</b>：普通=完全关闭思考链）
@@ -886,6 +896,9 @@
                 // [v20260812] 思考链压缩三档（auto/on/off）
                 document.getElementById('llm-thinking-budget').value =
                     ['auto', 'on', 'off'].includes(lp.thinking_budget) ? lp.thinking_budget : 'auto';
+                // [v202 低配版] 版本档位（full=普通版/lite=低配版）
+                document.getElementById('llm-mode').value =
+                    ['full', 'lite'].includes(lp.mode) ? lp.mode : 'full';
                 // [v200 联动] 思考模式=off（关闭思考链）→ 压缩开关无意义，禁用并提示
                 syncThinkingUi();
                 // [v20260812 配额参数] 填充（缺省回退原默认值）
@@ -965,9 +978,11 @@
             const saveBtn = document.getElementById('llm-save-btn');
             // [v77] 仅思考模式可配；采样参数已由后端六阶段联动表接管
             // [v20260812] 思考链压缩开关（thinking_budget）随参数一并提交（整体替换 llm_params）
+            // [v202 低配版] 版本档位（mode）随参数一并提交：full=普通版 / lite=低配版
             const llm_params = {
                 thinking_mode: document.getElementById('llm-thinking-mode').value,
-                thinking_budget: document.getElementById('llm-thinking-budget').value
+                thinking_budget: document.getElementById('llm-thinking-budget').value,
+                mode: document.getElementById('llm-mode').value
             };
             saveBtn.disabled = true;
             status.textContent = '保存中...';

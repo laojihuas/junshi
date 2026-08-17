@@ -149,11 +149,29 @@
 //
 // 环境变量：LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 // ============================================================
+// [v202 低配版]（2026-08-17，新增不改动普通版）
+//   - 后台 app_config.llm_params.mode 切换：full=普通版（默认，完整能力）/ lite=低配版
+//   - 低配版定义：主回复 = 固定区(100% 前缀缓存命中) + 检索 2 块话术切块(每块截断 50 字)
+//     + 最近 2 条历史 + 当前内容；思考档位（off/low/high/max）与普通版共用同一开关
+//   - 省掉的机制（全部为 LLM 调用或动态区注入）：
+//     语义拆解(extractSemanticKeywords)/rewriteQuery/逻辑记忆(buildLogicSummary)/
+//     画像提取(extractProfile)/记忆卡读写/会话间隔查询/错字彩蛋/防重复重试/时间冲突重试/
+//     消毒检测重试/锚点/战术卡/机会窗口/接住分享/facts/节奏/当前时间 等动态区全部不注入
+//   - 未命中成本 = 2 条历史 + 2 块×50 字弹药 + 当前内容 + 输出（主回复唯一 LLM 调用）
+//   - 低配版不读不写记忆卡 → 无阶段联动采样（固定 DEFAULT_STAGE_LLM）
+// ============================================================
 
 // [v10 思考模式] 档位类型与合法集合（优先级：请求体 > 后台默认 > off）
 type ThinkingMode = 'off' | 'low' | 'high' | 'max';
 const THINKING_MODES = new Set<string>(['off', 'low', 'high', 'max']);
 const THINKING_MAX_TOKENS = 2000; // 思考档输出预算下限：防思维链挤占最终回复
+
+// [v202 低配版] 版本档位：full=普通版（默认）/ lite=低配版（最省成本）
+type LiteMode = 'full' | 'lite';
+const LITE_MODES = new Set<string>(['full', 'lite']);
+const LITE_HISTORY_COUNT = 2;      // 低配：仅最近 2 条历史全文
+const LITE_KB_COUNT = 2;           // 低配：检索 2 块话术弹药
+const LITE_KB_CONTENT_MAX = 50;    // 低配：每块弹药截断 50 字
 
 // 常见停用词（恋爱聊天场景），用于关键词提取
 const STOP_WORDS = new Set([
@@ -390,6 +408,10 @@ Deno.serve(async (req) => {
     let effectivePrompt = (typeof system_prompt === 'string') ? system_prompt : '';
     if (!effectivePrompt.trim()) effectivePrompt = appConfig.system_prompt;
     const llmParams = appConfig.llm_params;
+    // [v202 低配版] 版本档位（app_config.llm_params.mode，后台"版本"切换按钮）
+    //   lite：固定区 100% 缓存命中 + 2 块×50 字弹药 + 2 条历史 + 当前内容，其余机制全省
+    const liteMode: LiteMode = llmParams.mode === 'lite' ? 'lite' : 'full';
+    const isLite = liteMode === 'lite';
 
     // ---- LLM 凭证（[B方案] 完全移除 IMA，仅保留 LLM）----
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
@@ -406,7 +428,8 @@ Deno.serve(async (req) => {
     const effectiveThinkingBudget = rawThinkingBudget === 'on' || budgetPeak;
 
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
-    let memoryCard = await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+    // [v202 低配版] 低配不读记忆卡：画像/逻辑记忆/锚点等动态机制全砍，省一次 DB 读
+    let memoryCard = isLite ? null : await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
 
     const rawQuery = typeof query === 'string' ? query.trim() : '';
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
@@ -416,14 +439,16 @@ Deno.serve(async (req) => {
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
 
     // [v6 L2] 上下文工程：近详远略压缩
-    //   recent  = 最近 10 条全文（单条 ≤800 字），作为 messages 发给 LLM
+    //   recent  = 最近 N 条全文（单条 ≤800 字），作为 messages 发给 LLM
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
-    const { recent: llmHistory, summary: olderSummary } = buildContextParts(history);
+    //   [v202 低配版] lite：仅最近 2 条全文，无更早摘要
+    const { recent: llmHistory, summary: olderSummary } = buildContextParts(history, isLite);
 
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
+    //   [v202 低配版] 低配跳过：省一次 DB 查询（该块属动态区，低配不注入）
     let lastGapText = '';
-    if (serviceRoleKey && supabaseUrl && session_id) {
+    if (!isLite && serviceRoleKey && supabaseUrl && session_id) {
       try {
         const lastResp = await fetch(
           `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(session_id)}&select=created_at&role=eq.assistant&order=created_at.desc&limit=1`,
@@ -489,12 +514,13 @@ Deno.serve(async (req) => {
         // [v8] 1. LLM 语义拆解（词表约束 + few-shot + [v11]当前目标阶段加权）→ 检索词（语义路）
         // [v62 切换话题] 换话题时 query 是"/换话题"无实义，跳过 LLM 拆词（省 token），
         //   直接用"新话题/开场白"固定检索词，再叠加记忆卡里的喜好/兴趣当话题弹药
+        // [v202 低配版] 低配跳过 LLM 语义拆解（零辅助 LLM 调用）：纯规则词 + 原句 bigram 检索
         const kw = extractKeywordsFromHistory(history, switchTopic ? '' : query);
         if (switchTopic) {
           semanticKws = ['新话题', '开场白', '话题', '破冰'];
           const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
           kw.push(...hobbyKws); // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
-        } else if (llmKey) {
+        } else if (llmKey && !isLite) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
         mark('semantic');
@@ -502,8 +528,9 @@ Deno.serve(async (req) => {
         //   实测 0-37 块（怎么安慰0/怎么哄0/不回消息1），原句 bigram 直接命中 270-596 块
         //   → 整句路纯浪费一次 LLM 调用，检索词序列收敛为 语义词 > 规则词 > 原句垫底
         // [v8] 2. 条件 query rewrite 降级：仅当语义词全空 且 规则词不足时触发
+        //   [v202 低配版] 低配跳过 rewrite（零辅助 LLM 调用）
         let searchQuery = query.trim();
-        if (semanticKws.length === 0 && kw.length < 2 && llmKey) {
+        if (!isLite && semanticKws.length === 0 && kw.length < 2 && llmKey) {
           const rw = await rewriteQuery(llmKey, llmBase, llmModel, query, recentUserMessages);
           if (rw) { searchQuery = rw; usedRewrite = true; }
         }
@@ -517,14 +544,16 @@ Deno.serve(async (req) => {
         tactic = resolveTacticCategory(switchTopic ? '' : query, history, memoryCard);
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
+        // [v202 低配版] 低配弹药 2 块（普通版 KB_AMMO_COUNT=5）；检索本身纯规则/RPC 零 LLM 成本
+        const kbPick = isLite ? LITE_KB_COUNT : KB_AMMO_COUNT;
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: tactic.phase });
         mark('kb1');
         // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
           const kw2 = extractKeywordsFromHistory(history, '', true).filter((k) => !kw.includes(k)).slice(0, 3);
           if (kw2.length > 0) {
-            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: KB_AMMO_COUNT, type: '话术', phase: tactic.phase });
-            const merged = mergeDedup([...kbItems, ...items2]).slice(0, KB_AMMO_COUNT);
+            const items2 = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, kw2, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: tactic.phase });
+            const merged = mergeDedup([...kbItems, ...items2]).slice(0, kbPick);
             if (merged.length > kbItems.length) kbItems = merged;
           }
         }
@@ -564,7 +593,8 @@ Deno.serve(async (req) => {
         // [v129 删除选句通道] 选句"整句复制知识库原句"与聊天场景格格不入（选句判定天然不契合语境）→ 移除。
         //   保味改由主回复 prompt 承担：【措辞底线】动态注入（riskHit 时）+ 参考资料引导语保留直白度
         // [v129] 高危词预检：本轮参考弹药含强敏感词 → 高风险消毒轮（注入保味指令 + 生成后消毒检测）
-        lastRiskHit = kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
+        // [v202 低配版] 低配跳过预检（弹药仅 2×50 字、无【措辞底线】注入、无消毒重试）
+        lastRiskHit = isLite ? false : kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
         lastSanitizeHit = false;
         if (!reply) {
         // [v148] 战术判定已提前到检索前（549 行，phase 供弹药加权），此处直接复用
@@ -607,8 +637,10 @@ Deno.serve(async (req) => {
           thinkingBudget: effectiveThinkingBudget,
           // [v129] 高危词预检结果 → 命中则注入【措辞底线】保味指令
           riskHit: lastRiskHit,
-          // [v183] 锚点三态（调用处已预判）
+          // [v183] 锚点三态（调用处已预判；低配 memoryCard=null → anchor 空 → 恒 none）
           anchorMode,
+          // [v202 低配版] 低配：动态区只保留【参考资料】(2块×50字)，其余动态块全省
+          lite: isLite,
         });
         const systemContent = built.systemContent;
         let innerContent = built.dynamicContent;
@@ -616,8 +648,9 @@ Deno.serve(async (req) => {
         factsInjected = built.factsInjected;
         // [v185 错字彩蛋] 秒回拟人：上一条消息距现在 <60s 且掷骰子 1/5 命中 → 动态注入"写错一个字"指令
         //   代码层概率（真 20%），LLM 不掷骰子只执行；指令只在本轮出现 → 不扩散到后续轮次
+        //   [v202 低配版] 低配跳过（错字指令属动态区，低配不注入）
         lastTypoHit = false;
-        if (USE_TYPO_HINT && llmKey) {
+        if (!isLite && USE_TYPO_HINT && llmKey) {
           try {
             const histAll = (Array.isArray(history) ? history : []).filter((h: any) => h && h.created_at);
             const lastTs = histAll.length ? Date.parse(String(histAll[histAll.length - 1].created_at)) : NaN;
@@ -669,7 +702,9 @@ Deno.serve(async (req) => {
         //   并入现有 v9/v76 重生成通道（复用重试机制，不新增调用），重生成时 notes 注入保味指令
         const sanitizedWords = detectSanitize(reply, kbItems);
         lastSanitizeHit = sanitizedWords !== null;
-        if ((dupHit || timeHit || sanitizedWords) && llmKey) {
+        // [v202 低配版] 低配跳过重试（防重复/时间冲突/消毒检测）：重试=第二次主回复 LLM 调用，
+        //   低配以"单次主回复"为成本上限，不引入任何二次调用
+        if (!isLite && (dupHit || timeHit || sanitizedWords) && llmKey) {
           const notes: string[] = [];
           if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
@@ -719,7 +754,8 @@ Deno.serve(async (req) => {
 
     // [v195 逻辑记忆] 每轮用最近 5 条消息生成一句话逻辑脉络（下一轮注入用）：
     //   放主回复之后（失败/掉线不影响主回复返回，保留上轮值降级无害）；随 updateMemoryCard 覆盖落库
-    if (LOGIC_SUMMARY_ENABLED && llmKey) {
+    //   [v202 低配版] 低配跳过（零辅助 LLM 调用；低配不读不写记忆卡）
+    if (!isLite && LOGIC_SUMMARY_ENABLED && llmKey) {
       try {
         logicSummary = await buildLogicSummary(llmKey, llmBase, llmModel, history, memoryCard?.logic_summary?.text || null);
       } catch (e: any) {
@@ -730,7 +766,8 @@ Deno.serve(async (req) => {
     // [v6 L2] 记忆卡更新（await 保证落库；画像提取有 3 分钟频率控制，多数请求只做毫秒级规则追加）
     //   [v20260812 仅评价过滤] 记忆/统计走原始 history（资料正常记录，供主回复基于资料展开聊天）；
     //   只有 extractProfile（关系阶段/画像判定）在函数内部剔除首条资料
-    if (session_id) {
+    //   [v202 低配版] 低配不写记忆卡（画像提取/规则统计/逻辑记忆回写全砍，省 DB 写 + 零画像 LLM）
+    if (session_id && !isLite) {
       try {
         await updateMemoryCard({
           supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
@@ -807,6 +844,8 @@ Deno.serve(async (req) => {
           return o;
         })(),
         thinking_mode: effectiveThinkingMode,
+        // [v202 低配版] 版本档位（full=普通版 / lite=低配版；验证后台切换生效）
+        mode: liteMode,
         // [v20260812 思考预算三档] 验证：raw=后台档位(off/on/auto) active=实际是否压缩 peak=auto 档高峰命中
         thinking_budget: rawThinkingBudget,
         budget_active: effectiveThinkingBudget,
@@ -870,14 +909,17 @@ Deno.serve(async (req) => {
 //   【对方说】= role user（对方）；【我发的】= role assistant（用户本人/军师发出的）
 //   ——显式标注说话人，杜绝 LLM 按 API 原生 role 语义（user=人类/AI）误判归属
 // ============================================================
-function buildContextParts(history: any[]): { recent: any[]; summary: string } {
+function buildContextParts(history: any[], lite = false): { recent: any[]; summary: string } {
   const valid = (Array.isArray(history) ? history : [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
-  const recent = valid.slice(-RECENT_FULL).map((h) => ({
+  // [v202 低配版] lite=true：仅最近 2 条全文，不生成更早摘要（省输入 token；未命中成本收紧）
+  const recentCount = lite ? LITE_HISTORY_COUNT : RECENT_FULL;
+  const recent = valid.slice(-recentCount).map((h) => ({
     role: h.role,
     content: (h.role === 'user' ? '【对方说】' : '【我发的】') + truncateText(h.content, HISTORY_ITEM_MAX),
   }));
-  const older = valid.slice(0, Math.max(0, valid.length - RECENT_FULL));
+  if (lite) return { recent, summary: '' };
+  const older = valid.slice(0, Math.max(0, valid.length - recentCount));
   const olderUsers = older.filter((h) => h.role === 'user').map((h) => truncateText(h.content, SUMMARY_ITEM_MAX));
   const summary = olderUsers.length > 0
     ? '【更早对话要点（对方说过的话，供把握前因后果）】\n' + olderUsers.slice(-6).join('\n')
@@ -1746,6 +1788,8 @@ function buildSystemContent(opts: {
   // [v183 锚点降频] 锚点注入模式（调用处预判，事件驱动）：
   //   full=本轮她的话含锚点词→完整块；light=每4轮轻量提醒；none=不注入
   anchorMode?: 'full' | 'light' | 'none';
+  // [v202 低配版] lite=true：动态区只保留【参考资料】(2块×50字)，其余动态块/机制全部省掉
+  lite?: boolean;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -1853,7 +1897,20 @@ function buildSystemContent(opts: {
   //   （时间每小时变 → history 几乎永不命中，38% 命中率元凶）。
   //   现在 system 只保留字节级稳定块，动态区作为独立字符串由组装处注入 user 尾部。
   let d = '';
-
+  // [v202 低配版] pulseAdvice/factsInjected 提到分支外声明（lite 分支不产出，普通分支赋值）
+  let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
+  let factsInjected = 0;
+  if (opts.lite) {
+    // [v202 低配版] ===== 低配版动态区：只保留【参考资料】（检索弹药），其余全部省掉 =====
+    //   固定区 s 保持 100% 字节稳定 → system 前缀整段命中 DeepSeek 前缀缓存；
+    //   未命中输入 = 2 条历史 + 参考资料(2块×50字) + 【对方说】当前内容
+    if (opts.kbItems.length > 0) {
+      const kbText = opts.kbItems.slice(0, LITE_KB_COUNT)
+        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', LITE_KB_CONTENT_MAX)}`)
+        .join('\n\n');
+      d += `\n\n【参考资料】（可复制句子/金句：保留直白措辞、可改人称/句序/加接话引子；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+    }
+  } else {
   // [v80 缓存优化] 【上次聊天】块已后置到变化区尾部（每轮变，放前面会打断后续稳定块缓存）
 
   // [v20260812 思考预算开关] v81 曾回退（用户实测变笨）；现做成后台开关：
@@ -1990,7 +2047,6 @@ function buildSystemContent(opts: {
   // [v57] 长期事实选择性注入：按当前 query 相关度挑 top N（不全量塞，防记忆稀释）
   //   像人一样"根据当前话题想起相关的事"；无相关事实则不注入
   // [v80 缓存优化] 后置到变化区尾部（按 query 选 → 每轮变，不打断前面稳定块缓存）
-  let factsInjected = 0;
   const factsList = opts.memoryCard?.facts || [];
   const qText = opts.lastUserText || '';
   if (factsList.length > 0 && qText.trim()) {
@@ -2051,7 +2107,6 @@ function buildSystemContent(opts: {
   const pulse = opts.memoryCard?.pulse || {};
   const balance = opts.memoryCard?.balance;
   const emotion = opts.memoryCard?.emotion_tone;
-  let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
   const delayCount = pulse.delay_count || 0;
   const isNegative = emotion?.baseline === 'negative';
   if (delayCount >= 2) {
@@ -2073,6 +2128,8 @@ function buildSystemContent(opts: {
   //   前面 1200+ 字固定/低频块全部可稳定命中）
   d += `\n\n【当前时间】（严格遵守，所有时刻/时段表述以此为准）\n${formatCurrentTime()}\n`
     + `- 严禁编造或猜错时刻；"今晚/明天/周末/这么晚"等词必须与时间一致；判断这个点适不适合约人/打电话/聊深夜话题以此为准，别半夜答应见面或约人。`;
+
+  } // [v202 低配版] else（普通版全量动态区）结束
 
   return { systemContent: s, dynamicContent: d, pulseAdvice, factsInjected };
 }
@@ -2567,8 +2624,10 @@ function mergeDedup(items: any[]): any[] {
 type LlmParams = {
   thinking_mode: ThinkingMode;
   thinking_budget?: 'auto' | 'on' | 'off';
+  // [v202 低配版] 版本档位：full=普通版（默认）；lite=低配版（后台"版本"切换按钮）
+  mode?: LiteMode;
 };
-const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'auto' };
+const DEFAULT_LLM_PARAMS: LlmParams = { thinking_mode: 'off', thinking_budget: 'auto', mode: 'full' };
 
 // [v20260812 高峰判定] DeepSeek 高峰时段（价格翻倍）：工作日(周一~周五) 9:00-12:00 / 14:00-18:00
 //   Asia/Shanghai 时间；auto 档用它决定是否压缩思考链
@@ -2627,9 +2686,11 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     const tb = (raw.thinking_budget === 'on' || raw.thinking_budget === 'auto')
       ? raw.thinking_budget as 'auto' | 'on'
       : 'off' as const;
+    // [v202 低配版] mode：full=普通版 / lite=低配版（枚举校验，非法回退 full）
+    const mode: LiteMode = (raw.mode === 'lite') ? 'lite' : 'full';
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
-      llm_params: { thinking_mode: tm, thinking_budget: tb },
+      llm_params: { thinking_mode: tm, thinking_budget: tb, mode },
     };
   } catch (e: any) {
     console.warn('fetchAppConfig failed:', e.message);
