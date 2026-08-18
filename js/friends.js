@@ -251,6 +251,32 @@ const Friends = {
         }
     },
 
+    // [v20260818 直接进聊天] 新建会话：不再弹输入昵称框，
+    // 直接创建占位会话并进入聊天页；首条消息发出时自动截取头部字词作为昵称（chat.js 处理）
+    async createNew() {
+        if (!Auth.currentUser) {
+            Utils.toast('请先登录');
+            return;
+        }
+        Utils.showLoading();
+        try {
+            const session = await DB.createSession(Auth.currentUser.id, '新对话');
+            if (session) {
+                Utils.hideLoading();
+                // 直接进入聊天页（首条消息自动取名逻辑见 Chat.send）
+                await Chat.open(session.id);
+                await this.load();
+            } else {
+                Utils.hideLoading();
+                Utils.toast('创建失败，请重试');
+            }
+        } catch (e) {
+            Utils.hideLoading();
+            console.error('[军师] 创建会话失败:', e);
+            Utils.toast('创建失败，请重试');
+        }
+    },
+
     // 新建好友
     showCreateModal() {
         const overlay = document.getElementById('modal-new-friend');

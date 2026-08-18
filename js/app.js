@@ -131,9 +131,9 @@ const App = {
     // [v20260805 账号体系] URL ?invite=CODE 在注册弹窗自动填入（注册时兑现邀请）
 
     _bindEvents() {
-        // 新建好友按钮
+        // 新建好友按钮（[v20260818] 改为直接新建会话并进入聊天，首条消息自动取名）
         document.getElementById('fab-add-friend').addEventListener('click', () => {
-            Friends.showCreateModal();
+            Friends.createNew();
         });
 
         // [批量删除] 好友列表：底部操作栏（入口在长按菜单"批量删除"）

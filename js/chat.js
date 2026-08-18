@@ -30,6 +30,10 @@ const Chat = {
         this.currentFriendName = session.friend_name;
         document.getElementById('chat-title').textContent = session.friend_name;
 
+        // [v20260818 自动取名] 新会话（占位名"新对话"）：首条消息发出时
+        // 自动截取消息头部字词作为好友昵称（见 send），列表只显示该昵称
+        this._needsAutoName = !session.friend_name || session.friend_name === '新对话';
+
         // [v20260805] 记忆：缓存 memory_card（记忆按钮弹层用；打开时已有，零额外请求）
         this.memoryCard = session.memory_card || null;
         // [v58] 阶段升级提示基线：记录打开时的 stage
@@ -322,6 +326,23 @@ const Chat = {
         if (userMsg) {
             this.messages.push(userMsg);
             this.renderMessages();
+        }
+
+        // [v20260818 自动取名] 新会话首条消息：截取消息头部"第一组字词"作为好友昵称，
+        // 外面列表只显示该昵称（= 新建会话 + 首条消息自动拆头作标题）
+        if (this._needsAutoName) {
+            const newName = this._extractFriendName(text);
+            if (newName && newName !== this.currentFriendName) {
+                const updated = await DB.updateSession(this.currentSessionId, { friend_name: newName });
+                if (updated) {
+                    this.currentFriendName = newName;
+                    document.getElementById('chat-title').textContent = newName;
+                    // 后台刷新好友列表（返回时展示新昵称）
+                    Friends.load();
+                    this._needsAutoName = false;
+                }
+                // 更新失败则保留待取名状态，下次发送再试
+            }
         }
 
         // [多窗口会话] 将用户消息追加到本窗口（该好友）的对话历史
@@ -775,6 +796,20 @@ const Chat = {
         if (!sb) return '';
         const { data: { session } } = await sb.auth.getSession();
         return session?.access_token || '';
+    },
+
+    // [v20260818 自动取名] 从首条消息截取头部"第一组字词"作为好友昵称：
+    //   取开头连续无标点/空白的片段（第一组词），≤12 字防撑爆列表；整条太短用整条
+    _extractFriendName(text) {
+        const t = (text || '').trim();
+        if (!t) return '新对话';
+        const m = t.match(/^[^，。！？、；：,.!?;: \n\r\t]+/);
+        let name = m ? m[0].trim() : '';
+        if (!name) {
+            // 开头就是标点/空白（异常）：直接取前 6 字兜底
+            name = t.slice(0, 6);
+        }
+        return name.length > 12 ? name.slice(0, 12) : name;
     },
 
     _escapeHtml(text) {
