@@ -190,6 +190,12 @@ const RUN_MODES = new Set<string>(['full', 'lite', 'wb']);
 const LITE_HISTORY_COUNT = 2;      // 低配：仅最近 2 条历史全文
 const LITE_KB_COUNT = 2;           // 低配：检索 2 块话术弹药
 const LITE_KB_CONTENT_MAX = 50;    // 低配：每块弹药截断 50 字
+// [v208 WB 缓存优化] WB 版追加式历史窗口：30 条 + 每条约 150 字截断
+//   关键：追加式（slice(-30) 非滑动）→ 上轮前 30 条与本轮完全一致 → DeepSeek 前缀整段命中，
+//   每轮只 miss 新增 1-2 条 + user 尾部动态区；稳态命中率 57% → 80%+（依据 llm_usage_log 实测）
+const WB_HISTORY_COUNT = 30;       // WB：追加式历史窗口 30 条（超 30 条才滑动，每 30 轮一次整段 miss）
+const WB_HISTORY_ITEM_MAX = 150;   // WB：单条历史截断 150 字（确定性截断，同一消息每次截出同样内容）
+const WB_KB_CONTENT_MAX = 50;      // WB：每块弹药截断 50 字（压缩 user 尾部必然 miss 面）
 
 // 常见停用词（恋爱聊天场景），用于关键词提取
 const STOP_WORDS = new Set([
@@ -463,8 +469,8 @@ Deno.serve(async (req) => {
     //   recent  = 最近 N 条全文（单条 ≤800 字），作为 messages 发给 LLM
     //   summary = 更早的对话只保留"对方说的话"（≤120 字/条），注入 system
     //   [v202 低配版] lite：仅最近 2 条全文，无更早摘要
-    //   [v206 WB版] wb：与普通版一致（近 5 条全文 + 更早摘要），分诊需要足够上下文
-    const { recent: llmHistory, summary: olderSummary } = buildContextParts(history, isLite);
+    //   [v208 WB版] wb：追加式 30 条窗口 + 每条约 150 字截断（前缀缓存优化），不生成更早摘要
+    const { recent: llmHistory, summary: olderSummary } = buildContextParts(history, isLite, isWb);
 
     // [v76] 会话间隔注入：查本会话最后一条 AI 回复时间 → "距上次聊天多久"
     //   解决"隔几天当刚聊过"的时间线幻觉；首轮/查询失败/间隔 <1min → 不注入（降级无害）
@@ -962,16 +968,19 @@ Deno.serve(async (req) => {
 //   【对方说】= role user（对方）；【我发的】= role assistant（用户本人/军师发出的）
 //   ——显式标注说话人，杜绝 LLM 按 API 原生 role 语义（user=人类/AI）误判归属
 // ============================================================
-function buildContextParts(history: any[], lite = false): { recent: any[]; summary: string } {
+function buildContextParts(history: any[], lite = false, wb = false): { recent: any[]; summary: string } {
   const valid = (Array.isArray(history) ? history : [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
   // [v202 低配版] lite=true：仅最近 2 条全文，不生成更早摘要（省输入 token；未命中成本收紧）
-  const recentCount = lite ? LITE_HISTORY_COUNT : RECENT_FULL;
+  // [v208 WB 缓存优化] wb=true：追加式 30 条窗口（非滑动）+ 每条约 150 字确定性截断 →
+  //   上轮前 30 条与本轮逐字节一致 → DeepSeek 前缀整段命中；不生成更早摘要（WB 动态区本就不注入）
+  const recentCount = lite ? LITE_HISTORY_COUNT : (wb ? WB_HISTORY_COUNT : RECENT_FULL);
+  const itemMax = wb ? WB_HISTORY_ITEM_MAX : HISTORY_ITEM_MAX;
   const recent = valid.slice(-recentCount).map((h) => ({
     role: h.role,
-    content: (h.role === 'user' ? '【对方说】' : '【我发的】') + truncateText(h.content, HISTORY_ITEM_MAX),
+    content: (h.role === 'user' ? '【对方说】' : '【我发的】') + truncateText(h.content, itemMax),
   }));
-  if (lite) return { recent, summary: '' };
+  if (lite || wb) return { recent, summary: '' };
   const older = valid.slice(0, Math.max(0, valid.length - recentCount));
   const olderUsers = older.filter((h) => h.role === 'user').map((h) => truncateText(h.content, SUMMARY_ITEM_MAX));
   const summary = olderUsers.length > 0
@@ -2128,7 +2137,8 @@ function buildSystemContent(opts: {
     }
     if (opts.kbItems.length > 0) {
       const kbText = opts.kbItems.slice(0, KB_AMMO_COUNT)
-        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', KB_CONTENT_MAX)}`)
+        // [v208 WB 缓存优化] 每块截断 50 字（user 尾部必然 miss，压缩 miss 面）
+        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', WB_KB_CONTENT_MAX)}`)
         .join('\n\n');
       d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
     }
