@@ -15,7 +15,9 @@ async function main() {
   const src = fs.readFileSync(SRC, 'utf8');
   const form = new FormData();
   form.append('file', new Blob([src], { type: 'text/typescript' }), 'index.ts');
-  form.append('metadata', JSON.stringify({ entrypoint_path: 'index.ts', name: SLUG }));
+  // [v209 直连 API] verify_jwt=false：网关不再强制 JWT（直连脚本无 JWT 头）。
+  //   安全性由函数内部保证：网页模式仍校验 auth/v1/user；直连模式校验 api_key。
+  form.append('metadata', JSON.stringify({ entrypoint_path: 'index.ts', name: SLUG, verify_jwt: false }));
 
   const resp = await fetch(
     `https://api.supabase.com/v1/projects/${REF}/functions/deploy?slug=${SLUG}`,

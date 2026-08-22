@@ -1218,6 +1218,44 @@ textarea.input {
     text-align: right;
 }
 
+/* [v209 直连 API] 我的简介弹窗内：API Key 区块（脚本直连令牌） */
+.api-key-section {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.04);
+}
+.api-key-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary, #fff);
+}
+.api-key-desc {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted, rgba(255, 255, 255, 0.55));
+}
+.api-key-row {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.api-key-value {
+    flex: 1;
+    min-width: 120px;
+    font-size: 12px;
+    word-break: break-all;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--text-primary, #fff);
+    user-select: all;
+}
+
 /* ============================================================
    好友长按管理 - 底部弹出 Action Sheet
    ============================================================ */

@@ -274,6 +274,16 @@
                 <textarea id="bio-input" class="input" rows="6" maxlength="300"
                     placeholder="可填写个人简介，例如名字、年龄、爱好、经历等等，会在对话中自动引用"></textarea>
                 <div class="bio-count" id="bio-count">0 / 300</div>
+                <!-- [v209 直连 API] 脚本直连令牌：Shizuku 脚本免登录调军师后端用，等同账号凭证 -->
+                <div class="api-key-section">
+                    <div class="api-key-title">API Key（脚本直连）</div>
+                    <div class="api-key-desc">供安卓 Shizuku 脚本免登录直连军师生成回复。等同账号凭证，请勿泄露；泄露可在下方重新生成，旧 Key 立即失效。</div>
+                    <div class="api-key-row">
+                        <code id="api-key-value" class="api-key-value" style="display:none;"></code>
+                        <button id="api-key-copy" class="btn btn-outline btn-sm" style="display:none;">复制</button>
+                        <button id="api-key-gen" class="btn btn-outline btn-sm">获取 / 生成 API Key</button>
+                    </div>
+                </div>
             </div>
             <div class="modal-footer">
                 <button id="bio-cancel" class="btn btn-outline">取消</button>

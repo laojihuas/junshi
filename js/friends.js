@@ -598,6 +598,84 @@ const Friends = {
         count.textContent = input.value.length + ' / 300';
         overlay.classList.add('active');
         setTimeout(() => input.focus(), 100);
+
+        // [v209 直连 API] 打开弹窗时同步加载 API Key（仅注册账号）
+        this._loadApiKey();
+    },
+
+    // [v209 直连 API] 获取/展示 API Key（脚本直连令牌）
+    async _loadApiKey() {
+        const valueEl = document.getElementById('api-key-value');
+        const copyBtn = document.getElementById('api-key-copy');
+        const genBtn = document.getElementById('api-key-gen');
+        if (!valueEl || !genBtn) return;
+
+        if (!Auth.isAccount || !Auth.account) {
+            valueEl.style.display = 'none';
+            copyBtn.style.display = 'none';
+            genBtn.textContent = '登录账号后可用';
+            genBtn.disabled = true;
+            return;
+        }
+
+        // 绑定事件（只绑一次）
+        if (!this._apiKeyBound) {
+            this._apiKeyBound = true;
+            genBtn.onclick = async () => {
+                if (!Auth.isAccount) {
+                    Utils.toast('请先登录账号');
+                    return;
+                }
+                const existing = valueEl.textContent.trim();
+                if (existing && !confirm('重新生成将令旧 Key 立即失效，确定？')) return;
+                await this._fetchApiKey(true);
+            };
+            copyBtn.onclick = async () => {
+                const text = valueEl.textContent.trim();
+                if (!text) return;
+                try {
+                    await navigator.clipboard.writeText(text);
+                } catch (e) {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                Utils.toast('已复制 API Key');
+            };
+        }
+
+        await this._fetchApiKey(false);
+    },
+
+    async _fetchApiKey(regenerate) {
+        const valueEl = document.getElementById('api-key-value');
+        const copyBtn = document.getElementById('api-key-copy');
+        const genBtn = document.getElementById('api-key-gen');
+        if (!valueEl || !genBtn) return;
+        try {
+            const sb = getSupabaseClient();
+            if (!sb) return;
+            const { data, error } = await sb.rpc('api_key_mgmt', { p_regenerate: !!regenerate });
+            if (error) {
+                console.error('[API Key] rpc error:', error.message);
+                Utils.toast('获取失败，请重试');
+                return;
+            }
+            if (data && typeof data === 'string' && data.startsWith('jk_')) {
+                valueEl.textContent = data;
+                valueEl.style.display = '';
+                copyBtn.style.display = '';
+                genBtn.textContent = '重新生成';
+            } else {
+                Utils.toast('获取失败，请重试');
+            }
+        } catch (e) {
+            console.error('[API Key] 获取异常:', e);
+            Utils.toast('获取失败，请重试');
+        }
     },
 
     // [我的简介] 保存简介（写 profiles.bio，服务端对话时自动注入）

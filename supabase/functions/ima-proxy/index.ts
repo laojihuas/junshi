@@ -323,39 +323,80 @@ Deno.serve(async (req) => {
     // [v186] 本轮唯一 ID（usage 落库聚合口径：一轮 = 一个 request_id）
     currentRequestId = crypto.randomUUID();
 
-    const { query, knowledge_base_id, history, system_prompt, session_id } = await req.json();
+    // [v209 直连 API] 注意用 let：session_id/history 可能在直连分支被重新赋值（会话解析/补历史）
+    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
+    // [v209 直连 API] 新增可选参数：
+    //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
+    //   friend_name  直连按昵称查/建会话（免 session_id）；仅 api_key 模式生效
 
     if (!query || !query.trim()) {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
     }
 
-    // ---- 用户认证（匿名登录 JWT，仅作会话校验）----
+    // ---- 用户认证 ----
+    // [v209 直连 API] 双通道：
+    //   ① 网页模式（默认）：Authorization Bearer JWT（supabase auth 匿名/账号令牌）→ auth/v1/user 校验
+    //   ② 直连模式（api_key 非空）：无前端 JWT，用 api_key 映射 profiles.id → 账号身份，
+    //      后续 DB 读写统一走 service_role（绕过 RLS），配额按账号扣
     const authHeader = req.headers.get('Authorization') || '';
     const token = authHeader.replace('Bearer ', '');
     const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY') || '';
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
-    const authResp = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey }
-    });
-    if (!authResp.ok) {
-      return new Response(JSON.stringify({ error: '认证失败' }), { headers, status: 401 });
-    }
-    const user = await authResp.json();
+    const rawApiKey = typeof api_key === 'string' ? api_key.trim() : '';
+    const isDirect = !!rawApiKey;
+    const friendName = typeof friend_name === 'string' ? friend_name.trim().slice(0, 50) : '';
+    let directUserId = '';
 
-    // [v20260805 用户机制重构] 身份解析（双轨）：
+    let user: any = null;
+    if (isDirect) {
+      // 直连模式：api_key → profiles.id（service_role 直查，绕过 RLS）
+      if (!serviceRoleKey || !supabaseUrl) {
+        return new Response(JSON.stringify({ error: 'server_config', message: '服务配置缺失' }), { headers, status: 500 });
+      }
+      try {
+        const akResp = await fetch(
+          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id`,
+          { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+        );
+        if (akResp.ok) {
+          const akRows = await akResp.json();
+          directUserId = (Array.isArray(akRows) && akRows[0] && akRows[0].id) ? akRows[0].id : '';
+        }
+      } catch (e: any) {
+        console.warn('api_key 校验异常:', e.message);
+      }
+      if (!directUserId) {
+        return new Response(JSON.stringify({ error: 'invalid_api_key', message: 'API Key 无效，请重新生成' }), { headers, status: 401 });
+      }
+    } else {
+      // 网页模式：JWT 校验（一次调用同时校验 + 取 user）
+      const authResp = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey }
+      });
+      if (!authResp.ok) {
+        return new Response(JSON.stringify({ error: '认证失败' }), { headers, status: 401 });
+      }
+      user = await authResp.json().catch(() => null);
+    }
+
+    // [v20260805 用户机制重构] 身份解析（双轨 + 直连）：
     //   游客（device）：X-Device-Id 头 → 20 条/天 + IP 防刷，用完弹注册引导
     //   注册用户（account）：X-Identity-Type: account + 账号 JWT + X-Session-Id
     //     → 按账号扣次（前3天50/之后20 + 邀请余额 + VIP500），单点校验
+    //   直连（api_key）：身份=api_key 绑定的账号（同 account 配额，跳过单点）
     const clientIp = (req.headers.get('x-forwarded-for') || '').split(',')[0]?.trim() || '';
-    const identityType = (req.headers.get('X-Identity-Type') || 'device').trim() === 'account' ? 'account' : 'device';
+    const identityType = isDirect ? 'account' : ((req.headers.get('X-Identity-Type') || 'device').trim() === 'account' ? 'account' : 'device');
 
     let identityKey = '';
     let sessionCheck: any = null;
 
-    if (identityType === 'account') {
+    if (isDirect) {
+      // 直连：api_key 已映射账号 user_id
+      identityKey = directUserId;
+    } else if (identityType === 'account') {
       // 注册用户：身份 = 账号 user id（JWT 解析）；必须带 X-Session-Id 校验单点
       identityKey = user?.id || '';
       if (!identityKey) {
@@ -453,10 +494,20 @@ Deno.serve(async (req) => {
     const budgetPeak = rawThinkingBudget === 'auto' && isDeepSeekPeak();
     const effectiveThinkingBudget = rawThinkingBudget === 'on' || budgetPeak;
 
+    // [v209 直连 API] 直连模式后续 DB 读写统一走 service_role（绕过 RLS，因无前端 JWT）
+    const dbToken = isDirect ? serviceRoleKey : token;
+    const dbKey = isDirect ? serviceRoleKey : supabaseAnonKey;
+
+    // [v209 直连 API] friend_name → 会话查/建（脚本零状态，按昵称直达）
+    //   已有会话 → 复用（记忆卡/历史完整延续）；没有 → 自动创建（与网页"添加好友"同款结构）
+    if (isDirect && !session_id && friendName) {
+      session_id = await resolveDirectSession(supabaseUrl, serviceRoleKey, directUserId, friendName);
+    }
+
     // [v6 L2] 读取记忆卡（跨窗口共享的对方画像，按会话）
     // [v202 低配版] 低配不读记忆卡：画像/逻辑记忆/锚点等动态机制全砍，省一次 DB 读
     // [v206 WB版] WB 版同样不读记忆卡：分诊/策略纯规则驱动，零记忆卡依赖
-    let memoryCard = (isLite || isWb) ? null : await readMemoryCard(supabaseUrl, token, supabaseAnonKey, session_id);
+    let memoryCard = (isLite || isWb) ? null : await readMemoryCard(supabaseUrl, dbToken, dbKey, session_id);
 
     const rawQuery = typeof query === 'string' ? query.trim() : '';
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
@@ -464,6 +515,13 @@ Deno.serve(async (req) => {
 
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
+
+    // [v209 直连 API] 补历史：脚本零状态不传 history 时，从 chat_messages 读最近 30 条
+    //   → 直连与网页版共享同一份聊天记录，上下文完整（逻辑记忆/防重复照常工作）
+    //   [v206 WB版] WB 本就需要完整 30 条窗口，补历史对其同样成立
+    if (isDirect && session_id && (!Array.isArray(history) || history.length === 0)) {
+      history = await readDirectHistory(supabaseUrl, serviceRoleKey, session_id, 30);
+    }
 
     // [v6 L2] 上下文工程：近详远略压缩
     //   recent  = 最近 N 条全文（单条 ≤800 字），作为 messages 发给 LLM
@@ -623,15 +681,19 @@ Deno.serve(async (req) => {
 
     // ---- LLM 主回复 ----
     // [v20260805] 简介从 profiles.bio 读取（匿名用户注册时 ensure_profile 已建行，RLS 按 user 隔离）
+    // [v209 直连 API] 直连无 JWT：改用 api_key 映射的账号 id + service_role 读
     let userBio = '';
     try {
-      const bioResp = await fetch(
-        `${supabaseUrl}/rest/v1/profiles?id=eq.${user.id}&select=bio`,
-        { headers: { 'Authorization': `Bearer ${token}`, 'apikey': supabaseAnonKey } }
-      );
-      const bioList = await bioResp.json();
-      if (Array.isArray(bioList) && bioList[0] && typeof bioList[0].bio === 'string') {
-        userBio = bioList[0].bio;
+      const bioUserId = isDirect ? directUserId : (user?.id || '');
+      if (bioUserId) {
+        const bioResp = await fetch(
+          `${supabaseUrl}/rest/v1/profiles?id=eq.${bioUserId}&select=bio`,
+          { headers: { 'Authorization': `Bearer ${dbToken}`, 'apikey': dbKey } }
+        );
+        const bioList = await bioResp.json();
+        if (Array.isArray(bioList) && bioList[0] && typeof bioList[0].bio === 'string') {
+          userBio = bioList[0].bio;
+        }
       }
     } catch (e: any) {
       console.warn('读取简介失败:', e.message);
@@ -826,7 +888,7 @@ Deno.serve(async (req) => {
     if (session_id && !isLite && !isWb) {
       try {
         await updateMemoryCard({
-          supabaseUrl, token, anonKey: supabaseAnonKey, sessionId: session_id,
+          supabaseUrl, token: dbToken, anonKey: dbKey, sessionId: session_id,
           history, llmKey, llmBase, llmModel, existingCard: memoryCard,
           pulseAdvice,
           // [v126] 本轮回复立即入库（防重复窗口即时生效，重生/隔轮不再漏检）
@@ -903,6 +965,8 @@ Deno.serve(async (req) => {
         // [v202 低配版] 版本档位（full=普通版 / lite=低配版；验证后台切换生效）
         // [v206 WB版] wb=WB版
         mode: runMode,
+        // [v209 直连 API] 请求通道：true=api_key 直连（脚本调用）/ false=网页
+        direct: isDirect,
         // [v206 WB版] 消息分诊结果（验证分诊命中：type=类型 / signal=兴趣信号 / mood=情绪）
         wb_triage: wbTriage ? { type: wbTriage.type, signal: wbTriage.signal, mood: wbTriage.mood, intent: wbTriage.intent } : null,
         // [v20260812 思考预算三档] 验证：raw=后台档位(off/on/auto) active=实际是否压缩 peak=auto 档高峰命中
@@ -950,6 +1014,16 @@ Deno.serve(async (req) => {
         llm_reasoning: llmReasoning || null,
       },
     };
+    // [v209 直连 API] 消息落库（仅直连模式；网页模式由前端落库，双写会重复）：
+    //   query + reply → chat_messages + 会话 updated_at/last_message → 网页版好友列表与聊天记录完整可见
+    if (isDirect && session_id && reply && reply !== '掉线了') {
+      try {
+        await persistDirectMessages(supabaseUrl, serviceRoleKey, session_id, rawQuery, reply);
+      } catch (e: any) {
+        console.warn('直连消息落库失败:', e.message);
+      }
+    }
+
     // [v186] 批量落库 LLM usage（写库失败只记日志，不影响已构造的响应）
     await persistLlUsage();
     return new Response(JSON.stringify(payload), { headers, status: 200 });
@@ -1309,6 +1383,99 @@ function detectSelfDisclosure(query: string): string | null {
     if (re.test(q)) return name;
   }
   return null;
+}
+
+// ============================================================
+// [v209 直连 API] 三个辅助函数（service_role 通道，绕过 RLS）
+//   仅直连模式（api_key）使用；网页模式走前端 JWT + RLS，不受影响
+// ============================================================
+
+// 按昵称查/建会话：复用已有会话（记忆延续）或创建新会话（与前端 createSession 同款结构）
+async function resolveDirectSession(supabaseUrl: string, serviceRoleKey: string, userId: string, friendName: string): Promise<string> {
+  try {
+    if (!userId || !friendName) return '';
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/chat_sessions?user_id=eq.${encodeURIComponent(userId)}&friend_name=eq.${encodeURIComponent(friendName)}&select=id&limit=1`,
+      { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+    );
+    if (resp.ok) {
+      const rows = await resp.json();
+      if (Array.isArray(rows) && rows[0] && rows[0].id) return rows[0].id;
+    }
+    const colors = ['#07C160', '#E53935', '#1E88E5', '#FB8C00', '#8E24AA', '#00ACC1', '#F4511E', '#43A047'];
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    const ins = await fetch(`${supabaseUrl}/rest/v1/chat_sessions`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify({ user_id: userId, friend_name: friendName, avatar_color: color }),
+    });
+    if (ins.ok) {
+      const rows = await ins.json();
+      if (Array.isArray(rows) && rows[0] && rows[0].id) return rows[0].id;
+    }
+    return '';
+  } catch (e: any) {
+    console.warn('resolveDirectSession failed:', e.message);
+    return '';
+  }
+}
+
+// 从 chat_messages 读最近 N 条补成 history（脚本零状态的上下文来源）
+async function readDirectHistory(supabaseUrl: string, serviceRoleKey: string, sessionId: string, limit: number): Promise<any[]> {
+  try {
+    if (!sessionId) return [];
+    const resp = await fetch(
+      `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(sessionId)}&select=role,content,created_at&order=created_at.asc&limit=${limit}`,
+      { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+    );
+    if (!resp.ok) return [];
+    const rows = await resp.json();
+    return (Array.isArray(rows) ? rows : []).map((r: any) => ({
+      role: r.role,
+      content: r.content,
+      created_at: r.created_at,
+    }));
+  } catch (e: any) {
+    console.warn('readDirectHistory failed:', e.message);
+    return [];
+  }
+}
+
+// 直连消息落库：query + reply → chat_messages（补历史的数据源）+ 会话时间/预览
+async function persistDirectMessages(supabaseUrl: string, serviceRoleKey: string, sessionId: string, userText: string, replyText: string): Promise<void> {
+  try {
+    const base = new Date().getTime();
+    await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify([
+        { session_id: sessionId, role: 'user', content: userText, created_at: new Date(base).toISOString() },
+        { session_id: sessionId, role: 'assistant', content: replyText, created_at: new Date(base + 50).toISOString() },
+      ]),
+    });
+    await fetch(`${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${serviceRoleKey}`,
+        'apikey': serviceRoleKey,
+        'Content-Type': 'application/json',
+      },
+      // 注：chat_sessions 无 last_message 列（前端列表预览为兜底文案），只更新时间戳
+      body: JSON.stringify({ updated_at: new Date().toISOString() }),
+    });
+  } catch (e: any) {
+    console.warn('persistDirectMessages failed:', e.message);
+  }
 }
 
 async function readMemoryCard(supabaseUrl: string, token: string, anonKey: string, sessionId?: string): Promise<MemoryCard | null> {
