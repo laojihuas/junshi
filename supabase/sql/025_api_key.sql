@@ -23,7 +23,8 @@ create or replace function public.api_key_mgmt(p_regenerate boolean default fals
 returns text
 language plpgsql
 security definer
-set search_path = public
+-- 注意：gen_random_bytes 在 extensions schema（Supabase 扩展独立安装），search_path 必须带 extensions
+set search_path = public, extensions
 as $$
 declare
   v_uid uuid := auth.uid();
