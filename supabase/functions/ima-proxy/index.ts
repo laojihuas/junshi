@@ -280,8 +280,11 @@ function resolveStageVocab(memoryCard: MemoryCard | null): string[] {
 // [v79.4 简化] 主回复统一纯弹药 5 块话术
 // [2026-08-11] 套路机制整体移除：只检索话术(弹药)块，套路块不再检索
 const KB_REF_COUNT = 3;                       // 兜底默认（旧逻辑兼容）
-const KB_AMMO_COUNT = 5;                      // 主回复统一弹药块数
-const KB_CONTENT_MAX = 2000;                  // 完整注入兜底（实际不触发截断）
+// [v211 金句释放] 普通版弹药：6 块 × 每块 50 字（对齐 WB 短卡片策略；弹药在 user 尾部必然 miss，
+//   截断只减 miss 面不损缓存；短卡片让 LLM 直接近距改写弹药金句，减少上下文淹没）
+const FULL_KB_COUNT = 6;                       // 普通版主回复弹药块数（v211 5→6）
+const FULL_KB_CONTENT_MAX = 50;                // 普通版每块弹药截断 50 字（原 KB_CONTENT_MAX=2000 全量注入）
+const KB_AMMO_COUNT = 5;                      // WB 版主回复弹药块数（v208 稳定配置，不动）
 const HISTORY_ITEM_MAX = 800;   // 单条历史上限
 const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本）
 const RECENT_FULL = 5;          // 近详远略：最近 N 条全文（v70 10→8；v199 8→5：逻辑记忆 v195 已承担远期脉络，压缩省输入成本，与 LOGIC_SUMMARY_INPUT_N 对齐）
@@ -650,8 +653,8 @@ Deno.serve(async (req) => {
         if (isWb && wbTriage && WB_TRIAGE_KW[wbTriage.type] && WB_TRIAGE_KW[wbTriage.type]!.length > 0) {
           searchQueries.push(...WB_TRIAGE_KW[wbTriage.type]!);
         }
-        // [v202 低配版] 低配弹药 2 块（普通版/WB版 KB_AMMO_COUNT=5）；检索本身纯规则/RPC 零 LLM 成本
-        const kbPick = isLite ? LITE_KB_COUNT : KB_AMMO_COUNT;
+        // [v211 金句释放] 普通版弹药 6 块（WB 保持 5 块）；检索本身纯规则/RPC 零 LLM 成本
+        const kbPick = isLite ? LITE_KB_COUNT : (isWb ? KB_AMMO_COUNT : FULL_KB_COUNT);
         kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: isWb ? wbPhase : tactic.phase });
         mark('kb1');
         // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
@@ -1802,7 +1805,8 @@ function formatCurrentTime(): string {
 //   间隔 <1min（连续对话中）或时间无效 → 返回 ''（不注入，避免噪音）
 function formatGapSince(last: Date): string {
   const ms = Date.now() - last.getTime();
-  if (isNaN(ms) || ms < 60000) return '';
+  // [v211 金句释放·C] 注入门槛 1min → 2h：刚聊过（<2h）LLM 从 history 可见，无需【上次聊天】块提示
+  if (isNaN(ms) || ms < 2 * 3600 * 1000) return '';
   const mins = Math.floor(ms / 60000);
   if (mins < 60) return `${mins}分钟前`;
   const hours = Math.floor(mins / 60);
@@ -2478,12 +2482,12 @@ function buildSystemContent(opts: {
   // 知识库参考
   if (opts.kbItems.length > 0) {
     const kbText = opts.kbItems
-      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', KB_CONTENT_MAX)}`)
+      .slice(0, FULL_KB_COUNT)
+      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', FULL_KB_CONTENT_MAX)}`)
       .join('\n\n');
-    // [v129 保味] 引导语从"仅弹药/禁止照抄原文"改为"保留直白度、禁止软化"：
-    //   选句通道已删，保味由主回复 prompt 承担；整句照抄仍禁止（v83：会触发平台安全过滤空回复降级），
-    //   策略 = 近距改写：保留参考句的直白措辞/意象，换说法、改人称贴合语境
-    d += `\n\n【参考资料】（可直接复制的句子/金句：优先保留其直白措辞、意象和节奏，可改人称、调句序、加接话引子贴合语境，禁止软化成文明腔；整句原样照抄可能被平台拦截，要在保留直白度的前提下换种说法；与当前对话冲突时以对话上下文为准。\n[v196] 先按【决策流程】②把它消化成行动方向再创作，禁止整句搬运）\n${kbText}`;
+    // [v211 金句释放·A] 引导语对齐 WB 版：允许"改人称直接复制"弹药金句（原"消化成行动方向再创作、
+    //   禁止整句搬运"导致金句被重写稀释）；保味职责由【措辞底线】(riskHit 时)承担，此处不再重复
+    d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
     if (opts.kbFallback) {
       d += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
     }
