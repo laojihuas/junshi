@@ -702,11 +702,12 @@ Deno.serve(async (req) => {
       try {
         // [v129 删除选句通道] 选句"整句复制知识库原句"与聊天场景格格不入（选句判定天然不契合语境）→ 移除。
         //   保味改由主回复 prompt 承担：【措辞底线】动态注入（riskHit 时）+ 参考资料引导语保留直白度
-        // [v129] 高危词预检：本轮参考弹药含强敏感词 → 高风险消毒轮（注入保味指令 + 生成后消毒检测）
-        // [v202 低配版] 低配跳过预检（弹药仅 2×50 字、无【措辞底线】注入、无消毒重试）
-        // [v206 WB版] WB 同样跳过：无【措辞底线】注入、无消毒重试
+        // [v129] 高危词预检：本轮参考弹药含强敏感词 → 注入【措辞底线】保味指令（软引导，零成本）
+        // [v210 消毒移除] detectSanitize 消毒检测+重试已砍（2026-08-23 数据实锤：17 次重试后最终回复 0 条含强词，
+        //   重生成压不住 LLM 软化、纯浪费成本与延迟）；riskHit 预检注入保留
+        // [v202 低配版] 低配跳过预检（弹药仅 2×50 字、无【措辞底线】注入）
+        // [v206 WB版] WB 同样跳过：无【措辞底线】注入
         lastRiskHit = (isLite || isWb) ? false : kbItems.some((it: any) => RISK_WORDS.some((w) => String((it && it.content) || '').includes(w)));
-        lastSanitizeHit = false;
         if (!reply) {
         // [v148] 战术判定已提前到检索前（549 行，phase 供弹药加权），此处直接复用
         // 组装 system：[P0-3] 固定块前移（缓存友好）+ 去冗余（llmHistory≥4 不注入近期话/自己话）
@@ -809,27 +810,23 @@ Deno.serve(async (req) => {
         //     逻辑记忆(v195) + 决策流程④ 已承担"换皮重复同一套框架"的拦截，LLM 复核冗余且费成本
         // [v76] 时间一致性兜底：回复出现与【当前时间】冲突的时段词（早安/晚安/这么晚等）→ 同上重生成
         //   （多触发源合并成一次重试，避免同一轮双重重生成）
+        // [v210 消毒移除] v129 消毒检测重试已砍（检测+重试+notes 全移除，2026-08-23 数据实锤无效），
+        //   重试仅剩 dup（字面重复）/ time（时间冲突）两个兜底
         const selfMsgs = Array.isArray(memoryCard?.recent_self_messages) ? memoryCard.recent_self_messages.slice(-5) : [];
         dupHit = !!(reply && selfMsgs.length > 0 && isNearDuplicate(reply, selfMsgs));
         const timeHit = timeConflict(reply);
         lastTimeConflict = timeHit;
-        // [v129 消毒检测] 参考句含强敏感词、回复里这些词全部消失 → 判定消毒 →
-        //   并入现有 v9/v76 重生成通道（复用重试机制，不新增调用），重生成时 notes 注入保味指令
-        const sanitizedWords = detectSanitize(reply, kbItems);
-        lastSanitizeHit = sanitizedWords !== null;
-        // [v202 低配版] 低配跳过重试（防重复/时间冲突/消毒检测）：重试=第二次主回复 LLM 调用，
+        // [v202 低配版] 低配跳过重试（防重复/时间冲突重试）：重试=第二次主回复 LLM 调用，
         //   低配以"单次主回复"为成本上限，不引入任何二次调用
         // [v206 WB版] WB 同样单次主回复：分诊/策略已前置到提示词层，不需要重试兜底
-        if (!isLite && !isWb && (dupHit || timeHit || sanitizedWords) && llmKey) {
+        if (!isLite && !isWb && (dupHit || timeHit) && llmKey) {
           const notes: string[] = [];
           if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
-          if (sanitizedWords) notes.push(`你刚才的回复把参考话术里的直白措辞（${sanitizedWords.join('/')}）全软化了，这是消毒不是加分。保留直白度：只许改人称、加语气词、调句序、换种说法，禁止同义软化或删掉擦边意象。`);
           // [v199 重试原因落库] _stage 按触发原因标记（可多因合并），llm_usage_log 直接 group by 统计
           const retryReasons: string[] = [];
           if (dupHit) retryReasons.push('dup');
           if (timeHit) retryReasons.push('time');
-          if (sanitizedWords) retryReasons.push('sanitize');
           if (retryReasons.length > 0) retryReason = retryReasons.join('+');
           const retry = await llmChat(llmKey, llmBase, llmModel, [
             // [v20260813 缓存重构] system + 【军师内参】与主回复完全一致（复用同一 built →
@@ -844,7 +841,7 @@ Deno.serve(async (req) => {
             presencePenalty: usedStageLlm.presence_penalty,
             // [v185] 重试沿用主回复档位（错字轮=off）
             thinking: replyThinking,
-            // [v199] 重试原因落库（retry_dup / retry_time / retry_sanitize / retry_dup+time ...）
+            // [v199] 重试原因落库（retry_dup / retry_time / retry_dup+time ...）
             _stage: ('retry_' + (retryReasons.join('+') || 'unknown')) as any,
           });
           if (retry) reply = retry;
@@ -903,9 +900,9 @@ Deno.serve(async (req) => {
     }
     mark('memory');
 
-    // [v129 消毒观测] 每轮记录高危词预检 + 消毒检测结果，跑几天用 grep "[sanitize]" 统计消毒率
-    // [v185] 顺带记录 typo_hit，grep "[sanitize]" 可同时看错字命中率
-    console.info(`[sanitize] risk_hit=${lastRiskHit} sanitize_hit=${lastSanitizeHit} typo_hit=${lastTypoHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
+    // [v210 观测] 每轮记录高危词预检（riskHit，验证【措辞底线】注入触发率）+ 错字命中
+    // [v185] grep "[risk]" 可同时看错字命中率
+    console.info(`[risk] risk_hit=${lastRiskHit} typo_hit=${lastTypoHit} reply_from=${reply === '掉线了' ? 'offline' : 'llm'}`);
 
     // [v186] 先构造响应体，落库成功后再返回（usage 写库失败不影响主回复）
     const payload = {
@@ -926,14 +923,13 @@ Deno.serve(async (req) => {
         llm_history_len: llmHistory.length,
         kb_hits: hitKnowledge,
         kb_items: kbItems.length,
-        // [v129] 消毒观测（替换已删除的选句通道字段）：本轮参考弹药是否含敏感词 + 生成后是否检出消毒
+        // [v129→v210] 高危词预检观测：本轮参考弹药是否含敏感词（【措辞底线】注入触发源）
         risk_hit: lastRiskHit,
-        sanitize_hit: lastSanitizeHit,
         // [v185 错字彩蛋] 本轮是否命中秒回错字（验证 20% 命中率）
         typo_hit: lastTypoHit,
         // [v20260812 逻辑重复检测] 验证：dup_hit=是否字面判重（v196 起仅字面层）
         dup_hit: dupHit,
-        // [v199] 重试触发原因（''=本轮无重试；dup/time/sanitize 可叠加）
+        // [v199] 重试触发原因（''=本轮无重试；dup/time 可叠加；v210 起 sanitize 已移除）
         retry_reason: retryReason,
         rewrite_used: usedRewrite,
         semantic_kws: semanticKws,
@@ -2700,27 +2696,14 @@ function stripRoleTags(text: string): string {
 //   （【措辞底线】动态注入 + 参考资料引导语保留直白度），此处仅保留
 //   高危词表（riskHit 预检 + 消毒检测共用）与消毒检测函数
 // ============================================================
-// [v129] 高危词表（强信号、低误报）：参考弹药含这些词 → 本轮高风险消毒轮
+// [v129] 高危词表（强信号、低误报）：参考弹药含这些词 → 注入【措辞底线】保味指令（软引导）
 //   （多义词/弱信号如"约/吻/抱/酒店/丑/胖"不入表，避免误报）
 const RISK_WORDS = ['胸', '罩杯', '内衣', '内裤', '屁股', '臀', '身材', '摸', '开房', '床上', '接吻', '舔', '骚', '浪', '贱', '勾引', '女仆', '包养', '跪舔', '备胎', '妈的', '操'];
 
-// [v129 消毒检测] 参考弹药含强敏感词、回复里这些词全部消失 → 判定消毒（返回消失词列表，无则 null）
-//   只在参考句有敏感词时才有意义：没敏感词的轮次不存在"消毒"
-function detectSanitize(reply: string | null | undefined, kbItems: any[]): string[] | null {
-  const srcWords = new Set<string>();
-  for (const it of (Array.isArray(kbItems) ? kbItems : [])) {
-    const c = String((it && it.content) || '');
-    for (const w of RISK_WORDS) if (c.includes(w)) srcWords.add(w);
-  }
-  if (srcWords.size === 0) return null;
-  const r = String(reply || '');
-  const gone = [...srcWords].filter((w) => !r.includes(w));
-  return gone.length > 0 ? gone : null;
-}
-
-// [v129] 消毒观测（顶层声明防作用域事故）：riskHit=本轮参考弹药含敏感词；sanitizeHit=生成后检出消毒
+// [v210 消毒移除] detectSanitize 消毒检测+重试已砍（2026-08-23 数据实锤：重试后最终回复 0 条含强词、
+//   重生成压不住 LLM 软化，17 次全无效纯浪费；生产回复强词率仅 2.0%，弱擦边产出质量可接受）
+//   [v210 观测] 高危词预检（riskHit 顶层声明防作用域事故）：本轮参考弹药含敏感词 → 触发【措辞底线】注入
 let lastRiskHit = false;
-let lastSanitizeHit = false;
 // [v185 错字彩蛋] 观测：本轮是否命中"秒回错字"（_debug 透传，验证 20% 命中率）
 let lastTypoHit = false;
 // [v72 调试] 最近一次主回复的思考链原文（thinking 档才有；_debug 透传，辅助调用不覆盖）
