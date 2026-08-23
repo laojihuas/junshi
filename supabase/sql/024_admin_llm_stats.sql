@@ -4,10 +4,10 @@
 -- 数据源：llm_usage_log（ima-proxy 每轮批量落库）
 -- 口径（用户拍板）：
 --   - "一轮" = GROUP BY request_id（该轮主回复+重试+辅助调用合计）
---   - 精确计价：峰谷（高峰=北京时间 9:00-12:00、14:00-18:00，其余空闲，官方未区分周末）
+--   - 精确计价：峰谷（高峰=**工作日**北京时间 9:00-12:00、14:00-18:00；周末全天统一低谷价，官方口径）
 --     + 三档（缓存命中输入/未命中输入/输出）分别计价
 --   - 价格：V4-Flash。2026-08-17 00:00（北京时间）起新价（官方 8/13 公告）：
---       空闲 命中0.05 / 未命中1.5 / 输出4.5（元/M）；高峰 ×2
+--       空闲 命中0.05 / 未命中1.5 / 输出4.5（元/M）；工作日高峰 ×2
 --       旧价（8/17 前）：命中0.02 / 未命中1 / 输出2
 --   - 缓存命中率 = hit_tokens / (hit_tokens + miss_tokens)
 -- 返回：{ daily: 近7天逐日[7], weekly: 本周, monthly: 本月 }
@@ -18,6 +18,7 @@
 -- ============================================================
 
 -- 单行计价（元）：V4-Flash 新旧价 + 峰谷判定
+-- [v214 修复] 峰谷只对工作日生效（isodow<6=周一~周五）；周末全天低谷价（官方口径，修复前周末高峰时段被误算 ×2）
 CREATE OR REPLACE FUNCTION public.llm_row_cost(
     p_prompt int, p_comp int, p_hit int, p_miss int, p_created timestamptz)
 RETURNS numeric
@@ -25,16 +26,19 @@ LANGUAGE sql IMMUTABLE
 AS $$
   SELECT round((
       p_hit  * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 0.02
-                     WHEN EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                       OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17 THEN 0.10
+                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
+                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
+                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 0.10
                      ELSE 0.05 END)
     + p_miss * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 1
-                     WHEN EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                       OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17 THEN 3.0
+                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
+                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
+                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 3.0
                      ELSE 1.5 END)
     + p_comp * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 2
-                     WHEN EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                       OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17 THEN 9.0
+                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
+                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
+                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 9.0
                      ELSE 4.5 END)
   ) / 1000000.0, 6)::numeric;
 $$;
