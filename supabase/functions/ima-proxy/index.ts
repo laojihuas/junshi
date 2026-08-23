@@ -590,9 +590,11 @@ Deno.serve(async (req) => {
 
     // [v206 WB版] 消息分诊（纯规则零 LLM，先于检索执行）：
     //   复刻"消息分诊"层——识别消息类型/情绪/兴趣信号 → 驱动检索词与策略路由
+    // [v212 方案Y] full 也跑分诊：给 LLM"减负"（告诉她这条消息是什么、往哪打），替代战术卡判定；
+    //   lite 保持最简（零动态机制）
     let wbTriage: WbTriage | null = null;
     let wbPhase: 'attract' | 'comfort' | 'seduce' = 'attract';
-    if (isWb) {
+    if (!isLite) {
       wbTriage = triageMessage(switchTopic ? '' : query);
       wbPhase = wbPhaseOf(wbTriage.type);
       tactic = { category: 'attack', phase: wbPhase, cardIndex: -1 };
@@ -649,13 +651,13 @@ Deno.serve(async (req) => {
         }
 
         const searchQueries = [...semanticKws, ...kw, searchQuery];
-        // [v206 WB版] WB 追加分诊类型词（如 敷衍→冷读/打压、借口→废物测试），让弹药与策略同向
-        if (isWb && wbTriage && WB_TRIAGE_KW[wbTriage.type] && WB_TRIAGE_KW[wbTriage.type]!.length > 0) {
+        // [v212 方案Y] full+wb 都追加分诊类型词（弹药与策略同向）；lite 不跑分诊
+        if (!isLite && wbTriage && WB_TRIAGE_KW[wbTriage.type] && WB_TRIAGE_KW[wbTriage.type]!.length > 0) {
           searchQueries.push(...WB_TRIAGE_KW[wbTriage.type]!);
         }
         // [v211 金句释放] 普通版弹药 6 块（WB 保持 5 块）；检索本身纯规则/RPC 零 LLM 成本
         const kbPick = isLite ? LITE_KB_COUNT : (isWb ? KB_AMMO_COUNT : FULL_KB_COUNT);
-        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: isWb ? wbPhase : tactic.phase });
+        kbItems = await recallBlocks(supabaseUrl, serviceRoleKey, semanticKws, searchQueries, { ...quotaOpts, pickCount: kbPick, type: '话术', phase: isLite ? tactic.phase : wbPhase });
         mark('kb1');
         // 4. 第二轮：弹药不足 2 条时用"仅历史"关键词补搜
         if (kbItems.length < 2) {
@@ -756,9 +758,9 @@ Deno.serve(async (req) => {
           anchorMode,
           // [v202 低配版] 低配：动态区只保留【参考资料】(2块×50字)，其余动态块全省
           lite: isLite,
-          // [v206 WB版] WB：消息分诊结果 + 策略路由（动态区注入【消息分诊】+【策略指令】）
+          // [v212 方案Y] full 也注入分诊+策略（替代战术卡组）；lite 不注入
           wb: isWb,
-          wbTriage: isWb ? wbTriage : null,
+          wbTriage: !isLite ? wbTriage : null,
         });
         const systemContent = built.systemContent;
         let innerContent = built.dynamicContent;
@@ -1894,12 +1896,7 @@ const TACTIC_CARDS: Record<TacticCategory, TacticCard[]> = {
   ],
 };
 
-// 阶段卡（场景19-21：按对方发言回合数判定）
-const TACTIC_PHASE_CARDS: Record<'attract' | 'comfort' | 'seduce', string> = {
-  attract: '吸引期（本轮判定：关系刚起步/对方投入少或降温）：只做DHV（展示价值）和筛选，不暴露任何兴趣；禁无意义盘问（年龄/照片/住哪这类信息交换允许自然提问），禁用未来邀约；多用"我"少用"你"，陈述句为主、冷读为主。范例："看你头像，我有90%把握你是个表面安静、内心极其有主见的人。"',
-  comfort: '舒适期（本轮判定：已有熟悉感/她愿意分享）：建立信任和情感纽带，制造"我们是一类人"的感觉；她分享经历后立刻连接你的相似故事；多用"咱们"、"看来我们都……"。范例："你也有过那种时候？我也是！我记得有一次……"',
-  seduce: '恋爱期（本轮判定：关系已确立或聊得够热）：制造见面理由、测试服从性；开始植入模糊邀约、种心锚；遇ASD立刻退回舒适期，绝不纠缠。范例："下次有机会带你见识一下什么叫真正的……"',
-};
+// [v212 方案Y] TACTIC_PHASE_CARDS / buildTacticBlock 已删除（战术卡组由分诊+策略替代，不再有调用方）
 
 // 防守类触发词（v73 强/弱分级防误伤）：
 //   强信号 = 明确对抗/测试/ASD/竞争者词 → 命中即防守
@@ -2038,15 +2035,20 @@ const WB_STRATEGY_TABLE: Record<WbTriageType, { name: string; directive: string 
 };
 
 // [v206 WB版] 组装【消息分诊】+【策略指令】动态块（注入最后一条 user 消息的【军师内参】区）
-function buildWbStrategyBlock(t: WbTriage): string {
+// [v212 方案Y] priority=false（full 场景）：策略指令措辞降为"方向基准"，
+//   不与普通版已有的机会窗口/接住分享/切换话题等"最高优先"场景块打架
+function buildWbStrategyBlock(t: WbTriage, priority = true): string {
   const s = WB_STRATEGY_TABLE[t.type] || WB_STRATEGY_TABLE.general;
   const signalText = t.signal === 'ioi' ? '高（她在主动投入）' : t.signal === 'low' ? '低（冷淡/敷衍）' : '中性';
   const moodText = t.mood === 'warm' ? '好（轻松积极）' : t.mood === 'cold' ? '冷（有距离/不爽）' : '中性';
+  const prio = priority
+    ? '本轮最高优先，先按此判断再回复'
+    : '本轮方向基准：先按此判断方向；若本轮还有更具体的场景块（机会窗口/接住分享/切换话题等），以场景块为准';
   return `\n\n【消息分诊】(系统对"她这句话"的判断，仅供执行参考，不得复述或引用)\n`
     + `- 消息类型：${t.type}（${s.name}）\n`
     + `- 情绪：${moodText}　兴趣信号：${signalText}\n`
     + `- 意图解读：${t.intent}\n`
-    + `\n【策略指令】(本轮最高优先，先按此判断再回复)\n${s.directive}`;
+    + `\n【策略指令】(${prio})\n${s.directive}`;
 }
 
 // [v73→v182 三阶段统一] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
@@ -2108,24 +2110,14 @@ const GLOBAL_TACTIC_PREAMBLE = `\n\n【战术指令】(本轮最高优先，先�
   + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
   + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落或真正受伤 → 收起锋芒先共情，此场景禁用调侃与反击。`;
 
-// [v75] 战术变化部分（每轮按类别/阶段变化 → 放后缀不破坏前缀缓存）：阶段卡 + 命中类别卡组
-// [v79.2 瘦身] 卡组只输出"场景→态度→手法"规则；examples 范例已由知识库参考弹药承担
-//   （切块后弹药精准，无需卡组自带范例，每轮省 ~200-400 字）
-// [v20260811 降本] 只注入命中的那张卡（cardIndex≥0，防守/救场细分触发词）；
-//   攻击类常态无触发词（cardIndex=-1）→ 精简注入全组（合并场景+手法一行，去态度列）
-function buildTacticBlock(category: TacticCategory, phase: 'attract' | 'comfort' | 'seduce', cardIndex = -1): string {
-  const cards = TACTIC_CARDS[category];
-  let cardText: string;
-  if (cardIndex >= 0 && cards[cardIndex]) {
-    const c = cards[cardIndex];
-    cardText = `场景：${c.scene}\n态度：${c.attitude}｜手法：${c.method}`;
-  } else {
-    // 攻击/未细分：每卡一行（场景→手法），省态度列与换行
-    cardText = cards.map((c) => `- ${c.scene} → ${c.method}`).join('\n');
-  }
-  return `\n\n【当前阶段】${TACTIC_PHASE_CARDS[phase]}\n\n`
-    + `【${category === 'defense' ? '防守' : category === 'attack' ? '进攻' : '救场'}类战术卡】（本轮命中，严格按卡执行）\n${cardText}`;
-}
+// [v212 方案Y] full 全局原则（替代战术前导的"全局原则"部分；执行顺序依赖战术卡，已随方案 Y 由分诊+策略替代）
+const GLOBAL_PRINCIPLES = `\n\n【全局原则】(全程生效)\n`
+  + `- 回复字数统一 8-20 字（至少 8 字保证内容量、最多 20 字封顶；通常 1-2 句短句，能拆两句就不合一句；超 20 字=失败必须压缩）。\n`
+  + `- 她回复越短越敷衍，你延迟越久（模拟高价值）；陈述句 > 提问句，用冷读代替查户口；永远不让她觉得你在"等"她消息。\n`
+  + `- 安全边界：不骂脏话、不人格侮辱、不贬低外貌/价值；对方情绪低落或真正受伤 → 收起锋芒先共情，此场景禁用调侃与反击。`;
+
+// [v212 方案Y] buildTacticBlock 已删除：战术卡组由【消息分诊】+【策略指令】替代
+//   （TACTIC_CARDS 保留：resolveTacticCategory 触发词判定仍用它）
 
 function buildSystemContent(opts: {
   systemPrompt: string;
@@ -2205,14 +2197,14 @@ function buildSystemContent(opts: {
   // [v73] 【语气与态度】已删除：被战术卡组（防守/进攻类）+ 全局原则（含安全边界）覆盖
 
   // [v9] 自洽 + 输出要求：先正面回应再转折，严禁自相矛盾/重复；放宽为 1-2 句
-  // [v73] 硬字数上限：整条 ≤20 字（用户定稿），通常 1 句（已并入战术前导全局原则）
+  // [v73] 硬字数上限：整条 ≤20 字（用户定稿），通常 1 句（已并入战术前导/全局原则）
   // [P0-3] 固定块前移（前缀稳定）
   // [2026-08-06 降本] 范例 3→1
   // [v79.2 去重] 删"第一句必须正面回答"（与防守/救场战术卡冲突：防守要求不接招/离场）；
   //   删"≤20字"硬字数（战术前导 GLOBAL_TACTIC_PREAMBLE 已含完整字数规则）
   // [v20260811 降本] 精简：删重复表述（保味原则与措辞底线/参考资料引导重复）
   // [v20260813 降本] 去重："不重复/自洽"已由【角色定位】首段声明，此处不再复述；
-  //   字数上限以战术前导 GLOBAL_TACTIC_PREAMBLE 为唯一权威（≤20字）
+  //   字数上限以战术前导 GLOBAL_TACTIC_PREAMBLE（lite）/ 全局原则 GLOBAL_PRINCIPLES（full）为唯一权威（≤20字）
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
@@ -2221,7 +2213,8 @@ function buildSystemContent(opts: {
   // [v196 决策流程] 思考链脚手架（对齐 IMA 思路）：定卡→消化弹药→候选池→淘汰→决策
   //   思考档（high/max）生效，思考过程不输出，最终只输出选定的话术本体
   // [v206 WB版] WB 版：① 定招 锚定【消息分诊】类型与【策略指令】招数（替代战术卡）
-  if (opts.wb) {
+  // [v212 方案Y] full 也走分诊变体（战术卡体系已由分诊+策略替代）
+  if (opts.wb || opts.wbTriage) {
     s += `\n\n【决策流程】(思考档生效，回复前按序完成，思考过程不输出)\n`
       + `① 定招：看【消息分诊】给的类型和【策略指令】给的招数，确认她这句话的真实意图；\n`
       + `② 消化弹药：把【参考资料】里的方案提炼成 2-3 个可执行方向（如"先赞同再曲解""反转测试""不解释离场"），选最贴合【角色定位】人设的一个方向——禁止直接抄参考句，要按方向重新创作。\n`
@@ -2239,8 +2232,12 @@ function buildSystemContent(opts: {
 
   // [v75 缓存①] 战术固定前导：使用说明+全局原则（每轮完全一致 → 前缀缓存白捡）
   // [v206 WB版] WB 不走战术卡体系（由【消息分诊】+【策略指令】替代），跳过该前导
-  if (!opts.wb) {
+  // [v212 方案Y] full 改用 GLOBAL_PRINCIPLES（8-20字/延迟/安全边界，去掉依赖战术卡的执行顺序）；
+  //   lite 保留完整前导；WB 不注入（字数由决策流程④约束）
+  if (opts.lite) {
     s += GLOBAL_TACTIC_PREAMBLE;
+  } else if (!opts.wb) {
+    s += GLOBAL_PRINCIPLES;
   }
 
   // [v73] 【兴趣信号与升级】已删除：被进攻类战术卡（升高关系/推拉/筛选）覆盖
@@ -2411,13 +2408,12 @@ function buildSystemContent(opts: {
   }
 
   // ===== 变化区尾部（战术/query 相关，放最后最小化对前缀缓存的破坏）=====
-  // [v73 迷男精髓] 战术变化部分：当前阶段卡 + 命中类别卡组
-  //   防守（敷衍/打压/废物测试/ASD/服从度低/消失/提前男友/海王）→ 防守卡
-  //   self 暴露需求感 或 邀约被拒 → 救场卡；其余常态 → 进攻卡
-  // [v80 缓存优化] 后置到稳定块（位置/锚点/阶段/简介/画像/目标）之后：
-  //   战术切换不再打断稳定块的前缀缓存
+  // [v212 方案Y] 战术卡组已由【消息分诊】+【策略指令】替代（full 注入；WB 走 wb 分支注入）。
+  //   resolveTacticCategory 仍保留（供逻辑记忆 direction 判定 + lite 弹药阶段加权）
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const, cardIndex: -1 };
-  d += buildTacticBlock(tactic.category, tactic.phase, typeof tactic.cardIndex === 'number' ? tactic.cardIndex : -1);
+  if (opts.wbTriage && !opts.wb) {
+    d += buildWbStrategyBlock(opts.wbTriage, false);
+  }
 
   // [v20260809 机会窗口] 她主动问起相关话题 → 回答后必须镜像反问（最高优先，紧跟战术块）
   //   窗口只开这一轮：她问你没接，下轮再主动提就成了强行翻旧账，更生硬
