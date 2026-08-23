@@ -285,9 +285,14 @@ const KB_REF_COUNT = 3;                       // 兜底默认（旧逻辑兼容�
 const FULL_KB_COUNT = 6;                       // 普通版主回复弹药块数（v211 5→6）
 const FULL_KB_CONTENT_MAX = 50;                // 普通版每块弹药截断 50 字（原 KB_CONTENT_MAX=2000 全量注入）
 const KB_AMMO_COUNT = 5;                      // WB 版主回复弹药块数（v208 稳定配置，不动）
-const HISTORY_ITEM_MAX = 800;   // 单条历史上限
-const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本）
-const RECENT_FULL = 5;          // 近详远略：最近 N 条全文（v70 10→8；v199 8→5：逻辑记忆 v195 已承担远期脉络，压缩省输入成本，与 LOGIC_SUMMARY_INPUT_N 对齐）
+// [v213 缓存优化] 普通版 history 改追加式大窗口（对齐 WB v208 思路）：
+//   原 RECENT_FULL=5 滑动窗口每轮头部掉一条 → system 后 history 整段 miss（实测命中率仅 ~50%）；
+//   追加式 20 条×150 字确定性截断 → 上轮前 20 条与本轮逐字节一致 → history 前缀整段命中，
+//   每轮仅 miss 新增 1-2 条 + user 尾部；20 条窗口已覆盖足够上下文，不再生成更早摘要（省 miss 面）
+const FULL_HISTORY_COUNT = 20;      // 普通版追加式历史窗口（消息 <20 条不滑动，前缀持续命中）
+const FULL_HISTORY_ITEM_MAX = 150;  // 普通版单条历史确定性截断（同一消息每次截出同样内容）
+const HISTORY_ITEM_MAX = 800;   // lite 单条历史上限（仅 2 条全文，无需压缩；buildLogicSummary 输入截断也用）
+const SUMMARY_ITEM_MAX = 60;    // 更早消息摘要单条上限（v59 80→60 降本；v213 起 full 不再生成摘要，保留常量防误用）
 const MEMORY_UPDATE_INTERVAL = 5 * 60 * 1000; // 画像提取频率：5 分钟（v70 3→5 降频）
 
 // [v195 逻辑记忆] 每轮用最近 N 条消息生成一句话逻辑脉络（≤80 字）落卡，
@@ -1036,9 +1041,9 @@ Deno.serve(async (req) => {
 });
 
 // ============================================================
-// [v6 L2] 近详远略：上下文压缩
-//   最近 RECENT_FULL 条全文（单条截断 HISTORY_ITEM_MAX）；
-//   更早的只保留对方消息（≤SUMMARY_ITEM_MAX/条，最多 6 条）拼成摘要
+// [v6 L2] 上下文压缩（v213 全版本统一为"追加式窗口"，无滑动窗口/更早摘要）
+//   追加式 = slice(-N)：消息数 <N 时全量保留（每轮仅新增 1 条 → 前缀连续命中）；
+//   超过 N 条才滑动（每 N 轮一次整段 miss，摊薄成本低）
 // [v20260809 归属加固] recent 每条 content 加说话人前缀：
 //   【对方说】= role user（对方）；【我发的】= role assistant（用户本人/军师发出的）
 //   ——显式标注说话人，杜绝 LLM 按 API 原生 role 语义（user=人类/AI）误判归属
@@ -1047,21 +1052,16 @@ function buildContextParts(history: any[], lite = false, wb = false): { recent: 
   const valid = (Array.isArray(history) ? history : [])
     .filter((h) => h && (h.role === 'user' || h.role === 'assistant') && typeof h.content === 'string');
   // [v202 低配版] lite=true：仅最近 2 条全文，不生成更早摘要（省输入 token；未命中成本收紧）
-  // [v208 WB 缓存优化] wb=true：追加式 30 条窗口（非滑动）+ 每条约 150 字确定性截断 →
-  //   上轮前 30 条与本轮逐字节一致 → DeepSeek 前缀整段命中；不生成更早摘要（WB 动态区本就不注入）
-  const recentCount = lite ? LITE_HISTORY_COUNT : (wb ? WB_HISTORY_COUNT : RECENT_FULL);
-  const itemMax = wb ? WB_HISTORY_ITEM_MAX : HISTORY_ITEM_MAX;
+  // [v208 WB 缓存优化] wb=true：追加式 30 条窗口 + 每条约 150 字确定性截断 → 前缀整段命中
+  // [v213 缓存优化] full=true：追加式 20 条窗口 + 150 字截断（原 5 条滑动窗口 history 整段 miss，命中率仅 ~50%）
+  const recentCount = lite ? LITE_HISTORY_COUNT : (wb ? WB_HISTORY_COUNT : FULL_HISTORY_COUNT);
+  const itemMax = wb ? WB_HISTORY_ITEM_MAX : (lite ? HISTORY_ITEM_MAX : FULL_HISTORY_ITEM_MAX);
   const recent = valid.slice(-recentCount).map((h) => ({
     role: h.role,
     content: (h.role === 'user' ? '【对方说】' : '【我发的】') + truncateText(h.content, itemMax),
   }));
-  if (lite || wb) return { recent, summary: '' };
-  const older = valid.slice(0, Math.max(0, valid.length - recentCount));
-  const olderUsers = older.filter((h) => h.role === 'user').map((h) => truncateText(h.content, SUMMARY_ITEM_MAX));
-  const summary = olderUsers.length > 0
-    ? '【更早对话要点（对方说过的话，供把握前因后果）】\n' + olderUsers.slice(-6).join('\n')
-    : '';
-  return { recent, summary };
+  // [v213] 全部版本统一：不生成更早摘要（追加式窗口已覆盖；省掉摘要即省掉 user 尾部 miss 面）
+  return { recent, summary: '' };
 }
 
 // ============================================================
