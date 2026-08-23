@@ -608,6 +608,8 @@ const Friends = {
         const valueEl = document.getElementById('api-key-value');
         const copyBtn = document.getElementById('api-key-copy');
         const genBtn = document.getElementById('api-key-gen');
+        const wakeBtn = document.getElementById('api-key-wake');
+        const wakeDesc = document.getElementById('api-key-wake-desc');
         if (!valueEl || !genBtn) return;
 
         if (!Auth.isAccount || !Auth.account) {
@@ -615,6 +617,8 @@ const Friends = {
             copyBtn.style.display = 'none';
             genBtn.textContent = '登录账号后可用';
             genBtn.disabled = true;
+            if (wakeBtn) wakeBtn.style.display = 'none';
+            if (wakeDesc) wakeDesc.style.display = 'none';
             return;
         }
 
@@ -645,9 +649,54 @@ const Friends = {
                 }
                 Utils.toast('已复制 API Key');
             };
+            // [v216 账号级唤醒开关] 点击切换（RPC 写 profiles.wake_enabled，服务端返回新状态）
+            if (wakeBtn) {
+                wakeBtn.onclick = async () => {
+                    if (!Auth.isAccount) {
+                        Utils.toast('请先登录账号');
+                        return;
+                    }
+                    const sb = getSupabaseClient();
+                    if (!sb) return;
+                    const next = !this._wakeEnabled;
+                    const { data, error } = await sb.rpc('wake_mgmt', { p_enabled: next });
+                    if (error) {
+                        console.error('[唤醒] rpc error:', error.message);
+                        Utils.toast('切换失败，请重试');
+                        return;
+                    }
+                    this._wakeEnabled = data === true;
+                    this._updateWakeBtn(wakeBtn, wakeDesc);
+                    Utils.toast(this._wakeEnabled ? '已启用唤醒' : '已关闭唤醒');
+                };
+            }
         }
 
         await this._fetchApiKey(false);
+        // [v216] 弹窗打开时同步唤醒开关状态（游客分支已提前 return，此处必为账号）
+        if (wakeBtn) {
+            wakeBtn.style.display = '';
+            if (wakeDesc) wakeDesc.style.display = '';
+            try {
+                const sb = getSupabaseClient();
+                if (sb) {
+                    const { data } = await sb.rpc('wake_mgmt', { p_enabled: null });
+                    this._wakeEnabled = data === true;
+                }
+            } catch (e) {
+                console.error('[唤醒] 状态加载失败:', e);
+                this._wakeEnabled = false;
+            }
+            this._updateWakeBtn(wakeBtn, wakeDesc);
+        }
+    },
+
+    // [v216] 唤醒按钮 UI（关闭=灰字"启用唤醒"；开启=高亮"已启用唤醒"）
+    _updateWakeBtn(wakeBtn, wakeDesc) {
+        if (!wakeBtn) return;
+        wakeBtn.textContent = this._wakeEnabled ? '已启用唤醒' : '启用唤醒';
+        wakeBtn.style.borderColor = this._wakeEnabled ? '#07C160' : '';
+        wakeBtn.style.color = this._wakeEnabled ? '#07C160' : '';
     },
 
     async _fetchApiKey(regenerate) {

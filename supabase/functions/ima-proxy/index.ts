@@ -360,6 +360,8 @@ Deno.serve(async (req) => {
     const isDirect = !!rawApiKey;
     const friendName = typeof friend_name === 'string' ? friend_name.trim().slice(0, 50) : '';
     let directUserId = '';
+    // [v216 账号级唤醒开关] 直连身份同时取 wake_enabled（仅 wake 模式用；正常聊天不受影响）
+    let directWakeEnabled = false;
 
     let user: any = null;
     if (isDirect) {
@@ -369,12 +371,15 @@ Deno.serve(async (req) => {
       }
       try {
         const akResp = await fetch(
-          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id`,
+          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,wake_enabled`,
           { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
         );
         if (akResp.ok) {
           const akRows = await akResp.json();
-          directUserId = (Array.isArray(akRows) && akRows[0] && akRows[0].id) ? akRows[0].id : '';
+          if (Array.isArray(akRows) && akRows[0] && akRows[0].id) {
+            directUserId = akRows[0].id;
+            directWakeEnabled = akRows[0].wake_enabled === true;
+          }
         }
       } catch (e: any) {
         console.warn('api_key 校验异常:', e.message);
@@ -450,7 +455,7 @@ Deno.serve(async (req) => {
       }
       const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
       const wakeResult = await handleWake(
-        supabaseUrl, serviceRoleKey, directUserId,
+        supabaseUrl, serviceRoleKey, directUserId, directWakeEnabled,
         Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
         Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
         appConfig
@@ -1441,10 +1446,10 @@ function getBeijingHour(): number {
 }
 
 async function handleWake(
-  supabaseUrl: string, serviceRoleKey: string, userId: string,
+  supabaseUrl: string, serviceRoleKey: string, userId: string, accountWakeEnabled: boolean,
   llmKey: string, llmBase: string, llmModel: string,
   appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }
-): Promise<{ wake: { session_id: string; friend_name: string; text: string }[]; skipped: { session_id: string; friend_name: string; reason: string }[]; window: string; disabled: boolean }> {
+): Promise<{ wake: { session_id: string; friend_name: string; text: string }[]; skipped: { session_id: string; friend_name: string; reason: string }[]; window: string; disabled: boolean; account_disabled?: boolean }> {
   const q = appConfig.quota_params || {};
   const enabled = q.wake_enabled !== 0; // 0=关；其余（含缺省）视为开
   // 注意用 ?? 而非 ||：wake_start_hour=0（0 点开始）是合法值，|| 会把 0 回退默认
@@ -1453,6 +1458,8 @@ async function handleWake(
   const endH = Math.min(24, Math.max(0, Number(q.wake_end_hour ?? 24)));
   const windowText = `${String(startH).padStart(2, '0')}:00-${String(endH).padStart(2, '0')}:00`;
   if (!enabled) return { wake: [], skipped: [], window: windowText, disabled: true };
+  // [v216 账号级开关] 全局开 + 账号开（AND）才生效；账号关 → 返回 account_disabled 便于脚本区分
+  if (!accountWakeEnabled) return { wake: [], skipped: [], window: windowText, disabled: false, account_disabled: true };
 
   const bjHour = getBeijingHour();
   if (!(bjHour >= startH && bjHour < endH)) {
