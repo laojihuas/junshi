@@ -332,13 +332,16 @@ Deno.serve(async (req) => {
     currentRequestId = crypto.randomUUID();
 
     // [v209 直连 API] 注意用 let：session_id/history 可能在直连分支被重新赋值（会话解析/补历史）
-    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name } = await req.json();
+    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
     // [v209 直连 API] 新增可选参数：
     //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
     //   friend_name  直连按昵称查/建会话（免 session_id）；仅 api_key 模式生效
+    // [v210 主动唤醒] mode='wake'：直连专属，无需 query，脚本拉取"该主动唤醒的会话名单"
+    //   （判定规则见 handleWake；网页模式传入 mode=wake 直接拒绝，不影响主架构）
 
-    if (!query || !query.trim()) {
+    // [v210 主动唤醒] wake 模式无需 query（脚本零状态拉名单）
+    if (mode !== 'wake' && (!query || !query.trim())) {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
     }
 
@@ -436,6 +439,25 @@ Deno.serve(async (req) => {
       if (!identityKey) {
         return new Response(JSON.stringify({ error: 'device_required', message: '缺少设备标识' }), { headers, status: 401 });
       }
+    }
+
+    // [v210 主动唤醒] 直连专属分支：mode='wake' → 拉取该账号"该主动唤醒的会话名单"
+    //   放在配额检查之前：系统唤醒不消耗用户配额；不读记忆卡/不走主链路（纯辅助，不影响主架构）
+    //   网页模式（无 api_key）请求 wake → 拒绝；脚本不启动 = 无调用 = 无副作用（打空常态）
+    if (mode === 'wake') {
+      if (!isDirect) {
+        return new Response(JSON.stringify({ error: 'wake_direct_only', message: '唤醒模式仅限 api_key 直连' }), { headers, status: 400 });
+      }
+      const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
+      const wakeResult = await handleWake(
+        supabaseUrl, serviceRoleKey, directUserId,
+        Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
+        Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
+        appConfig
+      );
+      // [v186] 唤醒话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
+      await persistLlUsage();
+      return new Response(JSON.stringify(wakeResult), { headers, status: 200 });
     }
 
     // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务；双身份）
@@ -1387,6 +1409,151 @@ function detectSelfDisclosure(query: string): string | null {
 }
 
 // ============================================================
+// ============================================================
+// [v210 主动唤醒] 直连专属：遍历该账号会话，判定"沉默期"唤醒（用户拍板 v210）
+//   规则：
+//     ① 仅 api_key 直连（调用方已校验 isDirect）；网页模式不受影响
+//     ② 阶段：memory_card.profile.stage ∈ WAKABLE_STAGES（吸引/舒适/恋爱 = "吸引阶段以上"）
+//     ③ 沉默：最后一条消息距今 > wake_hours（默认 22h）
+//     ④ 时间窗：北京时间 [startH, endH)（默认 10:00-24:00；end=24 含到 23:59）
+//     ⑤ 只唤醒一次：last_wake_at 为空或 < 最后一条消息时间
+//        （唤醒后她回了新消息 → 新一轮沉默期才可再唤醒）
+//     ⑥ 话术 = LLM 新话题（配合当前时间，不接旧话题）；生成即落库
+//        chat_messages(role=assistant) + 置 last_wake_at → 直连 readDirectHistory
+//        上下文连续（用户核心诉求："不进上下文后面接话不流畅"）
+//   设计取舍：生成即置位（不等脚本回执）——脚本不启动 = 无调用 = 无副作用（打空常态）；
+//   脚本启动但发送失败属极少数，由脚本侧降级提示，不为此加回执链路（保持纯辅助定位）
+// ============================================================
+// [v210 主动唤醒] 可唤醒阶段："吸引阶段以上"= 已进入推进的关系
+//   新三阶段：吸引/舒适/恋爱；旧六阶段存量：追求/挽回/暧昧（normalize 后属舒适/恋爱）
+//   注意：不调 normalizeStage（它把"陌生/朋友"并入吸引 → 未开始的关系不该被唤醒）
+const WAKABLE_STAGES = new Set(['吸引', '舒适', '恋爱', '追求', '挽回', '暧昧']);
+
+function getBeijingHour(): number {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai', hour: 'numeric', hourCycle: 'h23',
+    }).formatToParts(new Date());
+    return parseInt(parts.find((p) => p.type === 'hour')?.value || '0', 10);
+  } catch {
+    return new Date().getHours();
+  }
+}
+
+async function handleWake(
+  supabaseUrl: string, serviceRoleKey: string, userId: string,
+  llmKey: string, llmBase: string, llmModel: string,
+  appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }
+): Promise<{ wake: { session_id: string; friend_name: string; text: string }[]; skipped: { session_id: string; friend_name: string; reason: string }[]; window: string; disabled: boolean }> {
+  const q = appConfig.quota_params || {};
+  const enabled = q.wake_enabled !== 0; // 0=关；其余（含缺省）视为开
+  // 注意用 ?? 而非 ||：wake_start_hour=0（0 点开始）是合法值，|| 会把 0 回退默认
+  const hours = Math.max(1, Math.min(720, Number(q.wake_hours ?? 22)));
+  const startH = Math.min(24, Math.max(0, Number(q.wake_start_hour ?? 10)));
+  const endH = Math.min(24, Math.max(0, Number(q.wake_end_hour ?? 24)));
+  const windowText = `${String(startH).padStart(2, '0')}:00-${String(endH).padStart(2, '0')}:00`;
+  if (!enabled) return { wake: [], skipped: [], window: windowText, disabled: true };
+
+  const bjHour = getBeijingHour();
+  if (!(bjHour >= startH && bjHour < endH)) {
+    return { wake: [], skipped: [], window: windowText, disabled: false };
+  }
+
+  // 1) 拉该账号全部会话（memory_card 含 stage；last_wake_at 防重）
+  const sessResp = await fetch(
+    `${supabaseUrl}/rest/v1/chat_sessions?user_id=eq.${encodeURIComponent(userId)}&select=id,friend_name,memory_card,last_wake_at&limit=500`,
+    { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+  );
+  if (!sessResp.ok) {
+    return { wake: [], skipped: [], window: windowText, disabled: false };
+  }
+  const sessions: any[] = await sessResp.json().catch(() => []);
+
+  // 2) 阶段过滤（吸引阶段以上）+ 逐会话查最后一条消息时间
+  const threshold = Date.now() - hours * 3600 * 1000;
+  const candidates: { id: string; name: string; stage: string; lastAt: number; card: any }[] = [];
+  for (const s of Array.isArray(sessions) ? sessions : []) {
+    if (!s || !s.id) continue;
+    // memory_card 是 text 列（存 JSON 字符串），REST 返回 string；兼容 object（PostgREST 解析）
+    let card: any = {};
+    const rawCard = s.memory_card;
+    if (typeof rawCard === 'string' && rawCard.trim()) {
+      try { card = JSON.parse(rawCard); } catch (e) { card = {}; }
+    } else if (rawCard && typeof rawCard === 'object') {
+      card = rawCard;
+    }
+    const stage = (card.profile && card.profile.stage) ? String(card.profile.stage) : '';
+    if (!WAKABLE_STAGES.has(stage)) continue;
+    // 逐会话查最后一条消息（候选少：个人账号阶段≥吸引的最多十来个）
+    let lastAt: number | null = null;
+    try {
+      const mResp = await fetch(
+        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(s.id)}&select=created_at&order=created_at.desc&limit=1`,
+        { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+      );
+      if (mResp.ok) {
+        const rows = await mResp.json();
+        if (Array.isArray(rows) && rows[0] && rows[0].created_at) lastAt = new Date(rows[0].created_at).getTime();
+      }
+    } catch (e: any) {
+      console.warn('wake lastAt failed:', e.message);
+    }
+    if (lastAt === null) continue;      // 无消息会话（理论不会出现）跳过
+    if (lastAt > threshold) continue;   // 未到沉默阈值
+    const lastWakeAt = s.last_wake_at ? new Date(s.last_wake_at).getTime() : 0;
+    if (lastWakeAt >= lastAt) continue; // 本次沉默期已唤醒过（唤醒发生在最后消息之后）
+    candidates.push({ id: s.id, name: s.friend_name || '', stage, lastAt, card });
+  }
+
+  // 3) 逐个生成唤醒话术（新话题，配合当前时间）+ 落库置位
+  const wake: { session_id: string; friend_name: string; text: string }[] = [];
+  const skipped: { session_id: string; friend_name: string; reason: string }[] = [];
+  for (const c of candidates.slice(0, 10)) { // 上限 10 会话/次，防脚本一次拉爆 LLM 时长
+    try {
+      const timeText = formatCurrentTime();
+      const profile = c.card.profile || {};
+      const personaBits = [profile.personality, profile.relationship_note]
+        .filter((x) => typeof x === 'string' && x.trim()).slice(0, 2);
+      const persona = personaBits.length ? `（对方画像：${personaBits.join('；').slice(0, 80)}）` : '';
+      const sys = '你是用户本人，一个有趣、有神秘感、有底线的真人。';
+      const prompt = `现在需要给「${c.name}」发一条主动唤醒的消息。\n要求：\n- 开启一个新话题，不要接着旧话题聊；\n- 配合当前时间（${timeText}）自然切入；\n- 口语化、像真人发微信，8-20 字，无标点，空格断句；\n- 直接输出消息本体，不要解释、不要前缀、不要引号。${persona}`;
+      const content = await llmChat(llmKey, llmBase, llmModel, [
+        { role: 'system', content: sys },
+        { role: 'user', content: prompt },
+      ], { temperature: 0.58, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.35, _stage: 'wake' });
+      const text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      if (!text) {
+        skipped.push({ session_id: c.id, friend_name: c.name, reason: 'empty' });
+        continue;
+      }
+      // 落库（assistant = 已发话术 → 直连 readDirectHistory 上下文连续）+ 置 last_wake_at（防重）
+      const nowIso = new Date().toISOString();
+      try {
+        await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, created_at: nowIso }]),
+        });
+        await fetch(`${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(c.id)}`, {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ updated_at: nowIso, last_wake_at: nowIso }),
+        });
+      } catch (e: any) {
+        console.warn('wake persist failed:', e.message);
+        skipped.push({ session_id: c.id, friend_name: c.name, reason: 'persist_failed' });
+        continue;
+      }
+      wake.push({ session_id: c.id, friend_name: c.name, text });
+    } catch (e: any) {
+      console.warn(`wake llm failed (${c.name}):`, e.message);
+      skipped.push({ session_id: c.id, friend_name: c.name, reason: 'llm_failed' });
+    }
+  }
+
+  return { wake, skipped, window: windowText, disabled: false };
+}
+
 // [v209 直连 API] 三个辅助函数（service_role 通道，绕过 RLS）
 //   仅直连模式（api_key）使用；网页模式走前端 JWT + RLS，不受影响
 // ============================================================
@@ -3049,10 +3216,10 @@ function resolveStageLlmParams(stage?: string | null): { temperature: number; pr
   return DEFAULT_STAGE_LLM;
 }
 
-async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams }> {
+async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Promise<{ system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }> {
   try {
     const resp = await fetch(
-      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params`,
+      `${supabaseUrl}/rest/v1/app_config?id=eq.1&select=system_prompt,llm_params,quota_params`,
       { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
     );
     const rows = resp.ok ? await resp.json() : [];
@@ -3060,6 +3227,14 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     let raw: any = {};
     if (row.llm_params) {
       try { raw = JSON.parse(row.llm_params); } catch (e) { raw = {}; }
+    }
+    // [v210 主动唤醒] quota_params：唤醒开关/阈值/时间窗（后台"配额参数"卡可调）
+    let rawQp: Record<string, any> = {};
+    if (row.quota_params) {
+      try {
+        const parsed = JSON.parse(row.quota_params);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) rawQp = parsed;
+      } catch (e) { rawQp = {}; }
     }
     // [v10] thinking_mode：后台默认档（枚举校验，非法回退 off）
     // [v77] 其余字段（temperature/惩罚系数/max_tokens）不再读取，由 STAGE_LLM_PARAMS 接管
@@ -3076,10 +3251,11 @@ async function fetchAppConfig(supabaseUrl: string, serviceRoleKey: string): Prom
     return {
       system_prompt: (typeof row.system_prompt === 'string') ? row.system_prompt : '',
       llm_params: { thinking_mode: tm, thinking_budget: tb, mode },
+      quota_params: rawQp,
     };
   } catch (e: any) {
     console.warn('fetchAppConfig failed:', e.message);
-    return { system_prompt: '', llm_params: { ...DEFAULT_LLM_PARAMS } };
+    return { system_prompt: '', llm_params: { ...DEFAULT_LLM_PARAMS }, quota_params: {} };
   }
 }
 

@@ -26,6 +26,7 @@ const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
 };
 
 // [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（v20260813：加 guest_daily；cap 允许 0=不封顶）
+// [v210 主动唤醒] 新增 wake_* 四键（唤醒配置并入配额参数卡，随"保存配额参数"一并提交）
 const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   guest_daily: [1, 10000],        // 游客每日（默认 20）
   free_daily_tier1: [1, 10000],   // 注册用户 0-3 天（默认 50）
@@ -34,6 +35,10 @@ const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   vip_daily_limit: [1, 10000],    // 激活码日配额（默认 500）
   invite_bonus_each: [1, 1000],   // 邀请奖励每次（默认 50）
   invite_bonus_cap: [0, 10000],   // 邀请累计封顶（默认 0=不封顶）
+  wake_enabled: [0, 1],           // [v210] 主动唤醒总开关（0=关 1=开，后台 checkbox；默认 1）
+  wake_hours: [1, 720],           // [v210] 沉默阈值小时（默认 22）
+  wake_start_hour: [0, 24],       // [v210] 唤醒时间窗开始（北京时间，默认 10）
+  wake_end_hour: [0, 24],         // [v210] 唤醒时间窗结束（北京时间，默认 24）
 };
 function validateQuotaParams(v: any): string | null {
   if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'quota_params 必须为 JSON 对象';

@@ -501,6 +501,30 @@
                         <input id="qp-invite-cap" class="input input-num" type="number" min="0" max="10000" style="margin-top:4px;width:100%;">
                     </label>
                 </div>
+                <!-- [v210 主动唤醒] 直连专属辅助功能（配置并入 quota_params，随下方"保存配额参数"一并提交） -->
+                <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border, #333);">
+                    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">主动唤醒（直连专属 · v210）</div>
+                    <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
+                        仅 Shizuku 脚本 api_key 直连模式生效，网页版完全不受影响。判定：该会话最后一条消息距今超过
+                        <b>沉默阈值</b> 小时（默认 22h），且当前处于 <b>时间窗</b>（北京时间，默认 10:00-24:00，跳过休息时段）、
+                        关系阶段为吸引/舒适/恋爱时，云端生成一条<b>新话题</b>唤醒话术（配合当前时间）→ 脚本发送 → 自动进上下文。
+                        每个沉默期只唤醒一次；对方回复后重新计时。脚本不常开 = 打空常态，无副作用。
+                    </p>
+                    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;align-items:end;">
+                        <label style="font-size:12px;color:var(--muted);display:block;">总开关
+                            <input id="wake-enabled" type="checkbox" checked style="margin-top:8px;transform:scale(1.3);">
+                        </label>
+                        <label style="font-size:12px;color:var(--muted);display:block;">沉默阈值（小时）
+                            <input id="wake-hours" class="input input-num" type="number" min="1" max="720" style="margin-top:4px;width:100%;">
+                        </label>
+                        <label style="font-size:12px;color:var(--muted);display:block;">时间窗开始（时）
+                            <input id="wake-start" class="input input-num" type="number" min="0" max="24" style="margin-top:4px;width:100%;">
+                        </label>
+                        <label style="font-size:12px;color:var(--muted);display:block;">时间窗结束（时，24=到24点）
+                            <input id="wake-end" class="input input-num" type="number" min="0" max="24" style="margin-top:4px;width:100%;">
+                        </label>
+                    </div>
+                </div>
                 <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
                     <button id="quota-save-btn" class="btn btn-primary">保存配额参数</button>
                     <span id="quota-status" style="font-size:12px;color:var(--muted);"></span>
@@ -913,6 +937,11 @@
                 document.getElementById('qp-vip').value = qp.vip_daily_limit ?? 500;
                 document.getElementById('qp-invite-each').value = qp.invite_bonus_each ?? 50;
                 document.getElementById('qp-invite-cap').value = qp.invite_bonus_cap ?? 0;
+                // [v210 主动唤醒] 填充（缺省回退默认：开 / 22h / 10:00-24:00）
+                document.getElementById('wake-enabled').checked = (qp.wake_enabled ?? 1) !== 0;
+                document.getElementById('wake-hours').value = qp.wake_hours ?? 22;
+                document.getElementById('wake-start').value = qp.wake_start_hour ?? 10;
+                document.getElementById('wake-end').value = qp.wake_end_hour ?? 24;
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -1027,10 +1056,15 @@
                 vip_daily_limit: readInt('qp-vip'),
                 invite_bonus_each: readInt('qp-invite-each'),
                 invite_bonus_cap: readInt('qp-invite-cap'),
+                // [v210 主动唤醒] 随配额一并保存（prompt-update 白名单已放行）
+                wake_enabled: document.getElementById('wake-enabled').checked ? 1 : 0,
+                wake_hours: readInt('wake-hours'),
+                wake_start_hour: readInt('wake-start'),
+                wake_end_hour: readInt('wake-end'),
             };
             for (const [k, v] of Object.entries(quota_params)) {
-                // cap 允许 0（不封顶），其余需 1~10000
-                const min = k === 'invite_bonus_cap' ? 0 : 1;
+                // cap 允许 0（不封顶）；唤醒时间窗起止允许 0-24；其余需 1~10000
+                const min = (k === 'invite_bonus_cap' || k === 'wake_start_hour' || k === 'wake_end_hour') ? 0 : 1;
                 if (!Number.isInteger(v) || v < min || v > 10000) { toast('配额参数需为 ' + min + '~10000 的整数'); return; }
             }
             saveBtn.disabled = true;
