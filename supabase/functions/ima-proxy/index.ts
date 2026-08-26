@@ -858,7 +858,7 @@ Deno.serve(async (req) => {
         // [v206 WB版] WB 同样单次主回复：分诊/策略已前置到提示词层，不需要重试兜底
         if (!isLite && !isWb && (dupHit || timeHit) && llmKey) {
           const notes: string[] = [];
-          if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么延续你上轮立过的框架（赌注/约定/梗）往下推进，要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
+          if (dupHit) notes.push(`你刚才生成的那句话与【你之前发过的话】重复了。严禁重复：要么顺着上轮自然延伸（聊到相关再带一嘴旧梗，严禁翻旧账/讨债式催兑现），要么换一个完全不同的角度，不得换着词再说一遍同样的意思或同样的套路。`);
           if (timeHit) notes.push(`你刚才生成的那句话里的时刻（${timeHit}）与【当前时间】不符（现在是${formatCurrentTime()}）。以【当前时间】为准重写，不得再出现与现在时段矛盾的词。`);
           // [v199 重试原因落库] _stage 按触发原因标记（可多因合并），llm_usage_log 直接 group by 统计
           const retryReasons: string[] = [];
@@ -1114,7 +1114,7 @@ async function buildLogicSummary(
     .join('\n');
   const prompt = `你是聊天逻辑记忆助手。把最近这段对话压缩成一条逻辑记忆（合计 ≤${LOGIC_SUMMARY_MAX} 字），供下一轮回复保持前后一致、知道往哪推进。\n`
     + `输出 JSON（只输出 JSON，不要其他文字）：\n`
-    + `{"text":"过去+现在（≤60字）：正在聊什么；立过的约定/赌注/承诺（引用关键短语）；她表明的态度；我方刚说过的话要点",`
+    + `{"text":"过去+现在（≤60字）：正在聊什么；立过的约定/赌注/承诺（若有则带过一句，别当成债务去追）；她表明的态度；我方刚说过的话要点",`
     + `"direction":"未来推进线索（≤40字）：哪条线索最有价值、可往哪延伸（如"猫是她的高频话题，可往性格或邀约看猫方向带"）；她敷衍/冷淡/无推进价值则留空字符串"}\n`
     + (prevSummary ? `上一轮脉络（作延续参考，本轮在其基础上更新）：${truncateText(prevSummary, 120)}\n` : '')
     + `最近对话：\n${recentText}`;
@@ -1829,8 +1829,9 @@ async function updateMemoryCard(ctx: {
       if (!profile.age && prev.age) {
         profile.age = prev.age;
       }
+      // [v225] 地区保护同样过 cleanRegion：存量"广西"旧值不再回流（好友列表不再显示）
       if (!profile.region && prev.region) {
-        profile.region = prev.region;
+        profile.region = cleanRegion(prev.region);
       }
       card.profile = profile;
       // [v57] 长期事实合并（去重 + 上限淘汰）
@@ -1851,6 +1852,13 @@ async function updateMemoryCard(ctx: {
   }
 
   await writeMemoryCard(ctx.supabaseUrl, ctx.token, ctx.anonKey, ctx.sessionId, card);
+}
+
+// [v225 地区排除] 对方"住哪"记录时排除广西：纯"广西"不记录（太宽泛无标签价值）；
+//   "广西XX"（如"广西南宁"）剥离前缀只记具体地（"南宁"）；其他地区原样保留
+function cleanRegion(r: string): string {
+  if (!r) return '';
+  return r.replace(/^广西/, '').trim();
 }
 
 // [v6 L2] LLM 提取/合并对方画像（输出标准化 JSON）
@@ -1896,7 +1904,8 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
         anchor: typeof p.anchor === 'string' ? p.anchor.slice(0, 20) : '',
         // [v83] 年龄/地区：话题"年龄""住哪"聊出结果时提取的具体值，供好友列表展示
         age: typeof p.age === 'string' ? p.age.trim().slice(0, 10) : '',
-        region: typeof p.region === 'string' ? p.region.trim().slice(0, 20) : '',
+        // [v225] 广西排除：cleanRegion 剥离"广西"前缀，纯"广西"→''（不记录）
+        region: cleanRegion(typeof p.region === 'string' ? p.region.trim().slice(0, 20) : ''),
       },
       facts,
     };
@@ -2380,7 +2389,7 @@ function buildSystemContent(opts: {
   // [v20260813 降本] 去重："不重复/自洽"已由【角色定位】首段声明，此处不再复述；
   //   字数上限以战术前导 GLOBAL_TACTIC_PREAMBLE（lite）/ 全局原则 GLOBAL_PRINCIPLES（full）为唯一权威（≤20字）
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
-    + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度。\n`
+    + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺，聊到相关话题时自然带一嘴即可（如"零食赌注"→轻描淡写接个梗），严禁翻旧账、严禁讨债式催兑现（"说好的呢""你欠我的"一律禁止）；不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲啊 我正好有办法治你的无聊"（15字）。`;
 
@@ -2534,7 +2543,7 @@ function buildSystemContent(opts: {
     d += `\n\n【逻辑记忆】(最近对话的逻辑脉络，系统级既定事实基准)\n${logicSummary}\n`
       + (direction ? `- 【推进方向】${direction}——仅作跨轮推进线索：本轮能自然带就往这个方向带，带不动不强求。\n` : '')
       + `- 这是已经发生的既定事实：后续回复必须与此衔接一致，不得自相矛盾、不得推翻、不得假装不知道。\n`
-      + `- 立过的约定/赌注/梗/承诺必须延续推进（如"零食赌注"→记账、加码、催兑现），换话题也不许丢弃。`;
+      + `- 立过的约定/赌注/梗/承诺，聊到相关话题时自然带一嘴即可；严禁翻旧账、严禁讨债式催兑现（"说好的呢""你欠我的"一律禁止）。`;
   }
 
   // [P0-3] 去冗余：llmHistory ≥4 条时，其内容已含对方近期话/自己发过话，不再注入

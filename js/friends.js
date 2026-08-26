@@ -737,8 +737,8 @@ const Friends = {
             Utils.toast('请先登录');
             return;
         }
-        if (text.length > 300) {
-            Utils.toast('简介不能超过 300 字');
+        if (text.length > 500) {
+            Utils.toast('简介不能超过 500 字');
             return;
         }
 
