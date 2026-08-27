@@ -547,6 +547,8 @@ Deno.serve(async (req) => {
     const rawQuery = typeof query === 'string' ? query.trim() : '';
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
+    // [v217 自然转场] 对方消息"无法理解"检测（纯规则）：命中 → 本轮自然转话题，不硬接
+    const unintelligible = !switchTopic && detectUnintelligible(rawQuery);
 
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
@@ -655,6 +657,12 @@ Deno.serve(async (req) => {
           semanticKws = ['新话题', '开场白', '话题', '破冰'];
           const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
           kw.push(...hobbyKws); // 用对方聊过的兴趣词（如"川菜/电影"）当新话题方向
+        } else if (unintelligible) {
+          // [v217 自然转场] 乱码消息不拿乱码当检索词（召回必然垃圾）：
+          //   与 /换话题 同策略——检索词切"新话题"方向 + 叠对方聊过的兴趣词
+          semanticKws = ['新话题', '开场白', '话题', '破冰'];
+          const hobbyKws = extractKeywordsFromHistory(history, '', true).slice(0, 3);
+          kw.push(...hobbyKws);
         } else if (llmKey && !isLite && !isWb) {
           semanticKws = await extractSemanticKeywords(llmKey, llmBase, llmModel, query, recentUserMessages, resolveStageVocab(memoryCard));
         }
@@ -719,17 +727,20 @@ Deno.serve(async (req) => {
     // ---- LLM 主回复 ----
     // [v20260805] 简介从 profiles.bio 读取（匿名用户注册时 ensure_profile 已建行，RLS 按 user 隔离）
     // [v209 直连 API] 直连无 JWT：改用 api_key 映射的账号 id + service_role 读
+    // [v217 约会方向] 同查 date_mode（账号级约会开关），注入固定区【约会方向】块
     let userBio = '';
+    let dateMode = false;
     try {
       const bioUserId = isDirect ? directUserId : (user?.id || '');
       if (bioUserId) {
         const bioResp = await fetch(
-          `${supabaseUrl}/rest/v1/profiles?id=eq.${bioUserId}&select=bio`,
+          `${supabaseUrl}/rest/v1/profiles?id=eq.${bioUserId}&select=bio,date_mode`,
           { headers: { 'Authorization': `Bearer ${dbToken}`, 'apikey': dbKey } }
         );
         const bioList = await bioResp.json();
-        if (Array.isArray(bioList) && bioList[0] && typeof bioList[0].bio === 'string') {
-          userBio = bioList[0].bio;
+        if (Array.isArray(bioList) && bioList[0]) {
+          if (typeof bioList[0].bio === 'string') userBio = bioList[0].bio;
+          dateMode = bioList[0].date_mode === true;
         }
       }
     } catch (e: any) {
@@ -790,6 +801,11 @@ Deno.serve(async (req) => {
           anchorMode,
           // [v202 低配版] 低配：动态区只保留【参考资料】(2块×50字)，其余动态块全省
           lite: isLite,
+          // [v206 WB版] WB 同样跳过：无【措辞底线】注入
+          // [v217 自然转场] 对方消息无法理解 → 注入【自然转场】块（本轮最高优先）
+          unintelligible,
+          // [v217 约会方向] 账号级约会开关 → 固定区注入【约会方向】块
+          dateMode,
           // [v212 方案Y] full 也注入分诊+策略（替代战术卡组）；lite 不注入
           wb: isWb,
           wbTriage: !isLite ? wbTriage : null,
@@ -1017,6 +1033,10 @@ Deno.serve(async (req) => {
         open_window: switchTopic ? null : detectOpenWindow(query),
         // [v62] 切换话题模式（验证【切换话题】注入）
         switch_topic: switchTopic,
+        // [v217 自然转场] 乱码/无实义消息命中（验证【自然转场】注入；false=未命中）
+        unintelligible: unintelligible,
+        // [v217 约会方向] 账号级约会开关（验证【约会方向】块注入：true=约会推进 / false=点到为止）
+        date_mode: dateMode,
         // [v76] 会话间隔注入文本（验证时间流逝感知；''=未注入）
         last_gap: lastGapText,
         // [v76] 输出后时间校验命中词（验证时间一致性；null=未触发）
@@ -1411,6 +1431,54 @@ function detectSelfDisclosure(query: string): string | null {
     if (re.test(q)) return name;
   }
   return null;
+}
+
+// [v217 自然转场] 对方消息"无法理解"检测（纯规则零 LLM）
+//   命中 → 本轮不硬接，自然转话题（buildSystemContent 注入【自然转场】块 + 检索词切"新话题"）
+//   触发（任一）：
+//   ① 键盘乱按：连续辅音字母 ≥4（"sadkfj"）；或纯字母串 ≥4 位、非白名单、辅音占多数（"hfuwkj"）
+//   ② 纯符号/空白轰炸：无中文/字母/数字/表情 且长度 ≥3（"？？？？""。。。"）
+//   不触发：表情包（😂😂）、叠词笑声（哈哈哈哈）、正常中英文消息、互联网黑话（yyds/awsl）
+const UNINTELLIGIBLE_ALPHA_WORDS = new Set([
+  'ok', 'okay', 'kk', 'haha', 'hehe', 'xixi', 'hmm', 'emm', 'emmm', 'mm', 'momo',
+  'hi', 'hello', 'hey', 'yo', 'yes', 'no', 'yeah', 'yep', 'nope', 'lol', 'wow',
+  'cool', 'nice', 'good', 'bad', 'fine', 'sure', 'love', 'bye', 'holy', 'shit',
+  'damn', 'girl', 'xx', 'zzz', 'huh', 'aha', 'oh', 'sup', 'thx', 'tks', 'ty',
+  'yyds', 'awsl', 'xswl', 'nsdd', 'yysy', 'dbq', 'giao', 'emo', 'nb',
+]);
+
+function detectUnintelligible(query: string): boolean {
+  const q = String(query || '').trim();
+  if (!q) return false;
+  // 白名单优先：纯字母串且为常见词/黑话（hello/girl/yyds/haha）→ 一律视为可理解，直接放行
+  if (/^[a-zA-Z]{1,}$/.test(q)) {
+    if (UNINTELLIGIBLE_ALPHA_WORDS.has(q.toLowerCase())) return false;
+    // 非白名单纯字母串：① 连续辅音 ≥4 → 键盘乱按（"sadkfj"）
+    if (/[bcdfghjklmnpqrstvwxyz]{4,}/i.test(q)) return true;
+    // ①b 长度 ≥4 且辅音占多数 → 乱按拼音/乱码（"hfuwkj"）
+    if (q.length >= 4) {
+      const vowels = (q.toLowerCase().match(/[aeiou]/g) || []).length;
+      if (vowels / q.length < 0.4) return true;
+    }
+    // 短字母串（<4）非白名单：如 "skl" → 不算无法理解，交给正常流程（可能为语气词缩写）
+    return false;
+  }
+  // ② 无中文/字母/数字/表情且长度 ≥3 → 纯符号/乱码（"？？？？""。。。"）
+  const cjk = (q.match(/[\u4e00-\u9fa5]/g) || []).length;
+  const alpha = (q.match(/[a-zA-Z]/g) || []).length;
+  const digit = (q.match(/[0-9]/g) || []).length;
+  const emoji = (q.match(/\p{Extended_Pictographic}/gu) || []).length;
+  if (q.length >= 3 && (cjk + alpha + digit + emoji) === 0) return true;
+  // ③ 混在中文里的连续辅音乱码（"今天心情好fjkdls"）→ 仍是可理解的句子，不算
+  return false;
+}
+
+// [v217 自然转场] 无法理解消息的转场指令块（full/lite/wb 三分支共用）
+function buildUnintelligibleBlock(): string {
+  return `\n\n【自然转场】(本轮最高优先级，覆盖上面所有场景指令)\n`
+    + `- 她这条消息无法理解/没有实义（乱码、无意义符号、键盘乱按或半截话）——不要硬接、不要追问"什么意思"、不要顺着瞎猜瞎回。\n`
+    + `- 本轮动作：自然地把话题带到别处——顺着上一个有意义的话题轻轻延伸一句，或像想到什么似的抛一个新话题（8-20 字，带钩子/情绪/好奇心）。\n`
+    + `- 转场要像真人聊天里的自然跳转（"话说…""对了…"那种感觉）：禁止提"你发的我没看懂"这类解释，禁止道歉，禁止问号轰炸；输出只需话术本体。`;
 }
 
 // ============================================================
@@ -2135,6 +2203,11 @@ function triageMessage(query: string): WbTriage {
   const q = String(query || '').trim();
   let type: WbTriageType = 'general';
   if (!q) return { type, mood: 'neutral', signal: 'none', intent: WB_INTENT[type] };
+  // [v217 自然转场] 乱码/无实义消息：不分诊为 question（否则"？？？？"会被当提问镜像反问=硬接），
+  //   归为 general 并改意图；具体转场动作由【自然转场】块接管（覆盖分诊/策略）
+  if (detectUnintelligible(q)) {
+    return { type: 'general', mood: 'neutral', signal: 'none', intent: '她这条消息无法理解（乱码/无意义），别硬接，自然转话题' };
+  }
 
   // 攻击 > 情绪低落 > 邀约被拒 > 单字敷衍 > 破冰问候 > 表情包 > 主动邀约 > 借口 > 提问 > 分享 > 状态
   if (ATTACK_RE.test(q)) type = 'attack';
@@ -2337,6 +2410,10 @@ function buildSystemContent(opts: {
   wb?: boolean;
   // [v206 WB版] WB 消息分诊结果（由主流程 triageMessage 产出，供策略路由块组装）
   wbTriage?: WbTriage | null;
+  // [v217 自然转场] 对方消息无法理解（乱码/无实义）→ 动态区注入【自然转场】块（本轮最高优先）
+  unintelligible?: boolean;
+  // [v217 约会方向] 账号级约会开关（profiles.date_mode）→ 固定区注入【约会方向】块
+  dateMode?: boolean;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -2457,6 +2534,20 @@ function buildSystemContent(opts: {
       + `- 你回复中出现的任何个人事实（几岁/哪人/做什么/家庭情况/兴趣）必须与本简介一致，禁止自相矛盾。`;
   }
 
+  // [v217 约会方向] 账号级约会开关（profiles.date_mode，低频变化 → 固定区尾部）
+  //   开：整体默认朝"见面/约会"推进，但永远以自然为先（借话头顺势带，不硬转、不硬推）；
+  //   关：约会话题可接但点到为止，不发起真实邀约（默认）
+  if (opts.dateMode) {
+    s += `\n\n【约会方向】(账号级设置，全程生效，自然永远优先)\n`
+      + `- 你开启了"约会推进"模式：聊天整体默认朝见面/约会发展（一起吃饭/看电影/散步/某个具体活动），每轮尽量找自然的机会把话题往见面引。\n`
+      + `- 铁律（自然优先）：借她的话头顺势带（她聊吃的→"那家店下次带你去"；她说无聊→"那我带你出去转转"）；禁止生硬转折、禁止每轮都提见面、禁止她回避不接茬时还硬推——她没接就放一放，过几轮再找机会；先升温到一定舒适度再提邀约，别一上来就约。\n`
+      + `- 她主动约你/愿意出来=大进展：接住顺势敲定时间地点；她婉拒=不纠缠，轻松带过保持框架，找下个机会。`;
+  } else {
+    s += `\n\n【约会方向】(账号级设置，全程生效)\n`
+      + `- 你未开启约会推进：约会/见面话题可以聊，她主动提就自然接住聊，但点到为止——不主动发起真实邀约（不约见面/吃饭/看电影等具体安排），保持暧昧留白与神秘感。\n`
+      + `- 她如果主动约你：可以接住聊（顺势开个玩笑或说"看情况"），但同样不敲定具体时间地点，把悬念留给她。`;
+  }
+
   // [v20260813 缓存重构] ===== 动态区（注入最后一条 user 消息的【军师内参】，不占 system）=====
   //   背景：这些块每轮/低频变化，旧结构塞在 system 尾部仍会截断其后 history 的前缀缓存
   //   （时间每小时变 → history 几乎永不命中，38% 命中率元凶）。
@@ -2475,6 +2566,10 @@ function buildSystemContent(opts: {
         .join('\n\n');
       d += `\n\n【参考资料】（可复制句子/金句：保留直白措辞、可改人称/句序/加接话引子；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
     }
+    // [v217 自然转场] 乱码/无实义消息：低配也注入转场块（罕见命中，成本可忽略；不硬接乱码）
+    if (opts.unintelligible) {
+      d += buildUnintelligibleBlock();
+    }
   } else if (opts.wb) {
     // [v206 WB版] ===== WB 版动态区：消息分诊 + 策略指令 + 参考资料(5块) + 当前时间 =====
     //   复刻"分诊→策略路由→检索弹药→风格生成"链路：分诊结果与招数指令先行注入，
@@ -2488,6 +2583,10 @@ function buildSystemContent(opts: {
         .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', WB_KB_CONTENT_MAX)}`)
         .join('\n\n');
       d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+    }
+    // [v217 自然转场] 乱码/无实义消息：覆盖 WB 分诊/策略，自然转话题（时间块保持最末）
+    if (opts.unintelligible) {
+      d += buildUnintelligibleBlock();
     }
     d += `\n\n【当前时间】（所有时刻/时段表述以此为准）\n${formatCurrentTime()}`;
   } else {
@@ -2596,6 +2695,12 @@ function buildSystemContent(opts: {
   const tactic = opts.tactic || { category: 'attack' as const, phase: 'attract' as const, cardIndex: -1 };
   if (opts.wbTriage && !opts.wb) {
     d += buildWbStrategyBlock(opts.wbTriage, false);
+  }
+
+  // [v217 自然转场] 对方消息无法理解（乱码/无实义）→ 本轮最高优先自然转场：
+  //   放在分诊/策略块之后 → 覆盖其指令；与机会窗口/接住分享互斥（乱码不会命中那些模式）
+  if (opts.unintelligible) {
+    d += buildUnintelligibleBlock();
   }
 
   // [v20260809 机会窗口] 她主动问起相关话题 → 回答后必须镜像反问（最高优先，紧跟战术块）

@@ -274,6 +274,14 @@
                 <textarea id="bio-input" class="input" rows="6" maxlength="500"
                     placeholder="可填写个人简介，例如名字、年龄、爱好、经历等等，会在对话中自动引用"></textarea>
                 <div class="bio-count" id="bio-count">0 / 500</div>
+                <!-- [v217 约会方向] 账号级约会开关：开=所有话题自然朝见面发展；关=约会点到为止不做真实邀约 -->
+                <div class="api-key-section">
+                    <div class="api-key-title">约会方向</div>
+                    <div class="api-key-desc">开启后，聊天会自然往见面/约会方向推进（借话头顺势带，不硬转）；关闭时约会话题点到为止，不发起真实邀约。默认关闭。</div>
+                    <div class="api-key-row">
+                        <button id="date-mode-btn" class="btn btn-outline btn-sm">开启约会模式</button>
+                    </div>
+                </div>
                 <!-- [v209 直连 API] 脚本直连令牌：Shizuku 脚本免登录调军师后端用，等同账号凭证 -->
                 <div class="api-key-section">
                     <div class="api-key-title">API Key（脚本直连）</div>

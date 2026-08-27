@@ -601,6 +601,8 @@ const Friends = {
 
         // [v209 直连 API] 打开弹窗时同步加载 API Key（仅注册账号）
         this._loadApiKey();
+        // [v217 约会方向] 打开弹窗时同步约会开关状态（游客与账号均可用）
+        this._loadDateMode();
     },
 
     // [v209 直连 API] 获取/展示 API Key（脚本直连令牌）
@@ -697,6 +699,48 @@ const Friends = {
         wakeBtn.textContent = this._wakeEnabled ? '已启用唤醒' : '启用唤醒';
         wakeBtn.style.borderColor = this._wakeEnabled ? '#07C160' : '';
         wakeBtn.style.color = this._wakeEnabled ? '#07C160' : '';
+    },
+
+    // [v217 约会方向] 加载/切换约会开关（profiles.date_mode，RPC date_mode_mgmt，游客与账号均可用）
+    //   开 = 所有话题自然往见面/约会发展（不硬转）；关 = 约会点到为止不做真实邀约
+    async _loadDateMode() {
+        const btn = document.getElementById('date-mode-btn');
+        if (!btn) return;
+        if (!this._dateModeBound) {
+            this._dateModeBound = true;
+            btn.onclick = async () => {
+                const sb = getSupabaseClient();
+                if (!sb) { Utils.toast('请先登录'); return; }
+                const next = !this._dateMode;
+                const { data, error } = await sb.rpc('date_mode_mgmt', { p_enabled: next });
+                if (error) {
+                    console.error('[约会方向] rpc error:', error.message);
+                    Utils.toast('切换失败，请重试');
+                    return;
+                }
+                this._dateMode = data === true;
+                this._updateDateModeBtn(btn);
+                Utils.toast(this._dateMode ? '已开启约会模式：聊天自然往见面发展' : '已关闭约会模式：约会点到为止');
+            };
+        }
+        const sb = getSupabaseClient();
+        if (!sb) return;
+        try {
+            const { data } = await sb.rpc('date_mode_mgmt', { p_enabled: null });
+            this._dateMode = data === true;
+        } catch (e) {
+            console.error('[约会方向] 状态加载失败:', e);
+            this._dateMode = false;
+        }
+        this._updateDateModeBtn(btn);
+    },
+
+    // [v217] 约会按钮 UI（关闭=灰字"开启约会模式"；开启=高亮"已开启约会模式"）
+    _updateDateModeBtn(btn) {
+        if (!btn) return;
+        btn.textContent = this._dateMode ? '已开启约会模式' : '开启约会模式';
+        btn.style.borderColor = this._dateMode ? '#07C160' : '';
+        btn.style.color = this._dateMode ? '#07C160' : '';
     },
 
     async _fetchApiKey(regenerate) {
