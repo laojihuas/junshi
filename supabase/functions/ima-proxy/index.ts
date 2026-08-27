@@ -621,6 +621,10 @@ Deno.serve(async (req) => {
     let anchorMode: 'full' | 'light' | 'none' = 'none';
     // [v195 逻辑记忆] 本轮生成的逻辑脉络（_debug 用；updateMemoryCard 前赋值，随卡落库）
     let logicSummary: { text: string; direction: string } | null = null;
+    // [v218 经历库联想] 本轮命中的经历条目（_debug 用；提到顶层防作用域事故，块内赋值）
+    let storyHit: { label: string; line: string } | null = null;
+    // [v218 经历库语义兜底] 本轮是否触发"挑一条经历带出"轻提醒（_debug 用）
+    let storyNudge = false;
 
     // [v206 WB版] 消息分诊（纯规则零 LLM，先于检索执行）：
     //   复刻"消息分诊"层——识别消息类型/情绪/兴趣信号 → 驱动检索词与策略路由
@@ -728,19 +732,22 @@ Deno.serve(async (req) => {
     // [v20260805] 简介从 profiles.bio 读取（匿名用户注册时 ensure_profile 已建行，RLS 按 user 隔离）
     // [v209 直连 API] 直连无 JWT：改用 api_key 映射的账号 id + service_role 读
     // [v217 约会方向] 同查 date_mode（账号级约会开关），注入固定区【约会方向】块
+    // [v218 经历库] 同查 story_bank（生活经历库，独立于 bio），注入【经历库】块
     let userBio = '';
     let dateMode = false;
+    let storyBank = '';
     try {
       const bioUserId = isDirect ? directUserId : (user?.id || '');
       if (bioUserId) {
         const bioResp = await fetch(
-          `${supabaseUrl}/rest/v1/profiles?id=eq.${bioUserId}&select=bio,date_mode`,
+          `${supabaseUrl}/rest/v1/profiles?id=eq.${bioUserId}&select=bio,date_mode,story_bank`,
           { headers: { 'Authorization': `Bearer ${dbToken}`, 'apikey': dbKey } }
         );
         const bioList = await bioResp.json();
         if (Array.isArray(bioList) && bioList[0]) {
           if (typeof bioList[0].bio === 'string') userBio = bioList[0].bio;
           dateMode = bioList[0].date_mode === true;
+          if (typeof bioList[0].story_bank === 'string') storyBank = bioList[0].story_bank;
         }
       }
     } catch (e: any) {
@@ -774,6 +781,18 @@ Deno.serve(async (req) => {
           if (hitThis) anchorMode = 'full';
           else if (!hitRecent && userTexts.length % 4 === 0) anchorMode = 'light';
         }
+    // [v218 经历库联想] 对方消息与经历条目关键词重叠 → 轻提醒（纯规则零 LLM，命中才注入）
+    //   低配版跳过（保持零动态机制）；WB 版也注入（经历=身份流露，对策略无冲突）
+    storyHit = null;
+    if (!switchTopic && storyBank && !isLite) {
+      storyHit = matchStoryBank(query, storyBank);
+    }
+    // [v218 经历库语义兜底] 无精准条目命中，但她聊到生活/吃喝玩乐话题 → 轻提醒挑最搭的一条
+    //   用户原例："刚才在喝下午茶"（无关键词重叠）→ 提醒后 LLM 自然带出光大喜茶
+    storyNudge = false;
+    if (!switchTopic && storyBank && !isLite && !storyHit && !unintelligible) {
+      storyNudge = STORY_NUDGE_RE.test(String(query || ''));
+    }
         const built = buildSystemContent({
           systemPrompt: effectivePrompt,
           userBio,
@@ -806,6 +825,12 @@ Deno.serve(async (req) => {
           unintelligible,
           // [v217 约会方向] 账号级约会开关 → 固定区注入【约会方向】块
           dateMode,
+          // [v218 经历库] 生活经历库（固定区【经历库】块）
+          storyBank,
+          // [v218 经历库联想] 本轮命中的经历条目（动态轻提醒；null=未命中不注入）
+          storyHit,
+          // [v218 经历库语义兜底] 本轮是否触发"挑一条经历带出"轻提醒（无精准命中时的兜底）
+          storyNudge,
           // [v212 方案Y] full 也注入分诊+策略（替代战术卡组）；lite 不注入
           wb: isWb,
           wbTriage: !isLite ? wbTriage : null,
@@ -1037,6 +1062,10 @@ Deno.serve(async (req) => {
         unintelligible: unintelligible,
         // [v217 约会方向] 账号级约会开关（验证【约会方向】块注入：true=约会推进 / false=点到为止）
         date_mode: dateMode,
+        // [v218 经历库] 经历库联想命中（验证【经历库】轻提醒注入；null=未命中）
+        story_hit: storyHit ? { label: storyHit.label } : null,
+        // [v218 经历库语义兜底] 无精准命中时的"挑一条带出"提醒（验证注入；false=未触发）
+        story_nudge: storyNudge,
         // [v76] 会话间隔注入文本（验证时间流逝感知；''=未注入）
         last_gap: lastGapText,
         // [v76] 输出后时间校验命中词（验证时间一致性；null=未触发）
@@ -1479,6 +1508,44 @@ function buildUnintelligibleBlock(): string {
     + `- 她这条消息无法理解/没有实义（乱码、无意义符号、键盘乱按或半截话）——不要硬接、不要追问"什么意思"、不要顺着瞎猜瞎回。\n`
     + `- 本轮动作：自然地把话题带到别处——顺着上一个有意义的话题轻轻延伸一句，或像想到什么似的抛一个新话题（8-20 字，带钩子/情绪/好奇心）。\n`
     + `- 转场要像真人聊天里的自然跳转（"话说…""对了…"那种感觉）：禁止提"你发的我没看懂"这类解释，禁止道歉，禁止问号轰炸；输出只需话术本体。`;
+}
+
+// [v218 经历库联想] 对方消息与经历条目匹配（纯规则零 LLM，**保守触发**）
+//   拆条目：· 开头行；label=冒号前短词（六峰山/光大/夜市）；line=条目正文
+//   匹配：query（去空白）与 [label+全文] 做 bigram 重叠计数；**噪音 bigram（时间/虚词）跳过**，
+//   只认精准关键词（喜茶/蛋挞/夜跑/烧烤/散步/奶茶等）→ 避免"下午→游泳、晚上→步行街"式误撞；
+//   label 精确出现额外 +3。设计取舍：语义联想（下午茶→喜茶、爬山→六峰山）靠固定区【经历库】
+//   块兜底（LLM 读全库自然挑），本匹配器只做关键词级精准提醒，宁缺毋滥。
+const STORY_STOP_BIGRAMS = new Set([
+  '晚上', '下午', '早上', '中午', '傍晚', '今天', '明天', '昨天', '刚才', '现在',
+  '周末', '什么', '怎么', '没有', '真的', '一下', '一个', '一起', '出来', '过去',
+]);
+
+// [v218 经历库语义兜底] 她聊到生活/吃喝/玩乐/推荐类话题（无精准关键词命中时）→ 轻提醒
+//   让 LLM 从固定区经历库挑一条最搭的自然带出（用户原例："刚才在喝下午茶"→光大喜茶）
+const STORY_NUDGE_RE = /(吃|喝|奶茶|咖啡|茶|甜品|蛋糕|蛋挞|夜宵|烧烤|火锅|饭|面|粉|店|周末|无聊|下班|放假|逛|散步|爬山|跑步|健身|电影|唱歌|酒吧|玩|推荐|日常|约会|夜景|日出|去哪|好玩)/;
+function matchStoryBank(query: string, storyBank: string): { label: string; line: string } | null {
+  const q = String(query || '').replace(/\s/g, '');
+  if (!q || !storyBank) return null;
+  const lines = storyBank.split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^[·•\-*]\s*/.test(l));
+  let best: { label: string; line: string; score: number } | null = null;
+  for (const raw of lines) {
+    const line = raw.replace(/^[·•\-*]\s*/, '').trim();
+    if (!line) continue;
+    const label = line.split(/[:：]/)[0].trim() || '';
+    const text = (label + line).replace(/\s/g, '');
+    let hit = 0;
+    for (let i = 0; i + 2 <= q.length; i++) {
+      const bg = q.slice(i, i + 2);
+      if (STORY_STOP_BIGRAMS.has(bg)) continue;
+      if (text.includes(bg)) hit++;
+    }
+    if (label && q.includes(label)) hit += 3;
+    if (hit > 0 && (!best || hit > best.score)) best = { label, line, score: hit };
+  }
+  return best ? { label: best.label, line: best.line } : null;
 }
 
 // ============================================================
@@ -2414,6 +2481,12 @@ function buildSystemContent(opts: {
   unintelligible?: boolean;
   // [v217 约会方向] 账号级约会开关（profiles.date_mode）→ 固定区注入【约会方向】块
   dateMode?: boolean;
+  // [v218 经历库] 用户生活经历库（profiles.story_bank）→ 固定区注入【经历库】块
+  storyBank?: string;
+  // [v218 经历库联想] 本轮命中的经历条目（query 与条目关键词重叠）→ 动态区轻提醒
+  storyHit?: { label: string; line: string } | null;
+  // [v218 经历库语义兜底] 无精准命中但聊到生活/吃喝玩乐话题 → 动态区轻提醒"挑最搭的一条"
+  storyNudge?: boolean;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -2534,6 +2607,21 @@ function buildSystemContent(opts: {
       + `- 你回复中出现的任何个人事实（几岁/哪人/做什么/家庭情况/兴趣）必须与本简介一致，禁止自相矛盾。`;
   }
 
+  // [v218 经历库] 用户生活经历库（profiles.story_bank，低频变化 → 固定区）
+  //   与【用户个人简介】的区别：简介=被问才查的身份事实；经历库=主动流露的生活碎片，
+  //   是"高价值展示 + 邀约引力"的素材，要像自己的亲身经历一样自然带出，不是背台词。
+  //   触发时机（自然优先，每次最多带 1 条）：①对方聊到推荐/日常/周末/美食/逛街/夜生活等，话头能接上；
+  //   ②需要展示高价值/生活品质；③约她见面时随口用一条经历当由头。
+  //   带出方式：借她的话头顺势接（她说在喝下午茶→你说光大喜茶昨晚刚去），1-2 句短句（8-20 字），
+  //   带具体细节（位置/价格/小趣事），别硬塞：话头接不上就不带，一轮最多 1 条。
+  if (opts.storyBank && opts.storyBank.trim()) {
+    s += `\n\n【经历库】(这些是你（用户本人）真实去过/吃过/玩过的地方和事——是你生活的一部分，不是台词)\n`
+      + `- 用法：把条目当成自己的亲身经历，像"想起自己去过"一样自然带出（如她说"刚在喝下午茶"→"光大那边的喜茶挺好，我昨晚还去喝了"）；禁止复述条目编号、禁止背课文式罗列。\n`
+      + `- 触发时机（自然优先，每次最多带 1 条）：①对方聊到推荐/日常/周末/美食/逛街/夜生活等话题、话头能接上时；②需要展示高价值/生活品质时；③约她见面时，随口用一条经历当由头（如"那家蛋挞正好出炉，要不要顺路去"）。\n`
+      + `- 带出方式：借她的话头顺势接，1-2 句短句（8-20 字），带具体细节（位置/价格/小趣事），别硬塞——话头接不上就不带，一轮最多 1 条；她没接不追问、不重复。\n`
+      + `- 以下每条是一个地点/店/路的浓缩经历，聊天时按需要展开成自己的话：\n${opts.storyBank.trim()}`;
+  }
+
   // [v217 约会方向] 账号级约会开关（profiles.date_mode，低频变化 → 固定区尾部）
   //   开：整体默认朝"见面/约会"推进，但永远以自然为先（借话头顺势带，不硬转、不硬推）；
   //   关：约会话题可接但点到为止，不发起真实邀约（默认）
@@ -2587,6 +2675,14 @@ function buildSystemContent(opts: {
     // [v217 自然转场] 乱码/无实义消息：覆盖 WB 分诊/策略，自然转话题（时间块保持最末）
     if (opts.unintelligible) {
       d += buildUnintelligibleBlock();
+    }
+    // [v218 经历库联想] 对方话头与你的经历关键词重叠 → 轻提醒点名（自然相关才带）
+    if (opts.storyHit && !opts.unintelligible) {
+      d += `\n\n【经历库】(轻提醒，仅本轮) 她这句话和你的经历「${opts.storyHit.label}」正好搭得上——话头合适就自然带出你亲身去过的那一段（1 句，像随口说的，8-20 字）；话头不合适就不带，别硬塞。`;
+    }
+    // [v218 经历库语义兜底] 无精准命中但聊到生活/吃喝玩乐话题 → 挑一条最搭的带出
+    if (opts.storyNudge && !opts.unintelligible) {
+      d += `\n\n【经历库】(轻提醒，仅本轮) 她聊到生活/吃喝/玩乐相关话题——你的经历库（见固定区【经历库】）里正好有一堆真实体验，挑一条最搭的自然带出（1 句，8-20 字，像随口说的）；话头不合适就别带，别硬塞。`;
     }
     d += `\n\n【当前时间】（所有时刻/时段表述以此为准）\n${formatCurrentTime()}`;
   } else {
@@ -2701,6 +2797,16 @@ function buildSystemContent(opts: {
   //   放在分诊/策略块之后 → 覆盖其指令；与机会窗口/接住分享互斥（乱码不会命中那些模式）
   if (opts.unintelligible) {
     d += buildUnintelligibleBlock();
+  }
+
+  // [v218 经历库联想] 对方话头与你的经历关键词重叠 → 轻提醒点名（自然相关才带；
+  //   放在机会窗口之前，若同时命中窗口，窗口仍优先镜像反问）
+  if (opts.storyHit && !opts.unintelligible) {
+    d += `\n\n【经历库】(轻提醒，仅本轮) 她这句话和你的经历「${opts.storyHit.label}」正好搭得上——话头合适就自然带出你亲身去过的那一段（1 句，像随口说的，8-20 字）；话头不合适就不带，别硬塞。`;
+  }
+  // [v218 经历库语义兜底] 无精准命中但聊到生活/吃喝玩乐话题 → 挑一条最搭的带出
+  if (opts.storyNudge && !opts.unintelligible) {
+    d += `\n\n【经历库】(轻提醒，仅本轮) 她聊到生活/吃喝/玩乐相关话题——你的经历库（见固定区【经历库】）里正好有一堆真实体验，挑一条最搭的自然带出（1 句，8-20 字，像随口说的）；话头不合适就别带，别硬塞。`;
   }
 
   // [v20260809 机会窗口] 她主动问起相关话题 → 回答后必须镜像反问（最高优先，紧跟战术块）

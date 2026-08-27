@@ -595,9 +595,17 @@ const Friends = {
 
         // 从当前 profile 加载已有简介
         input.value = (Auth.currentProfile && Auth.currentProfile.bio) || '';
-        count.textContent = input.value.length + ' / 300';
+        count.textContent = input.value.length + ' / 500';
         overlay.classList.add('active');
         setTimeout(() => input.focus(), 100);
+
+        // [v218 经历库] 加载经历库（独立字段 story_bank）
+        const storyInput = document.getElementById('story-input');
+        const storyCount = document.getElementById('story-count');
+        if (storyInput) {
+            storyInput.value = (Auth.currentProfile && Auth.currentProfile.story_bank) || '';
+            storyCount.textContent = storyInput.value.length + ' / 2000';
+        }
 
         // [v209 直连 API] 打开弹窗时同步加载 API Key（仅注册账号）
         this._loadApiKey();
@@ -771,7 +779,7 @@ const Friends = {
         }
     },
 
-    // [我的简介] 保存简介（写 profiles.bio，服务端对话时自动注入）
+    // [我的简介] 保存简介（写 profiles.bio，服务端对话时自动注入）+ [v218] 经历库（profiles.story_bank）
     async saveBio() {
         const overlay = document.getElementById('modal-bio');
         const input = document.getElementById('bio-input');
@@ -786,13 +794,22 @@ const Friends = {
             return;
         }
 
+        // [v218 经历库] 一起保存（2000 字上限）
+        const storyInput = document.getElementById('story-input');
+        const storyText = (storyInput ? storyInput.value : '').trim();
+        if (storyText.length > 2000) {
+            Utils.toast('经历库不能超过 2000 字');
+            return;
+        }
+
         Utils.showLoading();
-        const updated = await DB.updateProfile(Auth.currentUser.id, { bio: text });
+        const updated = await DB.updateProfile(Auth.currentUser.id, { bio: text, story_bank: storyText });
         Utils.hideLoading();
 
         if (updated) {
             // 同步内存中的 profile，后续发送消息时由 ima-proxy 服务端读取注入
             Auth.currentProfile.bio = text;
+            Auth.currentProfile.story_bank = storyText;
             overlay.classList.remove('active');
             Utils.toast(text ? '简介已保存，对话会自动引用' : '已清空简介');
         } else {

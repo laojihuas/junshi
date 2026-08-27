@@ -273,6 +273,11 @@ const App = {
             const len = e.target.value.length;
             document.getElementById('bio-count').textContent = len + ' / 500';
         });
+        // [v218 经历库] 字数实时计数
+        document.getElementById('story-input').addEventListener('input', (e) => {
+            const len = e.target.value.length;
+            document.getElementById('story-count').textContent = len + ' / 2000';
+        });
         document.getElementById('modal-bio').addEventListener('click', (e) => {
             if (e.target === e.currentTarget) {
                 e.currentTarget.classList.remove('active');
