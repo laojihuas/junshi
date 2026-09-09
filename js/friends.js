@@ -40,7 +40,7 @@ const Friends = {
         if (headerStatus) {
             if (Auth.isAccount && Auth.account) {
                 const acc = Auth.account;
-                if (acc.is_vip) {
+                if (acc.is_vip && (acc.vip_days_left || 0) > 0) {
                     const days = acc.vip_days_left || 0;
                     // [v20260805] 浓缩为 VIP+天数（去 👑 图标，避免撑宽顶栏挤压其他按钮；保留金色底色）
                     headerStatus.textContent = 'VIP' + days + '天';

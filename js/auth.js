@@ -116,7 +116,12 @@ const Auth = {
                 this.account.is_vip = !!r.account.is_vip;
                 if (r.account.vip_expires_at) {
                     this.account.vip_expires_at = r.account.vip_expires_at;
-                    this.account.vip_days_left = Math.max(1, Math.ceil((new Date(r.account.vip_expires_at) - Date.now()) / 86400000));
+                    // [2026-09-09 修复] is_vip 以到期时间实时判定 + 天数下限 0：
+                    //   后端 accounts.is_vip 是激活时置位的存储值、过期不清零，login_account 曾原样透传 → 过期仍显示 VIP1天
+                    //   （Math.max(1, ceil(负值)) 恒等于 1）。此处按 vip_expires_at 实时纠正，双保险。
+                    const _msLeft = new Date(r.account.vip_expires_at) - Date.now();
+                    this.account.is_vip = _msLeft > 0;
+                    this.account.vip_days_left = Math.max(0, Math.ceil(_msLeft / 86400000));
                 }
                 this._saveAccountStorage();
             }
@@ -260,7 +265,10 @@ const Auth = {
             vip_expires_at: (r.account && r.account.vip_expires_at) || null,
         };
         if (this.account.vip_expires_at) {
-            this.account.vip_days_left = Math.max(1, Math.ceil((new Date(this.account.vip_expires_at) - Date.now()) / 86400000));
+            // [2026-09-09 修复] 同 refreshAccountStatus：实时判定 + 天数下限 0（过期不显示 VIP1天）
+            const _msLeft = new Date(this.account.vip_expires_at) - Date.now();
+            this.account.is_vip = _msLeft > 0;
+            this.account.vip_days_left = Math.max(0, Math.ceil(_msLeft / 86400000));
         }
         this.isAccount = true;
         this._saveAccountStorage();
