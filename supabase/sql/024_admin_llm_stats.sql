@@ -6,9 +6,10 @@
 --   - "一轮" = GROUP BY request_id（该轮主回复+重试+辅助调用合计）
 --   - 精确计价：峰谷（高峰=**工作日**北京时间 9:00-12:00、14:00-18:00；周末全天统一低谷价，官方口径）
 --     + 三档（缓存命中输入/未命中输入/输出）分别计价
---   - 价格：V4-Flash。2026-08-17 00:00（北京时间）起新价（官方 8/13 公告）：
---       空闲 命中0.05 / 未命中1.5 / 输出4.5（元/M）；工作日高峰 ×2
---       旧价（8/17 前）：命中0.02 / 未命中1 / 输出2
+--   - 价格：V4-Flash 三段价（时间段切分见 031_llm_price_v20260910.sql）：
+--       >= 2026-09-10 12:00（官方 9/10 公告）：空闲 命中0.02 / 未命中1 / 输出4（元/M）；工作日高峰 ×2
+--       2026-08-17 00:00 ~ 09-10 12:00（官方 8/13 公告）：空闲 命中0.05 / 未命中1.5 / 输出4.5；工作日高峰 ×2
+--       < 2026-08-17：命中0.02 / 未命中1 / 输出2（无峰谷）
 --   - 缓存命中率 = hit_tokens / (hit_tokens + miss_tokens)
 -- 返回：{ daily: 近7天逐日[7], weekly: 本周, monthly: 本月 }
 --   每项：{ period, calls(轮数), total_tokens, avg_tokens(平均token/轮),
@@ -17,30 +18,39 @@
 -- 执行位置：Supabase Dashboard → SQL Editor（或管理 API database/query）
 -- ============================================================
 
--- 单行计价（元）：V4-Flash 新旧价 + 峰谷判定
+-- 单行计价（元）：V4-Flash 三段时间价 + 峰谷判定
 -- [v214 修复] 峰谷只对工作日生效（isodow<6=周一~周五）；周末全天低谷价（官方口径，修复前周末高峰时段被误算 ×2）
+-- [v222] 2026-09-10 12:00 起官方改价：空闲 命中0.02 / 未命中1 / 输出4；高峰 ×2（同步 031）
 CREATE OR REPLACE FUNCTION public.llm_row_cost(
     p_prompt int, p_comp int, p_hit int, p_miss int, p_created timestamptz)
 RETURNS numeric
 LANGUAGE sql IMMUTABLE
 AS $$
   SELECT round((
-      p_hit  * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 0.02
-                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
-                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 0.10
-                     ELSE 0.05 END)
-    + p_miss * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 1
-                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
-                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 3.0
-                     ELSE 1.5 END)
-    + p_comp * (CASE WHEN p_created < '2026-08-17 00:00:00+08' THEN 2
-                     WHEN EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
-                          AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
-                            OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17) THEN 9.0
-                     ELSE 4.5 END)
-  ) / 1000000.0, 6)::numeric;
+      p_hit  * b.hit  * m.mult
+    + p_miss * b.miss * m.mult
+    + p_comp * b.comp * m.mult
+  )::numeric / 1000000, 6)
+  FROM (
+      SELECT
+        CASE WHEN p_created <  '2026-08-17 00:00:00+08' THEN 0.02
+             WHEN p_created <  '2026-09-10 12:00:00+08' THEN 0.05
+             ELSE 0.02 END AS hit,
+        CASE WHEN p_created <  '2026-08-17 00:00:00+08' THEN 1
+             WHEN p_created <  '2026-09-10 12:00:00+08' THEN 1.5
+             ELSE 1 END AS miss,
+        CASE WHEN p_created <  '2026-08-17 00:00:00+08' THEN 2
+             WHEN p_created <  '2026-09-10 12:00:00+08' THEN 4.5
+             ELSE 4 END AS comp
+  ) b,
+  (
+      SELECT CASE
+        WHEN p_created >= '2026-08-17 00:00:00+08'   -- 8/17 前为早期价格，官方口径无峰谷
+         AND EXTRACT(isodow FROM p_created AT TIME ZONE 'Asia/Shanghai') < 6
+         AND (EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 9 AND 11
+           OR EXTRACT(hour FROM p_created AT TIME ZONE 'Asia/Shanghai') BETWEEN 14 AND 17)
+        THEN 2 ELSE 1 END AS mult
+  ) m;
 $$;
 
 -- 周期聚合公共块（按 request_id 归一轮）
