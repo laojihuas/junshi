@@ -332,7 +332,7 @@ Deno.serve(async (req) => {
     currentRequestId = crypto.randomUUID();
 
     // [v209 直连 API] 注意用 let：session_id/history 可能在直连分支被重新赋值（会话解析/补历史）
-    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode } = await req.json();
+    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode, action, online } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
     // [v209 直连 API] 新增可选参数：
     //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
@@ -364,6 +364,9 @@ Deno.serve(async (req) => {
     // [v240 账号级补发开关] 直连身份同时取 followup_enabled（仅 followup 模式用；正常聊天不受影响）
     //   默认 true：手机直连就是要这个功能，账号想关再关
     let directFollowupEnabled = true;
+    // [v241 脚本在线] null=未设置（按在线处理）；false=脚本调过 action=stop，不再补发
+    let directFollowupOnline: boolean | null = null;
+    let directFollowupHeartbeat: string | null = null;
 
     let user: any = null;
     if (isDirect) {
@@ -372,11 +375,17 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({ error: 'server_config', message: '服务配置缺失' }), { headers, status: 500 });
       }
       try {
-        // [v240] 兼容旧库：033 未执行时 followup_enabled 列不存在 → REST 400 → 回退只取 id
+        // [v240] 兼容旧库：033/034 未执行时新列不存在 → REST 400 → 逐级回退
         let akResp = await fetch(
-          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,followup_enabled`,
+          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,followup_enabled,followup_online,followup_heartbeat_at`,
           { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
         );
+        if (!akResp.ok) {
+          akResp = await fetch(
+            `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,followup_enabled`,
+            { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+          );
+        }
         if (!akResp.ok) {
           akResp = await fetch(
             `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id`,
@@ -391,6 +400,11 @@ Deno.serve(async (req) => {
             if (typeof akRows[0].followup_enabled === 'boolean') {
               directFollowupEnabled = akRows[0].followup_enabled;
             }
+            // [v241] 脚本在线标记：null=未设置（按在线处理）；false=脚本已 stop
+            if (typeof akRows[0].followup_online === 'boolean') {
+              directFollowupOnline = akRows[0].followup_online;
+            }
+            if (akRows[0].followup_heartbeat_at) directFollowupHeartbeat = akRows[0].followup_heartbeat_at;
           }
         }
       } catch (e: any) {
@@ -468,6 +482,9 @@ Deno.serve(async (req) => {
       const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
       const fuResult = await handleFollowup(
         supabaseUrl, serviceRoleKey, directUserId, directFollowupEnabled,
+        directFollowupOnline, directFollowupHeartbeat,
+        (action === 'stop' || action === 'start') ? action : '',
+        online === true,
         Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
         Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
         appConfig
@@ -1622,16 +1639,19 @@ function matchStoryBank(query: string, storyBank: string): { label: string; line
 }
 
 // ============================================================
-// [v240 追加发话] 直连专属：发出话术后 5 分钟没回复 → 主动补一条（用户拍板 v240）
-//   规则：
-//     ① 仅 api_key 直连（手机 Shizuku 脚本轮询）；网页版不参与
+// [v240/v241 追加发话] 直连专属：发出话术后 5 分钟没回复 → 主动补一条
+//   规则（v241 定稿）：
+//     ① 仅 api_key 直连（手机 Shizuku/DSH 脚本轮询）；网页版不参与
 //     ② 阶段：memory_card.profile.stage ∈ FOLLOWUP_STAGES（吸引/舒适/恋爱，"陌生"不补）
 //     ③ 沉默：最后一条消息 role=assistant，距今 ∈ [followup_minutes, followup_max_minutes]
-//        （默认 5~60 分钟；上限防止脚本停摆一夜后早上突然补一句)
+//        （默认 5~60 分钟；上限防止脚本停摆一夜后早上突然补一句）
 //     ④ 本次沉默期只补一次：最后一条 kind != 'followup'（消息自身即状态，重复调用天然幂等）
-//     ⑤ 账号日上限：kind='followup' 当天（北京时间自然日）累计 < followup_daily_cap（默认 5）
-//     ⑥ 时间窗：北京时间 [followup_start_hour, followup_end_hour)（默认 09:00-23:00）
-//     ⑦ 话术三种形态，绝不催：自说自话 / 给台阶 / 半句钩子（见 prompt）
+//     ⑤ 每会话日上限：该会话当天（北京时间自然日）kind='followup' 累计 < followup_session_cap（默认 3）
+//        —— 要补满 3 次必须她回过，每次沉默期仍只补 1 条
+//     ⑥ 脚本在线：profiles.followup_online=false（脚本 action=stop 过）→ 一律不补；
+//        启动需带 online:true / action=start 重新上线（脚本退出就不许补）
+//     ⑦ 时间窗：北京时间 [followup_start_hour, followup_end_hour)（默认 09:00-23:00）
+//     ⑧ 话术三种形态，绝不催：自说自话 / 给台阶 / 半句钩子（见 prompt）
 //   下线：v210 的 22h 沉默唤醒已砍（mode=wake 返回 200 空名单）
 // ============================================================
 // [v240] 可补发阶段：吸引/舒适/恋爱（旧六阶段存量 normalize 前先落在这三类里）
@@ -1661,75 +1681,94 @@ function pickFollowupShape(seed: string): string {
 
 async function handleFollowup(
   supabaseUrl: string, serviceRoleKey: string, userId: string, accountEnabled: boolean,
+  onlineFlag: boolean | null, heartbeatAt: string | null,
+  action: '' | 'start' | 'stop', wantOnline: boolean,
   llmKey: string, llmBase: string, llmModel: string,
   appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }
-): Promise<{
-  followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number }[];
-  skipped: { session_id: string; friend_name: string; reason: string }[];
-  window: string; used_today: number; daily_cap: number; disabled: boolean; account_disabled?: boolean;
-}> {
+): Promise<Record<string, any>> {
   const q = appConfig.quota_params || {};
   const enabled = q.followup_enabled !== 0; // 0=关；其余（含缺省）视为开
   // 全部用 ?? 而非 ||：0 是合法值（如 followup_start_hour=0），|| 会把 0 回退默认
   const minutes = Math.max(1, Math.min(240, Number(q.followup_minutes ?? 5)));
   const maxMinutes = Math.max(minutes, Math.min(720, Number(q.followup_max_minutes ?? 60)));
-  const dailyCap = Math.max(0, Math.min(50, Number(q.followup_daily_cap ?? 5)));
+  const sessionCap = Math.max(1, Math.min(50, Number(q.followup_session_cap ?? 3)));
   const startH = Math.min(24, Math.max(0, Number(q.followup_start_hour ?? 9)));
   const endH = Math.min(24, Math.max(0, Number(q.followup_end_hour ?? 23)));
-  const scanLimit = Math.max(1, Math.min(20, Number(q.followup_scan_limit ?? 10)));
+  const scanLimit = Math.max(1, Math.min(20, Number(q.followup_scan_limit ?? 3)));
   const windowText = `${String(startH).padStart(2, '0')}:00-${String(endH).padStart(2, '0')}:00`;
+  const heartbeatNow = new Date().toISOString();
+
+  const patchProfile = async (body: Record<string, any>): Promise<void> => {
+    try {
+      await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+        body: JSON.stringify(body),
+      });
+    } catch (e: any) {
+      console.warn('followup profile patch failed:', e.message);
+    }
+  };
+
+  // [v241] action=stop：脚本退出 → 立即下线，之后任何轮询都不再生成（防退出后残留定时器）
+  if (action === 'stop') {
+    await patchProfile({ followup_online: false, followup_heartbeat_at: heartbeatNow });
+    return {
+      stopped: true, online: false, followup: [], skipped: [],
+      window: windowText, session_cap: sessionCap, disabled: false,
+    };
+  }
+
+  // 心跳（每次轮询刷新，仅观测）+ 上线标记（action=start 或 online:true）
+  const patchBody: Record<string, any> = { followup_heartbeat_at: heartbeatNow };
+  const autoOnline = action === 'start' || wantOnline;
+  if (autoOnline) patchBody.followup_online = true;
+  await patchProfile(patchBody);
+  // 本次生效的在线状态：显式上线 > 库里的值（null/缺列视为在线）
+  const onlineNow: boolean | null = autoOnline ? true : onlineFlag;
 
   const empty = (extra: Record<string, any> = {}) => ({
-    followup: [], skipped: [], window: windowText, used_today: 0, daily_cap: dailyCap, disabled: false, ...extra,
+    followup: [], skipped: [], window: windowText, session_cap: sessionCap,
+    disabled: false, online: onlineNow !== false, heartbeat_at: heartbeatNow,
+    last_heartbeat_before: heartbeatAt, ...extra,
   });
 
   if (!enabled) return empty({ disabled: true });
   // [v240] 全局开 + 账号开（AND）才生效；账号关 → account_disabled 便于脚本区分
   if (!accountEnabled) return empty({ account_disabled: true });
+  // [v241] 脚本已 stop：不补（重启时请带 online:true）
+  if (onlineNow === false) {
+    return empty({ offline: true, reason: 'script_offline', hint: '脚本已停止，启动轮询时请带 online:true' });
+  }
 
   const bjHour = getBeijingHour();
   if (!(bjHour >= startH && bjHour < endH)) return empty();
 
-  // 1) 账号当天已补发次数（RPC：跨会话按北京时间自然日统计 kind='followup'）
-  let usedToday = 0;
-  try {
-    const cResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_daily_count`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ p_user_id: userId }),
-    });
-    if (cResp.ok) {
-      const c = await cResp.json();
-      usedToday = Number(typeof c === 'number' ? c : (Array.isArray(c) ? c[0] : 0)) || 0;
-    }
-  } catch (e: any) {
-    console.warn('followup daily count failed:', e.message);
-  }
-  const remain = dailyCap - usedToday;
-  if (remain <= 0) return empty({ used_today: usedToday });
-
-  // 2) 候选会话：一次 RPC 查完（最后一条是我发的、kind≠followup、距今在阈值区间内）
-  //    比逐会话查 REST 省 N 次请求：脚本每分钟轮询也扛得住
+  // 1) 候选会话：一次 RPC 查完
+  //    判定全在 SQL：最后一条是我发的、kind≠followup、距今在阈值区间、该会话今日补发次数 < 上限
   let rows: any[] = [];
   try {
     const fuResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_candidates`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ p_user_id: userId, p_min_minutes: minutes, p_max_minutes: maxMinutes }),
+      body: JSON.stringify({
+        p_user_id: userId, p_min_minutes: minutes,
+        p_max_minutes: maxMinutes, p_session_cap: sessionCap,
+      }),
     });
     if (!fuResp.ok) {
       const t = await fuResp.text().catch(() => '');
       console.warn('followup_candidates failed:', fuResp.status, t.slice(0, 200));
-      return empty({ used_today: usedToday, error: 'followup_candidates_failed', hint: '请先执行 supabase/sql/033_followup.sql' });
+      return empty({ error: 'followup_candidates_failed', hint: '请先执行 supabase/sql/034_followup_cap_online.sql' });
     }
     rows = await fuResp.json().catch(() => []);
   } catch (e: any) {
     console.warn('followup_candidates error:', e.message);
-    return empty({ used_today: usedToday, error: 'followup_candidates_failed' });
+    return empty({ error: 'followup_candidates_failed' });
   }
 
-  // 3) 阶段过滤（陌生阶段不补：刚搭上话就连发最容易死）+ 组装候选项
-  const candidates: { id: string; name: string; stage: string; card: any; lastAt: number; waited: number }[] = [];
+  // 2) 阶段过滤（陌生阶段不补） + 组装候选项
+  const candidates: { id: string; name: string; stage: string; card: any; lastAt: number; waited: number; used: number }[] = [];
   for (const r of Array.isArray(rows) ? rows : []) {
     if (!r || !r.session_id) continue;
     // memory_card 是 text 列（存 JSON 字符串），RPC 返回 string；兼容 object
@@ -1751,14 +1790,15 @@ async function handleFollowup(
       card,
       lastAt,
       waited: Number(r.waited_min) || minutes,
+      used: Number(r.used_today) || 0,
     });
   }
 
-  // 4) 等得最久的先补；最多 min(剩余额度, scanLimit) 个
+  // 3) 等得最久的先补；单次最多 scanLimit 个（默认 3，防脚本一轮连发引爆）
   candidates.sort((a, b) => a.lastAt - b.lastAt);
-  const picked = candidates.slice(0, Math.min(remain, scanLimit));
+  const picked = candidates.slice(0, scanLimit);
 
-  const followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number }[] = [];
+  const followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number; used_today: number }[] = [];
   const skipped: { session_id: string; friend_name: string; reason: string }[] = [];
 
   for (const c of picked) {
@@ -1811,7 +1851,7 @@ async function handleFollowup(
         { role: 'user', content: prompt },
       ], { temperature: 0.66, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.35, _stage: 'followup' });
 
-      let text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      const text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
       // [v240 兜底] 模型偶尔仍会写出催的句子 → 命中即丢弃，宁可这轮不补也不发掉价的话
       const NAG_RE = /(在吗|在不在|怎么不回|怎么不理|忙完了吗|忙完没|看到没|看到了吗|回我|理我|生气|是不是不|又不回|等你)/;
       if (!text || NAG_RE.test(text)) {
@@ -1819,7 +1859,7 @@ async function handleFollowup(
         continue;
       }
 
-      // 5) 落库（kind='followup' → 直连 readDirectHistory 上下文连续 + 下一轮判定天然防重）
+      // 4) 落库（kind='followup' → 直连 readDirectHistory 上下文连续 + 下一轮判定天然防重）
       const nowIso = new Date().toISOString();
       try {
         const insResp = await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
@@ -1828,7 +1868,7 @@ async function handleFollowup(
           body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, kind: 'followup', created_at: nowIso }]),
         });
         if (!insResp.ok) {
-          // 033 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术；防重靠本函数其余条件
+          // 033 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术
           await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
@@ -1845,15 +1885,17 @@ async function handleFollowup(
         skipped.push({ session_id: c.id, friend_name: c.name, reason: 'persist_failed' });
         continue;
       }
-      followup.push({ session_id: c.id, friend_name: c.name, text, shape, waited_min: c.waited });
+      followup.push({
+        session_id: c.id, friend_name: c.name, text, shape,
+        waited_min: c.waited, used_today: c.used + 1,
+      });
     } catch (e: any) {
       console.warn(`followup llm failed (${c.name}):`, e.message);
       skipped.push({ session_id: c.id, friend_name: c.name, reason: 'llm_failed' });
     }
   }
 
-  // used_today 返回补发后的累计（含本轮），便于脚本侧核对日上限
-  return { followup, skipped, window: windowText, used_today: usedToday + followup.length, daily_cap: dailyCap, disabled: false };
+  return empty({ followup, skipped });
 }
 
 // [v209 直连 API] 三个辅助函数（service_role 通道，绕过 RLS）

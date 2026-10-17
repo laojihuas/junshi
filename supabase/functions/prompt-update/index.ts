@@ -43,7 +43,7 @@ const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   followup_enabled: [0, 1],       // 总开关（0=关 1=开，默认 1）
   followup_minutes: [1, 240],     // 沉默触发阈值（默认 5 分钟）
   followup_max_minutes: [1, 720], // 上限：超过这么久就不补了（默认 60 分钟）
-  followup_daily_cap: [0, 50],    // 账号每天最多补发次数（默认 5；0=停用）
+  followup_session_cap: [1, 50],  // [v241] 每个会话每天最多补发次数（默认 3；替换 v240 的账号级 daily_cap）
   followup_start_hour: [0, 24],   // 时间窗开始（北京时间，默认 9）
   followup_end_hour: [0, 24],     // 时间窗结束（北京时间，默认 23）
   followup_scan_limit: [1, 20],   // 单次调用最多处理会话数（默认 10）

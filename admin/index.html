@@ -508,7 +508,7 @@
                         仅 Shizuku 脚本 api_key 直连生效，网页版不参与。判定：你发出话术后
                         <b>超过触发阈值分钟</b>（默认 5）她还没回，且在该会话最后一条消息之后
                         <b>超过上限分钟</b>（默认 60）就不再补。每次沉默期只补一条（对方回复后重新计时），
-                        账号每天最多触发 <b>日上限</b> 次（默认 5）。话术只走三种形态（自说自话 / 给台阶 / 半句钩子），
+                        每个会话每天最多补 <b>每会话上限</b> 次（默认 3；补满必须她回过，每次沉默仍只补一条）。话术只走三种形态（自说自话 / 给台阶 / 半句钩子），
                         绝不催问。22h 沉默唤醒（v210）已下线。
                     </p>
                     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-items:end;">
@@ -521,8 +521,8 @@
                         <label style="font-size:12px;color:var(--muted);display:block;">有效上限（分钟）
                             <input id="followup-max-minutes" class="input input-num" type="number" min="1" max="720" style="margin-top:4px;width:100%;">
                         </label>
-                        <label style="font-size:12px;color:var(--muted);display:block;">账号日上限（次）
-                            <input id="followup-daily-cap" class="input input-num" type="number" min="0" max="50" style="margin-top:4px;width:100%;">
+                        <label style="font-size:12px;color:var(--muted);display:block;">每会话每日上限（次）
+                            <input id="followup-session-cap" class="input input-num" type="number" min="0" max="50" style="margin-top:4px;width:100%;">
                         </label>
                         <label style="font-size:12px;color:var(--muted);display:block;">时间窗开始（时）
                             <input id="followup-start" class="input input-num" type="number" min="0" max="24" style="margin-top:4px;width:100%;">
@@ -948,7 +948,7 @@
                 document.getElementById('followup-enabled').checked = (qp.followup_enabled ?? 1) !== 0;
                 document.getElementById('followup-minutes').value = qp.followup_minutes ?? 5;
                 document.getElementById('followup-max-minutes').value = qp.followup_max_minutes ?? 60;
-                document.getElementById('followup-daily-cap').value = qp.followup_daily_cap ?? 5;
+                document.getElementById('followup-session-cap').value = qp.followup_session_cap ?? 3;
                 document.getElementById('followup-start').value = qp.followup_start_hour ?? 9;
                 document.getElementById('followup-end').value = qp.followup_end_hour ?? 23;
                 status.textContent = data.system_prompt
@@ -1069,18 +1069,18 @@
                 followup_enabled: document.getElementById('followup-enabled').checked ? 1 : 0,
                 followup_minutes: readInt('followup-minutes'),
                 followup_max_minutes: readInt('followup-max-minutes'),
-                followup_daily_cap: readInt('followup-daily-cap'),
+                followup_session_cap: readInt('followup-session-cap'),
                 followup_start_hour: readInt('followup-start'),
                 followup_end_hour: readInt('followup-end'),
             };
             // [v240] 各 key 的上界（后端 QUOTA_PARAM_RANGE 是权威校验，前端只做快速拦截）
             const UPPER = {
                 followup_minutes: 240, followup_max_minutes: 720,
-                followup_daily_cap: 50, followup_start_hour: 24, followup_end_hour: 24,
+                followup_session_cap: 50, followup_start_hour: 24, followup_end_hour: 24,
             };
             for (const [k, v] of Object.entries(quota_params)) {
                 // cap 允许 0（不封顶/停用）；时间窗起止允许 0-24；其余需 1 起
-                const min = (k === 'invite_bonus_cap' || k === 'followup_daily_cap' ||
+                const min = (k === 'invite_bonus_cap' ||
                     k === 'followup_start_hour' || k === 'followup_end_hour') ? 0 : 1;
                 const max = UPPER[k] || 10000;
                 if (!Number.isInteger(v) || v < min || v > max) { toast('配额参数需为 ' + min + '~' + max + ' 的整数'); return; }

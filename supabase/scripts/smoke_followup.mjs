@@ -1,8 +1,10 @@
-// v240 追加发话冒烟：验证 SQL 033 + ima-proxy mode=followup 通路
+// v241 追加发话冒烟：验证 SQL 034 + 脚本在线开关 + 每会话上限
 // 用法: SBP_PAT=xxx node smoke_followup.mjs
 //   PAT 只从环境变量读；api_key 只打印前缀
-//   本脚本【不会】真正生成/发送补发消息：验证时临时把 followup_enabled 置 0，
-//   只走 disabled 分支；恢复后再报告"当前候选数"，真实触发交给手机脚本。
+//   本脚本【不会】真正生成/发送补发消息：
+//     - stop 之后用 offline 分支验证"退出就不补"
+//     - disabled 分支验证总开关
+//     - 最后用 SQL 直接恢复 online=true，不经过接口，避免触发真实补发
 import fs from 'fs';
 
 const PAT = process.env.SBP_PAT;
@@ -34,59 +36,69 @@ async function callProxy(body) {
   return { status: resp.status, json, text: text.slice(0, 300) };
 }
 
-const ok = (c) => (c ? '✓' : '✗');
 let failed = 0;
 const check = (name, cond, extra = '') => {
-  console.log(`${ok(cond)} ${name}${extra ? ' — ' + extra : ''}`);
+  console.log(`${cond ? '✓' : '✗'} ${name}${extra ? ' — ' + extra : ''}`);
   if (!cond) failed++;
 };
 
 async function main() {
-  // 1) 配置 + 列 + 函数
+  // 1) 结构 + 配置
   const meta = await query(`
     select
-      (select count(*) from information_schema.columns where table_schema='public' and table_name='chat_messages' and column_name='kind') as kind_col,
-      (select count(*) from information_schema.columns where table_schema='public' and table_name='chat_sessions' and column_name='followup_at') as fu_at_col,
-      (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname='followup_candidates') as fn_cand,
-      (select quota_params::jsonb->>'followup_minutes' from public.app_config where id=1) as minutes,
-      (select quota_params::jsonb->>'followup_daily_cap' from public.app_config where id=1) as cap,
-      (select quota_params::jsonb->>'wake_enabled' from public.app_config where id=1) as wake
+      (select count(*) from information_schema.columns where table_schema='public' and table_name='profiles' and column_name='followup_online') as online_col,
+      (select count(*) from information_schema.columns where table_schema='public' and table_name='profiles' and column_name='followup_heartbeat_at') as hb_col,
+      (select quota_params::jsonb->>'followup_session_cap' from public.app_config where id=1) as cap,
+      (select quota_params::jsonb->>'followup_scan_limit' from public.app_config where id=1) as scan,
+      (select quota_params::jsonb->>'followup_daily_cap' from public.app_config where id=1) as old_cap
   `);
   const m = meta[0] || {};
-  console.log('[1] SQL 033:', JSON.stringify(m));
-  check('kind 列存在', m.kind_col === 1);
-  check('followup_at 列存在', m.fu_at_col === 1);
-  check('followup_candidates 函数存在', m.fn_cand === 1);
-  check('触发阈值 = 5 分钟', String(m.minutes) === '5');
-  check('日上限 = 5 次', String(m.cap) === '5');
-  check('wake 已关 (0)', String(m.wake) === '0');
+  console.log('[1] SQL 034:', JSON.stringify(m));
+  check('followup_online 列存在', m.online_col === 1);
+  check('followup_heartbeat_at 列存在', m.hb_col === 1);
+  check('每会话上限 = 3', String(m.cap) === '3');
+  check('单轮最多补 3 个', String(m.scan) === '3');
+  check('账号级 daily_cap 已移除', m.old_cap === null);
 
-  // 2) 找一个直连账号
+  // 2) 直连账号
   const acc = await query(`select id, api_key from public.profiles where api_key <> '' order by wake_enabled desc nulls last limit 1`);
-  if (!acc.length) { console.log('[2] 无 api_key 账号，跳过直连冒烟'); return; }
-  const { id: uid } = acc[0];
+  if (!acc.length) { console.log('[2] 无 api_key 账号，跳过'); return; }
+  const uid = acc[0].id;
   const apiKey = acc[0].api_key;
   console.log('[2] 直连账号 =', uid.slice(0, 8) + '…', 'api_key =', apiKey.slice(0, 6) + '…');
 
-  // 3) disabled 分支（不触发真实补发）
+  // 3) 脚本退出 → stop
+  const stop = await callProxy({ mode: 'followup', api_key: apiKey, action: 'stop' });
+  check('action=stop 返回 stopped:true', stop.status === 200 && stop.json?.stopped === true, JSON.stringify(stop.json));
+  const afterStop = await query(`select followup_online from public.profiles where id='${uid}'`);
+  check('库里 followup_online=false', afterStop[0]?.followup_online === false);
+
+  // 4) 退出后再轮询 → 一律不补（关键需求）
+  const offline = await callProxy({ mode: 'followup', api_key: apiKey });
+  check('脚本停止后轮询返回 offline:true', offline.json?.offline === true, JSON.stringify(offline.json));
+  check('返回 reason=script_offline', offline.json?.reason === 'script_offline');
+  check('offline 时 followup 为空', Array.isArray(offline.json?.followup) && offline.json.followup.length === 0);
+
+  // 5) 恢复在线：直接写库（不经过接口，避免触发真实补发）
+  await query(`update public.profiles set followup_online = true where id='${uid}'`);
+  const back = await query(`select followup_online from public.profiles where id='${uid}'`);
+  check('online 已恢复 true', back[0]?.followup_online === true);
+
+  // 6) 总开关 disabled 分支
   await query(`update public.app_config set quota_params = jsonb_set(coalesce(quota_params::jsonb,'{}'::jsonb),'{followup_enabled}','0'::jsonb)::text where id=1`);
   const off = await callProxy({ mode: 'followup', api_key: apiKey });
-  check('followup 通路通（HTTP 200）', off.status === 200, JSON.stringify(off.json));
-  check('disabled=0 时返回 disabled:true', !!(off.json && off.json.disabled === true));
-
-  // 4) 恢复开关
+  check('总开关关 → disabled:true', off.json?.disabled === true);
   await query(`update public.app_config set quota_params = jsonb_set(coalesce(quota_params::jsonb,'{}'::jsonb),'{followup_enabled}','1'::jsonb)::text where id=1`);
-  const back = await query(`select quota_params::jsonb->>'followup_enabled' as v from public.app_config where id=1`);
-  check('开关已恢复为 1', String(back[0]?.v) === '1');
+  const on = await query(`select quota_params::jsonb->>'followup_enabled' as v from public.app_config where id=1`);
+  check('总开关已恢复 1', String(on[0]?.v) === '1');
 
-  // 5) mode=wake 已退役
+  // 7) wake 退役
   const wk = await callProxy({ mode: 'wake', api_key: apiKey });
-  check('wake 返回 200 且 retired', wk.status === 200 && !!(wk.json && wk.json.retired === true), JSON.stringify(wk.json));
+  check('wake 返回 200 + retired', wk.status === 200 && wk.json?.retired === true);
 
-  // 6) 当前候选数（只读，真正补发要等手机脚本调用）
-  const cand = await query(`select count(*)::int as n from public.followup_candidates('${uid}'::uuid, 5, 60)`);
-  const used = await query(`select public.followup_daily_count('${uid}'::uuid) as n`);
-  console.log(`[6] 当前候选会话 = ${cand[0]?.n} 个，今日已补发 = ${used[0]?.n} 次（脚本一启动就会补，最多 ${m.cap} 次/天）`);
+  // 8) 当前候选（只读）
+  const cand = await query(`select count(*)::int as n from public.followup_candidates('${uid}'::uuid, 5, 60, 3)`);
+  console.log(`[8] 当前候选会话 = ${cand[0]?.n} 个（脚本上线后每轮最多补 3 个）`);
 
   console.log(failed ? `\n失败 ${failed} 项` : '\n全部通过');
   process.exit(failed ? 1 : 0);
