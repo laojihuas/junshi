@@ -35,10 +35,18 @@ const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   vip_daily_limit: [1, 10000],    // 激活码日配额（默认 500）
   invite_bonus_each: [1, 1000],   // 邀请奖励每次（默认 50）
   invite_bonus_cap: [0, 10000],   // 邀请累计封顶（默认 0=不封顶）
-  wake_enabled: [0, 1],           // [v210] 主动唤醒总开关（0=关 1=开，后台 checkbox；默认 1）
-  wake_hours: [1, 720],           // [v210] 沉默阈值小时（默认 22）
-  wake_start_hour: [0, 24],       // [v210] 唤醒时间窗开始（北京时间，默认 10）
-  wake_end_hour: [0, 24],         // [v210] 唤醒时间窗结束（北京时间，默认 24）
+  wake_enabled: [0, 1],           // [v210→v240 下线] 22h 唤醒总开关（保留 key 兼容存量配置，已不生效）
+  wake_hours: [1, 720],           // [v210→v240 下线] 保留兼容
+  wake_start_hour: [0, 24],       // [v210→v240 下线] 保留兼容
+  wake_end_hour: [0, 24],         // [v210→v240 下线] 保留兼容
+  // [v240 追加发话] 发出后 N 分钟没回复 → 补一条（账号日上限）；只服务手机直连
+  followup_enabled: [0, 1],       // 总开关（0=关 1=开，默认 1）
+  followup_minutes: [1, 240],     // 沉默触发阈值（默认 5 分钟）
+  followup_max_minutes: [1, 720], // 上限：超过这么久就不补了（默认 60 分钟）
+  followup_daily_cap: [0, 50],    // 账号每天最多补发次数（默认 5；0=停用）
+  followup_start_hour: [0, 24],   // 时间窗开始（北京时间，默认 9）
+  followup_end_hour: [0, 24],     // 时间窗结束（北京时间，默认 23）
+  followup_scan_limit: [1, 20],   // 单次调用最多处理会话数（默认 10）
 };
 function validateQuotaParams(v: any): string | null {
   if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'quota_params 必须为 JSON 对象';

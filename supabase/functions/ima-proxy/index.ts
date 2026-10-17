@@ -337,11 +337,12 @@ Deno.serve(async (req) => {
     // [v209 直连 API] 新增可选参数：
     //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
     //   friend_name  直连按昵称查/建会话（免 session_id）；仅 api_key 模式生效
-    // [v210 主动唤醒] mode='wake'：直连专属，无需 query，脚本拉取"该主动唤醒的会话名单"
-    //   （判定规则见 handleWake；网页模式传入 mode=wake 直接拒绝，不影响主架构）
+    // [v240 追加发话] mode='followup'：直连专属，无需 query，脚本拉取"该补发一条的会话名单"
+    //   （判定规则见 handleFollowup；网页版不参与，本机制只服务手机直连）
+    //   [v240 下线 v210 唤醒] mode='wake'（22h 沉默唤醒）已按要求砍掉，保留 200 空返回防老脚本报错
 
-    // [v210 主动唤醒] wake 模式无需 query（脚本零状态拉名单）
-    if (mode !== 'wake' && (!query || !query.trim())) {
+    // [v240] followup / wake 模式无需 query（脚本零状态拉名单）
+    if (mode !== 'followup' && mode !== 'wake' && (!query || !query.trim())) {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
     }
 
@@ -360,8 +361,9 @@ Deno.serve(async (req) => {
     const isDirect = !!rawApiKey;
     const friendName = typeof friend_name === 'string' ? friend_name.trim().slice(0, 50) : '';
     let directUserId = '';
-    // [v216 账号级唤醒开关] 直连身份同时取 wake_enabled（仅 wake 模式用；正常聊天不受影响）
-    let directWakeEnabled = false;
+    // [v240 账号级补发开关] 直连身份同时取 followup_enabled（仅 followup 模式用；正常聊天不受影响）
+    //   默认 true：手机直连就是要这个功能，账号想关再关
+    let directFollowupEnabled = true;
 
     let user: any = null;
     if (isDirect) {
@@ -370,15 +372,25 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({ error: 'server_config', message: '服务配置缺失' }), { headers, status: 500 });
       }
       try {
-        const akResp = await fetch(
-          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,wake_enabled`,
+        // [v240] 兼容旧库：033 未执行时 followup_enabled 列不存在 → REST 400 → 回退只取 id
+        let akResp = await fetch(
+          `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id,followup_enabled`,
           { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
         );
+        if (!akResp.ok) {
+          akResp = await fetch(
+            `${supabaseUrl}/rest/v1/profiles?api_key=eq.${encodeURIComponent(rawApiKey)}&select=id`,
+            { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+          );
+        }
         if (akResp.ok) {
           const akRows = await akResp.json();
           if (Array.isArray(akRows) && akRows[0] && akRows[0].id) {
             directUserId = akRows[0].id;
-            directWakeEnabled = akRows[0].wake_enabled === true;
+            // 旧库无该列 → undefined → 保持默认 true
+            if (typeof akRows[0].followup_enabled === 'boolean') {
+              directFollowupEnabled = akRows[0].followup_enabled;
+            }
           }
         }
       } catch (e: any) {
@@ -446,23 +458,32 @@ Deno.serve(async (req) => {
       }
     }
 
-    // [v210 主动唤醒] 直连专属分支：mode='wake' → 拉取该账号"该主动唤醒的会话名单"
-    //   放在配额检查之前：系统唤醒不消耗用户配额；不读记忆卡/不走主链路（纯辅助，不影响主架构）
-    //   网页模式（无 api_key）请求 wake → 拒绝；脚本不启动 = 无调用 = 无副作用（打空常态）
-    if (mode === 'wake') {
+    // [v240 追加发话] 直连专属分支：mode='followup' → 拉取该账号"该补发一条的会话名单"
+    //   放在配额检查之前：补发是系统行为，不消耗用户配额；不走主链路（纯辅助，不影响主架构）
+    //   网页版不参与（用户已砍网页版）；脚本不启动 = 无调用 = 无副作用（打空常态）
+    if (mode === 'followup') {
       if (!isDirect) {
-        return new Response(JSON.stringify({ error: 'wake_direct_only', message: '唤醒模式仅限 api_key 直连' }), { headers, status: 400 });
+        return new Response(JSON.stringify({ error: 'followup_direct_only', message: '补发模式仅限 api_key 直连' }), { headers, status: 400 });
       }
       const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
-      const wakeResult = await handleWake(
-        supabaseUrl, serviceRoleKey, directUserId, directWakeEnabled,
+      const fuResult = await handleFollowup(
+        supabaseUrl, serviceRoleKey, directUserId, directFollowupEnabled,
         Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
         Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
         appConfig
       );
-      // [v186] 唤醒话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
+      // [v186] 补发话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
       await persistLlUsage();
-      return new Response(JSON.stringify(wakeResult), { headers, status: 200 });
+      return new Response(JSON.stringify(fuResult), { headers, status: 200 });
+    }
+
+    // [v240 下线] v210 的 22h 沉默唤醒已砍掉：老脚本仍在调 mode=wake 时返回 200 空名单，
+    //   不让脚本侧因为 400/500 反复重试或报错（静默退役）
+    if (mode === 'wake') {
+      return new Response(JSON.stringify({
+        wake: [], skipped: [], disabled: true, retired: true,
+        message: 'wake 已下线（v240），请改用 mode=followup',
+      }), { headers, status: 200 });
     }
 
     // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务；双身份）
@@ -545,10 +566,20 @@ Deno.serve(async (req) => {
     let memoryCard = (isLite || isWb) ? null : await readMemoryCard(supabaseUrl, dbToken, dbKey, session_id);
 
     const rawQuery = typeof query === 'string' ? query.trim() : '';
+    // [v235 直连介入上下文] 拆解 query 内嵌的"对方说/我说"交错段 → 拼进 history，剩余文本=当前消息
+    //   只在直连且含角色标注时触发；普通 query 零副作用（parseInlineContext 返回 null）
+    if (isDirect && rawQuery && /(?:对方说|她说|我说|我)\s*[：:]/.test(rawQuery)) {
+      const parsed = parseInlineContext(rawQuery);
+      if (parsed) {
+        history = (Array.isArray(history) ? history : []).concat(parsed.history);
+        query = parsed.tail;
+      }
+    }
     // [v62 切换话题] "/换话题" = 用户一键换话题：不延续旧话题，主动抛新话题开场
     const switchTopic = rawQuery === '/换话题' || rawQuery.startsWith('/换话题 ');
     // [v217 自然转场] 对方消息"无法理解"检测（纯规则）：命中 → 本轮自然转话题，不硬接
-    const unintelligible = !switchTopic && detectUnintelligible(rawQuery);
+    //   [v235] 已解析的介入上下文用解析后的 query（最后一句）检测，避免整段误判
+    const unintelligible = !switchTopic && detectUnintelligible(query);
 
     // [v20260812 首条过滤·仅评价] 用户投喂的女生资料（首条 user 消息）仍需给 LLM 用于展开聊天，
     //   因此主回复/检索/记忆/统计全部走原始 history；只在"关系判断"处（extractProfile 阶段/画像）剔除首条。
@@ -1117,6 +1148,48 @@ Deno.serve(async (req) => {
 });
 
 // ============================================================
+// [v235 直连介入上下文] 解析 query 内嵌的"对方说：/我说："交错段 → 结构化历史
+//   场景：API 直连时用户手动介入代替军师回复对方，手机脚本把介入消息拼进
+//         query 一起发来（例：`-对方说：想去六峰山玩\n-我说：我今天没空哦\n-那你想约在什么时候？`）。
+//   目标：拆成标准 history（对方说→role user，我说→role assistant），剩余未标注文本=当前待回复，
+//         让军师把"我说"内容当自己（用户本人）发过的既定事实，不脱节、不角色错乱。
+//   安全：无"对方说/我说"标注的普通 query → 返回 null 零副作用；行首允许 -/·/空白前缀。
+// ============================================================
+function parseInlineContext(text: string): { history: { role: 'user' | 'assistant'; content: string }[]; tail: string } | null {
+  const lines = String(text || '').split(/\r?\n/)
+    .map((l) => l.replace(/^[-*·•\s]+/, '').trim())
+    .filter(Boolean);
+  if (!lines.length) return null;
+  const re = /^(对方说|她说|我说|我)\s*[：:]\s*(.*)$/;
+  const hist: { role: 'user' | 'assistant'; content: string }[] = [];
+  const tails: string[] = [];
+  let sawMarked = false;
+  for (const line of lines) {
+    const m = line.match(re);
+    if (m) {
+      sawMarked = true;
+      const content = m[2].trim();
+      if (content) hist.push({ role: (m[1] === '我说' || m[1] === '我') ? 'assistant' : 'user', content });
+    } else {
+      tails.push(line);
+    }
+  }
+  if (!sawMarked) return null; // 无角色标注 → 普通 query，不解析
+  let tail = tails.join('\n').trim();
+  // 兜底：全部是标注行（最后一句也是"对方说：xxx"）→ 末条对方消息作为当前待回复
+  if (!tail && hist.length) {
+    for (let i = hist.length - 1; i >= 0; i--) {
+      if (hist[i].role === 'user') {
+        tail = hist[i].content;
+        hist.splice(i, 1);
+        break;
+      }
+    }
+  }
+  return { history: hist, tail };
+}
+
+// ============================================================
 // [v6 L2] 上下文压缩（v213 全版本统一为"追加式窗口"，无滑动窗口/更早摘要）
 //   追加式 = slice(-N)：消息数 <N 时全量保留（每轮仅新增 1 条 → 前缀连续命中）；
 //   超过 N 条才滑动（每 N 轮一次整段 miss，摊薄成本低）
@@ -1549,25 +1622,21 @@ function matchStoryBank(query: string, storyBank: string): { label: string; line
 }
 
 // ============================================================
-// ============================================================
-// [v210 主动唤醒] 直连专属：遍历该账号会话，判定"沉默期"唤醒（用户拍板 v210）
+// [v240 追加发话] 直连专属：发出话术后 5 分钟没回复 → 主动补一条（用户拍板 v240）
 //   规则：
-//     ① 仅 api_key 直连（调用方已校验 isDirect）；网页模式不受影响
-//     ② 阶段：memory_card.profile.stage ∈ WAKABLE_STAGES（吸引/舒适/恋爱 = "吸引阶段以上"）
-//     ③ 沉默：最后一条消息距今 > wake_hours（默认 22h）
-//     ④ 时间窗：北京时间 [startH, endH)（默认 10:00-24:00；end=24 含到 23:59）
-//     ⑤ 只唤醒一次：last_wake_at 为空或 < 最后一条消息时间
-//        （唤醒后她回了新消息 → 新一轮沉默期才可再唤醒）
-//     ⑥ 话术 = LLM 新话题（配合当前时间，不接旧话题）；生成即落库
-//        chat_messages(role=assistant) + 置 last_wake_at → 直连 readDirectHistory
-//        上下文连续（用户核心诉求："不进上下文后面接话不流畅"）
-//   设计取舍：生成即置位（不等脚本回执）——脚本不启动 = 无调用 = 无副作用（打空常态）；
-//   脚本启动但发送失败属极少数，由脚本侧降级提示，不为此加回执链路（保持纯辅助定位）
+//     ① 仅 api_key 直连（手机 Shizuku 脚本轮询）；网页版不参与
+//     ② 阶段：memory_card.profile.stage ∈ FOLLOWUP_STAGES（吸引/舒适/恋爱，"陌生"不补）
+//     ③ 沉默：最后一条消息 role=assistant，距今 ∈ [followup_minutes, followup_max_minutes]
+//        （默认 5~60 分钟；上限防止脚本停摆一夜后早上突然补一句)
+//     ④ 本次沉默期只补一次：最后一条 kind != 'followup'（消息自身即状态，重复调用天然幂等）
+//     ⑤ 账号日上限：kind='followup' 当天（北京时间自然日）累计 < followup_daily_cap（默认 5）
+//     ⑥ 时间窗：北京时间 [followup_start_hour, followup_end_hour)（默认 09:00-23:00）
+//     ⑦ 话术三种形态，绝不催：自说自话 / 给台阶 / 半句钩子（见 prompt）
+//   下线：v210 的 22h 沉默唤醒已砍（mode=wake 返回 200 空名单）
 // ============================================================
-// [v210 主动唤醒] 可唤醒阶段："吸引阶段以上"= 已进入推进的关系
-//   新三阶段：吸引/舒适/恋爱；旧六阶段存量：追求/挽回/暧昧（normalize 后属舒适/恋爱）
-//   注意：不调 normalizeStage（它把"陌生/朋友"并入吸引 → 未开始的关系不该被唤醒）
-const WAKABLE_STAGES = new Set(['吸引', '舒适', '恋爱', '追求', '挽回', '暧昧']);
+// [v240] 可补发阶段：吸引/舒适/恋爱（旧六阶段存量 normalize 前先落在这三类里）
+//   刻意不含"陌生"：刚搭上话就连发，最容易把线聊死
+const FOLLOWUP_STAGES = new Set(['吸引', '舒适', '恋爱', '追求', '挽回', '暧昧']);
 
 function getBeijingHour(): number {
   try {
@@ -1580,120 +1649,211 @@ function getBeijingHour(): number {
   }
 }
 
-async function handleWake(
-  supabaseUrl: string, serviceRoleKey: string, userId: string, accountWakeEnabled: boolean,
+// [v240] 三种形态轮换（按会话 id 哈希 + 时间片取模，避免同一个人每次都用同一招）
+const FOLLOWUP_SHAPES = ['自说自话', '给台阶', '半句钩子'] as const;
+
+function pickFollowupShape(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 100000;
+  const slot = Math.floor(Date.now() / (30 * 60 * 1000)); // 半小时换一档
+  return FOLLOWUP_SHAPES[(h + slot) % FOLLOWUP_SHAPES.length];
+}
+
+async function handleFollowup(
+  supabaseUrl: string, serviceRoleKey: string, userId: string, accountEnabled: boolean,
   llmKey: string, llmBase: string, llmModel: string,
   appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }
-): Promise<{ wake: { session_id: string; friend_name: string; text: string }[]; skipped: { session_id: string; friend_name: string; reason: string }[]; window: string; disabled: boolean; account_disabled?: boolean }> {
+): Promise<{
+  followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number }[];
+  skipped: { session_id: string; friend_name: string; reason: string }[];
+  window: string; used_today: number; daily_cap: number; disabled: boolean; account_disabled?: boolean;
+}> {
   const q = appConfig.quota_params || {};
-  const enabled = q.wake_enabled !== 0; // 0=关；其余（含缺省）视为开
-  // 注意用 ?? 而非 ||：wake_start_hour=0（0 点开始）是合法值，|| 会把 0 回退默认
-  const hours = Math.max(1, Math.min(720, Number(q.wake_hours ?? 22)));
-  const startH = Math.min(24, Math.max(0, Number(q.wake_start_hour ?? 10)));
-  const endH = Math.min(24, Math.max(0, Number(q.wake_end_hour ?? 24)));
+  const enabled = q.followup_enabled !== 0; // 0=关；其余（含缺省）视为开
+  // 全部用 ?? 而非 ||：0 是合法值（如 followup_start_hour=0），|| 会把 0 回退默认
+  const minutes = Math.max(1, Math.min(240, Number(q.followup_minutes ?? 5)));
+  const maxMinutes = Math.max(minutes, Math.min(720, Number(q.followup_max_minutes ?? 60)));
+  const dailyCap = Math.max(0, Math.min(50, Number(q.followup_daily_cap ?? 5)));
+  const startH = Math.min(24, Math.max(0, Number(q.followup_start_hour ?? 9)));
+  const endH = Math.min(24, Math.max(0, Number(q.followup_end_hour ?? 23)));
+  const scanLimit = Math.max(1, Math.min(20, Number(q.followup_scan_limit ?? 10)));
   const windowText = `${String(startH).padStart(2, '0')}:00-${String(endH).padStart(2, '0')}:00`;
-  if (!enabled) return { wake: [], skipped: [], window: windowText, disabled: true };
-  // [v216 账号级开关] 全局开 + 账号开（AND）才生效；账号关 → 返回 account_disabled 便于脚本区分
-  if (!accountWakeEnabled) return { wake: [], skipped: [], window: windowText, disabled: false, account_disabled: true };
+
+  const empty = (extra: Record<string, any> = {}) => ({
+    followup: [], skipped: [], window: windowText, used_today: 0, daily_cap: dailyCap, disabled: false, ...extra,
+  });
+
+  if (!enabled) return empty({ disabled: true });
+  // [v240] 全局开 + 账号开（AND）才生效；账号关 → account_disabled 便于脚本区分
+  if (!accountEnabled) return empty({ account_disabled: true });
 
   const bjHour = getBeijingHour();
-  if (!(bjHour >= startH && bjHour < endH)) {
-    return { wake: [], skipped: [], window: windowText, disabled: false };
+  if (!(bjHour >= startH && bjHour < endH)) return empty();
+
+  // 1) 账号当天已补发次数（RPC：跨会话按北京时间自然日统计 kind='followup'）
+  let usedToday = 0;
+  try {
+    const cResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_daily_count`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_user_id: userId }),
+    });
+    if (cResp.ok) {
+      const c = await cResp.json();
+      usedToday = Number(typeof c === 'number' ? c : (Array.isArray(c) ? c[0] : 0)) || 0;
+    }
+  } catch (e: any) {
+    console.warn('followup daily count failed:', e.message);
+  }
+  const remain = dailyCap - usedToday;
+  if (remain <= 0) return empty({ used_today: usedToday });
+
+  // 2) 候选会话：一次 RPC 查完（最后一条是我发的、kind≠followup、距今在阈值区间内）
+  //    比逐会话查 REST 省 N 次请求：脚本每分钟轮询也扛得住
+  let rows: any[] = [];
+  try {
+    const fuResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_candidates`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_user_id: userId, p_min_minutes: minutes, p_max_minutes: maxMinutes }),
+    });
+    if (!fuResp.ok) {
+      const t = await fuResp.text().catch(() => '');
+      console.warn('followup_candidates failed:', fuResp.status, t.slice(0, 200));
+      return empty({ used_today: usedToday, error: 'followup_candidates_failed', hint: '请先执行 supabase/sql/033_followup.sql' });
+    }
+    rows = await fuResp.json().catch(() => []);
+  } catch (e: any) {
+    console.warn('followup_candidates error:', e.message);
+    return empty({ used_today: usedToday, error: 'followup_candidates_failed' });
   }
 
-  // 1) 拉该账号全部会话（memory_card 含 stage；last_wake_at 防重）
-  const sessResp = await fetch(
-    `${supabaseUrl}/rest/v1/chat_sessions?user_id=eq.${encodeURIComponent(userId)}&select=id,friend_name,memory_card,last_wake_at&limit=500`,
-    { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
-  );
-  if (!sessResp.ok) {
-    return { wake: [], skipped: [], window: windowText, disabled: false };
-  }
-  const sessions: any[] = await sessResp.json().catch(() => []);
-
-  // 2) 阶段过滤（吸引阶段以上）+ 逐会话查最后一条消息时间
-  const threshold = Date.now() - hours * 3600 * 1000;
-  const candidates: { id: string; name: string; stage: string; lastAt: number; card: any }[] = [];
-  for (const s of Array.isArray(sessions) ? sessions : []) {
-    if (!s || !s.id) continue;
-    // memory_card 是 text 列（存 JSON 字符串），REST 返回 string；兼容 object（PostgREST 解析）
+  // 3) 阶段过滤（陌生阶段不补：刚搭上话就连发最容易死）+ 组装候选项
+  const candidates: { id: string; name: string; stage: string; card: any; lastAt: number; waited: number }[] = [];
+  for (const r of Array.isArray(rows) ? rows : []) {
+    if (!r || !r.session_id) continue;
+    // memory_card 是 text 列（存 JSON 字符串），RPC 返回 string；兼容 object
     let card: any = {};
-    const rawCard = s.memory_card;
+    const rawCard = r.memory_card;
     if (typeof rawCard === 'string' && rawCard.trim()) {
       try { card = JSON.parse(rawCard); } catch (e) { card = {}; }
     } else if (rawCard && typeof rawCard === 'object') {
       card = rawCard;
     }
     const stage = (card.profile && card.profile.stage) ? String(card.profile.stage) : '';
-    if (!WAKABLE_STAGES.has(stage)) continue;
-    // 逐会话查最后一条消息（候选少：个人账号阶段≥吸引的最多十来个）
-    let lastAt: number | null = null;
-    try {
-      const mResp = await fetch(
-        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(s.id)}&select=created_at&order=created_at.desc&limit=1`,
-        { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
-      );
-      if (mResp.ok) {
-        const rows = await mResp.json();
-        if (Array.isArray(rows) && rows[0] && rows[0].created_at) lastAt = new Date(rows[0].created_at).getTime();
-      }
-    } catch (e: any) {
-      console.warn('wake lastAt failed:', e.message);
-    }
-    if (lastAt === null) continue;      // 无消息会话（理论不会出现）跳过
-    if (lastAt > threshold) continue;   // 未到沉默阈值
-    const lastWakeAt = s.last_wake_at ? new Date(s.last_wake_at).getTime() : 0;
-    if (lastWakeAt >= lastAt) continue; // 本次沉默期已唤醒过（唤醒发生在最后消息之后）
-    candidates.push({ id: s.id, name: s.friend_name || '', stage, lastAt, card });
+    if (!FOLLOWUP_STAGES.has(stage)) continue;
+    const lastAt = r.last_at ? new Date(r.last_at).getTime() : 0;
+    if (!lastAt) continue;
+    candidates.push({
+      id: r.session_id,
+      name: r.friend_name || '',
+      stage,
+      card,
+      lastAt,
+      waited: Number(r.waited_min) || minutes,
+    });
   }
 
-  // 3) 逐个生成唤醒话术（新话题，配合当前时间）+ 落库置位
-  const wake: { session_id: string; friend_name: string; text: string }[] = [];
+  // 4) 等得最久的先补；最多 min(剩余额度, scanLimit) 个
+  candidates.sort((a, b) => a.lastAt - b.lastAt);
+  const picked = candidates.slice(0, Math.min(remain, scanLimit));
+
+  const followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number }[] = [];
   const skipped: { session_id: string; friend_name: string; reason: string }[] = [];
-  for (const c of candidates.slice(0, 10)) { // 上限 10 会话/次，防脚本一次拉爆 LLM 时长
+
+  for (const c of picked) {
     try {
+      // 上下文：最近 6 条（判断她刚才在聊什么、别补到无关话题上）
+      let recentLines = '';
+      try {
+        const hResp = await fetch(
+          `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(c.id)}&select=role,content&order=created_at.desc&limit=6`,
+          { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
+        );
+        if (hResp.ok) {
+          const rows = await hResp.json();
+          recentLines = (Array.isArray(rows) ? rows : []).reverse()
+            .map((r: any) => `${r.role === 'assistant' ? '我' : '她'}：${String(r.content || '').slice(0, 120)}`)
+            .join('\n');
+        }
+      } catch (e: any) {
+        console.warn('followup history failed:', e.message);
+      }
+
+      const shape = pickFollowupShape(c.id);
       const timeText = formatCurrentTime();
       const profile = c.card.profile || {};
       const personaBits = [profile.personality, profile.relationship_note]
         .filter((x) => typeof x === 'string' && x.trim()).slice(0, 2);
-      const persona = personaBits.length ? `（对方画像：${personaBits.join('；').slice(0, 80)}）` : '';
-      const sys = '你是用户本人，一个有趣、有神秘感、有底线的真人。';
-      const prompt = `现在需要给「${c.name}」发一条主动唤醒的消息。\n要求：\n- 开启一个新话题，不要接着旧话题聊；\n- 配合当前时间（${timeText}）自然切入；\n- 口语化、像真人发微信，8-20 字，无标点，空格断句；\n- 直接输出消息本体，不要解释、不要前缀、不要引号。${persona}`;
+      const persona = personaBits.length ? `\n对方画像：${personaBits.join('；').slice(0, 80)}` : '';
+
+      const sys = '你是用户本人，一个有自己生活节奏、有神秘感、不缺女人的真人。你不追人，你是奖品。';
+      const prompt = [
+        `背景：你上一条消息发给「${c.name}」已经 ${c.waited} 分钟，她还没回。现在要再发一条。`,
+        `当前时间：${timeText}${persona}`,
+        recentLines ? `最近对话：\n${recentLines}` : '',
+        '',
+        `这次用【${shape}】这个形态：`,
+        `- 自说自话：说你自己此刻在干的一件具体小事，或抛一个跟她有关的新话题，全程不提她不回，不问她问题。`,
+        `- 给台阶：轻描淡写表示你这边也在忙/要忙，让她零压力，回不回都行。`,
+        `- 半句钩子：一句话说到一半留个缺口，让她好奇，不要求她回应。`,
+        '',
+        '硬性红线（违反即废）：',
+        '- 绝不催：禁止出现"在吗""怎么不回""忙完了吗""怎么不理我""看到没""是不是在忙"这类追问或暗示',
+        '- 禁止连续问句，禁止质问语气，禁止讨好、撒气、卖惨',
+        '- 语气要像随手发的一样轻，就算她一辈子不回，你这句话也不掉价',
+        '- 8-20 字，口语化，不用标点，用空格断句',
+        '- 直接输出消息本体，不要解释、不要前缀、不要引号',
+      ].filter(Boolean).join('\n');
+
       const content = await llmChat(llmKey, llmBase, llmModel, [
         { role: 'system', content: sys },
         { role: 'user', content: prompt },
-      ], { temperature: 0.58, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.35, _stage: 'wake' });
-      const text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
-      if (!text) {
-        skipped.push({ session_id: c.id, friend_name: c.name, reason: 'empty' });
+      ], { temperature: 0.66, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.35, _stage: 'followup' });
+
+      let text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      // [v240 兜底] 模型偶尔仍会写出催的句子 → 命中即丢弃，宁可这轮不补也不发掉价的话
+      const NAG_RE = /(在吗|在不在|怎么不回|怎么不理|忙完了吗|忙完没|看到没|看到了吗|回我|理我|生气|是不是不|又不回|等你)/;
+      if (!text || NAG_RE.test(text)) {
+        skipped.push({ session_id: c.id, friend_name: c.name, reason: text ? 'nag_filtered' : 'empty' });
         continue;
       }
-      // 落库（assistant = 已发话术 → 直连 readDirectHistory 上下文连续）+ 置 last_wake_at（防重）
+
+      // 5) 落库（kind='followup' → 直连 readDirectHistory 上下文连续 + 下一轮判定天然防重）
       const nowIso = new Date().toISOString();
       try {
-        await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
+        const insResp = await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-          body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, created_at: nowIso }]),
+          body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, kind: 'followup', created_at: nowIso }]),
         });
+        if (!insResp.ok) {
+          // 033 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术；防重靠本函数其余条件
+          await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+            body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, created_at: nowIso }]),
+          });
+        }
         await fetch(`${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(c.id)}`, {
           method: 'PATCH',
           headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ updated_at: nowIso, last_wake_at: nowIso }),
+          body: JSON.stringify({ updated_at: nowIso, followup_at: nowIso }),
         });
       } catch (e: any) {
-        console.warn('wake persist failed:', e.message);
+        console.warn('followup persist failed:', e.message);
         skipped.push({ session_id: c.id, friend_name: c.name, reason: 'persist_failed' });
         continue;
       }
-      wake.push({ session_id: c.id, friend_name: c.name, text });
+      followup.push({ session_id: c.id, friend_name: c.name, text, shape, waited_min: c.waited });
     } catch (e: any) {
-      console.warn(`wake llm failed (${c.name}):`, e.message);
+      console.warn(`followup llm failed (${c.name}):`, e.message);
       skipped.push({ session_id: c.id, friend_name: c.name, reason: 'llm_failed' });
     }
   }
 
-  return { wake, skipped, window: windowText, disabled: false };
+  // used_today 返回补发后的累计（含本轮），便于脚本侧核对日上限
+  return { followup, skipped, window: windowText, used_today: usedToday + followup.length, daily_cap: dailyCap, disabled: false };
 }
 
 // [v209 直连 API] 三个辅助函数（service_role 通道，绕过 RLS）
@@ -2515,6 +2675,7 @@ function buildSystemContent(opts: {
   // [v20260811 降本] 精简：五条并三条，去重复表述
   s += `\n\n【对话记录角色说明】(最高优先级，防归属错位)\n`
     + `- 对话记录里【对方说】=她的话；【我发的】=你自己（用户本人）之前发出的。分析她的意图只看【对方说】，回顾自己说过的话只看【我发的】，严禁把两者混淆。\n`
+    + `- 上下文里若出现"对方说：/她说：/我说："这类标注，与【对方说】/【我发的】同义，按同样规则理解；其中"我说："的内容是你（用户本人）手动发出的话，是既定事实，后续回复要与之一致。\n`
     + `- 当前待回复的最后一句话是对方（她）说的。\n`
     + `- 输出是发给她的消息本体：直接写话术内容，严禁在输出中携带或仿写【对方说】【我发的】等任何标注前缀。`;
 
@@ -2540,6 +2701,8 @@ function buildSystemContent(opts: {
   //   字数上限以战术前导 GLOBAL_TACTIC_PREAMBLE（lite）/ 全局原则 GLOBAL_PRINCIPLES（full）为唯一权威（≤20字）
   s += `\n\n【自洽与输出要求】（严格遵守）\n`
     + `- 【延续自洽】先回看你之前发过的话：立过的赌注/约定/梗/邀约/承诺，聊到相关话题时自然带一嘴即可（如"零食赌注"→轻描淡写接个梗），严禁翻旧账、严禁讨债式催兑现（"说好的呢""你欠我的"一律禁止）；不得另起一个同款新框架；同一套话术框架（打赌/威胁/邀约/夸赞/推拉套路）不得在近几轮里换着词重复使用——要么延续上轮的框架往下推，要么换一个完全不同的角度。\n`
+    + `- 严禁复读式开头：不要先重复/仿写她刚说的话再回应（如她发"好累"别回"累了吧"这类开头），直接接情绪/接点，用自己的新话回应。\n`
+    + `- 开头别老用"行/行吧/看来/巧了"这类万能词起手：每条换个开头方式（直接接话/反问/调侃/陈述都行），同一个开头词不要连续出现；"嘴硬/专治/梦里/摸鱼"这类标签梗要节制，别高频复贴。\n`
     + `- 只输出可直接复制发给对方的话术本体；不要输出【分析】【建议】、序号、步骤、进度、括号说明等任何附加内容；口语化、贴合关系阶段，像真人发微信。\n`
     + `- 密度范例：她"今天好无聊呀"→"这么闲啊 我正好有办法治你的无聊"（15字）。`;
 
@@ -2616,9 +2779,9 @@ function buildSystemContent(opts: {
   //   带具体细节（位置/价格/小趣事），别硬塞：话头接不上就不带，一轮最多 1 条。
   if (opts.storyBank && opts.storyBank.trim()) {
     s += `\n\n【经历库】(这些是你（用户本人）真实去过/吃过/玩过的地方和事——是你生活的一部分，不是台词)\n`
-      + `- 用法：把条目当成自己的亲身经历，像"想起自己去过"一样自然带出（如她说"刚在喝下午茶"→"光大那边的喜茶挺好，我昨晚还去喝了"）；禁止复述条目编号、禁止背课文式罗列。\n`
+      + `- 用法（开放）：这是你真实的生活素材，怎么用由你即兴发挥——接话题、借它表态、抛细节、拿它调侃、当邀约由头都行，像真人想起自己生活一样自然，别背课文式罗列。\n`
       + `- 触发时机（自然优先，每次最多带 1 条）：①对方聊到推荐/日常/周末/美食/逛街/夜生活等话题、话头能接上时；②需要展示高价值/生活品质时；③约她见面时，随口用一条经历当由头（如"那家蛋挞正好出炉，要不要顺路去"）。\n`
-      + `- 带出方式：借她的话头顺势接，1-2 句短句（8-20 字），带具体细节（位置/价格/小趣事），别硬塞——话头接不上就不带，一轮最多 1 条；她没接不追问、不重复。\n`
+      + `- 风格示例（只作参考，不是全部招数）：她"刚在喝下午茶"→"光大那边的喜茶挺好，我昨晚还去喝了"（接话题）；她"还没吃饭"→"这个点都没吃饭，我和光大的蛙小侠都看不下去了"（借店表态）；她吐槽→"光大烧烤摊听了都想摇头"（借店代言）。1-2 句短句（8-20 字）、带细节（味道/动作/场景）、别硬塞；换个角度用，别连着几轮同一个招；她没接不追问、不重复。\n`
       + `- 以下每条是一个地点/店/路的浓缩经历，聊天时按需要展开成自己的话：\n${opts.storyBank.trim()}`;
   }
 
@@ -2650,9 +2813,9 @@ function buildSystemContent(opts: {
     //   未命中输入 = 2 条历史 + 参考资料(2块×50字) + 【对方说】当前内容
     if (opts.kbItems.length > 0) {
       const kbText = opts.kbItems.slice(0, LITE_KB_COUNT)
-        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', LITE_KB_CONTENT_MAX)}`)
+        .map((item, i) => `【参考资料 ${i + 1}】\n${truncateText(item.content || '', LITE_KB_CONTENT_MAX)}`)
         .join('\n\n');
-      d += `\n\n【参考资料】（可复制句子/金句：保留直白措辞、可改人称/句序/加接话引子；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+      d += `\n\n【参考资料】（可复制句子/金句：保留直白措辞、可改人称/句序/加接话引子；禁止整句照抄；与当前对话冲突时以对话上下文为准。编号/标题只是内部检索标记，禁止出现在你的回复里——禁止输出【建议N】/【参考资料N】/任何文件名）\n${kbText}`;
     }
     // [v217 自然转场] 乱码/无实义消息：低配也注入转场块（罕见命中，成本可忽略；不硬接乱码）
     if (opts.unintelligible) {
@@ -2668,9 +2831,9 @@ function buildSystemContent(opts: {
     if (opts.kbItems.length > 0) {
       const kbText = opts.kbItems.slice(0, KB_AMMO_COUNT)
         // [v208 WB 缓存优化] 每块截断 50 字（user 尾部必然 miss，压缩 miss 面）
-        .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', WB_KB_CONTENT_MAX)}`)
+        .map((item, i) => `【参考资料 ${i + 1}】\n${truncateText(item.content || '', WB_KB_CONTENT_MAX)}`)
         .join('\n\n');
-      d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+      d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准。编号/标题只是内部检索标记，禁止出现在你的回复里——禁止输出【建议N】/【参考资料N】/任何文件名）\n${kbText}`;
     }
     // [v217 自然转场] 乱码/无实义消息：覆盖 WB 分诊/策略，自然转话题（时间块保持最末）
     if (opts.unintelligible) {
@@ -2678,11 +2841,11 @@ function buildSystemContent(opts: {
     }
     // [v218 经历库联想] 对方话头与你的经历关键词重叠 → 轻提醒点名（自然相关才带）
     if (opts.storyHit && !opts.unintelligible) {
-      d += `\n\n【经历库】(轻提醒，仅本轮) 她这句话和你的经历「${opts.storyHit.label}」正好搭得上——话头合适就自然带出你亲身去过的那一段（1 句，像随口说的，8-20 字）；话头不合适就不带，别硬塞。`;
+      d += `\n\n【经历库】(轻提醒，仅本轮) 她这句话和你的经历「${opts.storyHit.label}」正好搭得上——怎么用你定（讲经历/借它表态/拿它调侃/当邀约由头都行），1 句 8-20 字，自然第一；话头不合适就不带，别硬塞。`;
     }
     // [v218 经历库语义兜底] 无精准命中但聊到生活/吃喝玩乐话题 → 挑一条最搭的带出
     if (opts.storyNudge && !opts.unintelligible) {
-      d += `\n\n【经历库】(轻提醒，仅本轮) 她聊到生活/吃喝/玩乐相关话题——你的经历库（见固定区【经历库】）里正好有一堆真实体验，挑一条最搭的自然带出（1 句，8-20 字，像随口说的）；话头不合适就别带，别硬塞。`;
+      d += `\n\n【经历库】(轻提醒，仅本轮) 她聊到生活/吃喝/玩乐相关话题——你的经历库（见固定区【经历库】）里正好有真实体验：挑一条最搭的，怎么用你定（讲经历/借表态/拿它调侃都行），1 句 8-20 字，自然第一；话头不合适就别带，别硬塞。`;
     }
     d += `\n\n【当前时间】（所有时刻/时段表述以此为准）\n${formatCurrentTime()}`;
   } else {
@@ -2873,11 +3036,11 @@ function buildSystemContent(opts: {
   if (opts.kbItems.length > 0) {
     const kbText = opts.kbItems
       .slice(0, FULL_KB_COUNT)
-      .map((item, i) => `【参考资料 ${i + 1}】${item.title}\n${truncateText(item.content || '', FULL_KB_CONTENT_MAX)}`)
+      .map((item, i) => `【参考资料 ${i + 1}】\n${truncateText(item.content || '', FULL_KB_CONTENT_MAX)}`)
       .join('\n\n');
     // [v211 金句释放·A] 引导语对齐 WB 版：允许"改人称直接复制"弹药金句（原"消化成行动方向再创作、
     //   禁止整句搬运"导致金句被重写稀释）；保味职责由【措辞底线】(riskHit 时)承担，此处不再重复
-    d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准）\n${kbText}`;
+    d += `\n\n【参考资料】（可直接复制的句子/金句：保留直白措辞、可改人称/句序/加接话引子贴合语境；禁止整句照抄；与当前对话冲突时以对话上下文为准。编号/标题只是内部检索标记，禁止出现在你的回复里——禁止输出【建议N】/【参考资料N】/任何文件名）\n${kbText}`;
     if (opts.kbFallback) {
       d += '\n\n（注：本次检索接口异常，参考资料按标题匹配，可能不完全相关）';
     }

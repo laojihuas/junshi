@@ -296,10 +296,10 @@
                         <code id="api-key-value" class="api-key-value" style="display:none;"></code>
                         <button id="api-key-copy" class="btn btn-outline btn-sm" style="display:none;">复制</button>
                         <button id="api-key-gen" class="btn btn-outline btn-sm">获取 / 生成 API Key</button>
-                        <!-- [v216 账号级唤醒开关] 仅注册账号可见；默认关闭，开启后该账号的会话才会被直连唤醒 -->
-                        <button id="api-key-wake" class="btn btn-outline btn-sm" style="display:none;">启用唤醒</button>
+                        <!-- [v240 追加发话] 仅注册账号可见；默认开启，关掉该账号就不再补发 -->
+                        <button id="api-key-followup" class="btn btn-outline btn-sm" style="display:none;">启用追加发话</button>
                     </div>
-                    <div id="api-key-wake-desc" class="api-key-desc" style="display:none;">唤醒开启后，Shizuku 脚本可拉取你沉默超过阈值（默认 22h）的会话并发送唤醒消息。默认关闭，随时可切换。</div>
+                    <div id="api-key-followup-desc" class="api-key-desc" style="display:none;">追加发话：你的话发出去 5 分钟她没回，脚本会自动补一条（三种不掉价的形态，绝不催）。每次沉默只补一条，账号每天最多 5 次。默认开启，随时可切换。</div>
                 </div>
             </div>
             <div class="modal-footer">

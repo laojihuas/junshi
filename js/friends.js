@@ -618,8 +618,9 @@ const Friends = {
         const valueEl = document.getElementById('api-key-value');
         const copyBtn = document.getElementById('api-key-copy');
         const genBtn = document.getElementById('api-key-gen');
-        const wakeBtn = document.getElementById('api-key-wake');
-        const wakeDesc = document.getElementById('api-key-wake-desc');
+        // [v240 追加发话] 账号级开关（替代 v216 唤醒开关；RPC 写 profiles.followup_enabled）
+        const fuBtn = document.getElementById('api-key-followup');
+        const fuDesc = document.getElementById('api-key-followup-desc');
         if (!valueEl || !genBtn) return;
 
         if (!Auth.isAccount || !Auth.account) {
@@ -627,8 +628,8 @@ const Friends = {
             copyBtn.style.display = 'none';
             genBtn.textContent = '登录账号后可用';
             genBtn.disabled = true;
-            if (wakeBtn) wakeBtn.style.display = 'none';
-            if (wakeDesc) wakeDesc.style.display = 'none';
+            if (fuBtn) fuBtn.style.display = 'none';
+            if (fuDesc) fuDesc.style.display = 'none';
             return;
         }
 
@@ -659,54 +660,54 @@ const Friends = {
                 }
                 Utils.toast('已复制 API Key');
             };
-            // [v216 账号级唤醒开关] 点击切换（RPC 写 profiles.wake_enabled，服务端返回新状态）
-            if (wakeBtn) {
-                wakeBtn.onclick = async () => {
+            // [v240] 点击切换（RPC 写 profiles.followup_enabled，服务端返回新状态）
+            if (fuBtn) {
+                fuBtn.onclick = async () => {
                     if (!Auth.isAccount) {
                         Utils.toast('请先登录账号');
                         return;
                     }
                     const sb = getSupabaseClient();
                     if (!sb) return;
-                    const next = !this._wakeEnabled;
-                    const { data, error } = await sb.rpc('wake_mgmt', { p_enabled: next });
+                    const next = !this._followupEnabled;
+                    const { data, error } = await sb.rpc('followup_mgmt', { p_enabled: next });
                     if (error) {
-                        console.error('[唤醒] rpc error:', error.message);
+                        console.error('[追加发话] rpc error:', error.message);
                         Utils.toast('切换失败，请重试');
                         return;
                     }
-                    this._wakeEnabled = data === true;
-                    this._updateWakeBtn(wakeBtn, wakeDesc);
-                    Utils.toast(this._wakeEnabled ? '已启用唤醒' : '已关闭唤醒');
+                    this._followupEnabled = data === true;
+                    this._updateFollowupBtn(fuBtn);
+                    Utils.toast(this._followupEnabled ? '已启用追加发话' : '已关闭追加发话');
                 };
             }
         }
 
         await this._fetchApiKey(false);
-        // [v216] 弹窗打开时同步唤醒开关状态（游客分支已提前 return，此处必为账号）
-        if (wakeBtn) {
-            wakeBtn.style.display = '';
-            if (wakeDesc) wakeDesc.style.display = '';
+        // [v240] 弹窗打开时同步开关状态（游客分支已提前 return，此处必为账号）
+        if (fuBtn) {
+            fuBtn.style.display = '';
+            if (fuDesc) fuDesc.style.display = '';
             try {
                 const sb = getSupabaseClient();
                 if (sb) {
-                    const { data } = await sb.rpc('wake_mgmt', { p_enabled: null });
-                    this._wakeEnabled = data === true;
+                    const { data } = await sb.rpc('followup_mgmt', { p_enabled: null });
+                    this._followupEnabled = data === true;
                 }
             } catch (e) {
-                console.error('[唤醒] 状态加载失败:', e);
-                this._wakeEnabled = false;
+                console.error('[追加发话] 状态加载失败:', e);
+                this._followupEnabled = true;
             }
-            this._updateWakeBtn(wakeBtn, wakeDesc);
+            this._updateFollowupBtn(fuBtn);
         }
     },
 
-    // [v216] 唤醒按钮 UI（关闭=灰字"启用唤醒"；开启=高亮"已启用唤醒"）
-    _updateWakeBtn(wakeBtn, wakeDesc) {
-        if (!wakeBtn) return;
-        wakeBtn.textContent = this._wakeEnabled ? '已启用唤醒' : '启用唤醒';
-        wakeBtn.style.borderColor = this._wakeEnabled ? '#07C160' : '';
-        wakeBtn.style.color = this._wakeEnabled ? '#07C160' : '';
+    // [v240] 追加发话按钮 UI（关闭=灰字"启用追加发话"；开启=高亮"已启用"）
+    _updateFollowupBtn(fuBtn) {
+        if (!fuBtn) return;
+        fuBtn.textContent = this._followupEnabled ? '已启用追加发话' : '启用追加发话';
+        fuBtn.style.borderColor = this._followupEnabled ? '#07C160' : '';
+        fuBtn.style.color = this._followupEnabled ? '#07C160' : '';
     },
 
     // [v217 约会方向] 加载/切换约会开关（profiles.date_mode，RPC date_mode_mgmt，游客与账号均可用）
