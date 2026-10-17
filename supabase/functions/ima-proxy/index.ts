@@ -332,7 +332,7 @@ Deno.serve(async (req) => {
     currentRequestId = crypto.randomUUID();
 
     // [v209 直连 API] 注意用 let：session_id/history 可能在直连分支被重新赋值（会话解析/补历史）
-    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode, action, online } = await req.json();
+    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode, action, online, screen_context } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
     // [v209 直连 API] 新增可选参数：
     //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
@@ -472,7 +472,9 @@ Deno.serve(async (req) => {
       }
     }
 
-    // [v240 追加发话] 直连专属分支：mode='followup' → 拉取该账号"该补发一条的会话名单"
+    // [v240/v242 追加发话] 直连专属分支：mode='followup'
+    //   v242 起两阶段：不带 session_id = 只回"该补的会话目标"（不调 LLM/不写库/不花钱）；
+    //   带 session_id = 脚本已打开该好友聊天页，此刻才生成并落库。
     //   放在配额检查之前：补发是系统行为，不消耗用户配额；不走主链路（纯辅助，不影响主架构）
     //   网页版不参与（用户已砍网页版）；脚本不启动 = 无调用 = 无副作用（打空常态）
     if (mode === 'followup') {
@@ -480,14 +482,18 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({ error: 'followup_direct_only', message: '补发模式仅限 api_key 直连' }), { headers, status: 400 });
       }
       const appConfig = await fetchAppConfig(supabaseUrl, serviceRoleKey);
+      const fuSessionId = typeof session_id === 'string' ? session_id.trim() : '';
+      const fuScreenContext = typeof screen_context === 'string' ? screen_context.trim() : '';
       const fuResult = await handleFollowup(
         supabaseUrl, serviceRoleKey, directUserId, directFollowupEnabled,
         directFollowupOnline, directFollowupHeartbeat,
-        (action === 'stop' || action === 'start') ? action : '',
+        (action === 'stop' || action === 'start' || action === 'fail') ? action : '',
         online === true,
         Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
         Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
-        appConfig
+        appConfig,
+        fuSessionId,
+        fuScreenContext
       );
       // [v186] 补发话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
       await persistLlUsage();
@@ -1639,23 +1645,16 @@ function matchStoryBank(query: string, storyBank: string): { label: string; line
 }
 
 // ============================================================
-// [v240/v241 追加发话] 直连专属：发出话术后 5 分钟没回复 → 主动补一条
-//   规则（v241 定稿）：
-//     ① 仅 api_key 直连（手机 Shizuku/DSH 脚本轮询）；网页版不参与
-//     ② 阶段：memory_card.profile.stage ∈ FOLLOWUP_STAGES（吸引/舒适/恋爱，"陌生"不补）
-//     ③ 沉默：最后一条消息 role=assistant，距今 ∈ [followup_minutes, followup_max_minutes]
-//        （默认 5~60 分钟；上限防止脚本停摆一夜后早上突然补一句）
-//     ④ 本次沉默期只补一次：最后一条 kind != 'followup'（消息自身即状态，重复调用天然幂等）
-//     ⑤ 每会话日上限：该会话当天（北京时间自然日）kind='followup' 累计 < followup_session_cap（默认 3）
-//        —— 要补满 3 次必须她回过，每次沉默期仍只补 1 条
-//     ⑥ 脚本在线：profiles.followup_online=false（脚本 action=stop 过）→ 一律不补；
-//        启动需带 online:true / action=start 重新上线（脚本退出就不许补）
-//     ⑦ 时间窗：北京时间 [followup_start_hour, followup_end_hour)（默认 09:00-23:00）
-//     ⑧ 话术三种形态，绝不催：自说自话 / 给台阶 / 半句钩子（见 prompt）
-//   下线：v210 的 22h 沉默唤醒已砍（mode=wake 返回 200 空名单）
+// [v242 补发两阶段] 生成与实际发出解耦：先把"目标"给脚本，脚本打开聊天页后再来生成
+//   脚本协议：
+//     ① 轮询 {"mode":"followup","api_key":"..."}            → targets[]（不调 LLM、不写库、不计数）
+//     ② 打开该好友聊天页成功后 {"mode":"followup","api_key":"...","session_id":"<id>"}
+//                                                          → 生成 1 条 → 落库 kind='followup'
+//     ③ 发送失败 {"mode":"followup","api_key":"...","session_id":"<id>","action":"fail"}
+//                                                          → 撤回刚才那条（删除）→ 不计入当日次数
+//   这样"没走到生成"就一分钱不花，也不会把没发出去的话算成补发（旧版正是这个 bug：
+//   轮询时就生成并落库，脚本发不出去 → DB 里 18 条、微信里 0 条）
 // ============================================================
-// [v240] 可补发阶段：吸引/舒适/恋爱（旧六阶段存量 normalize 前先落在这三类里）
-//   刻意不含"陌生"：刚搭上话就连发，最容易把线聊死
 const FOLLOWUP_STAGES = new Set(['吸引', '舒适', '恋爱', '追求', '挽回', '暧昧']);
 
 function getBeijingHour(): number {
@@ -1669,22 +1668,29 @@ function getBeijingHour(): number {
   }
 }
 
-// [v240] 三种形态轮换（按会话 id 哈希 + 时间片取模，避免同一个人每次都用同一招）
+// 三种形态：按"该会话今天已补次数"循环，保证同一人不会被同一招连打
 const FOLLOWUP_SHAPES = ['自说自话', '给台阶', '半句钩子'] as const;
 
-function pickFollowupShape(seed: string): string {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 100000;
-  const slot = Math.floor(Date.now() / (30 * 60 * 1000)); // 半小时换一档
-  return FOLLOWUP_SHAPES[(h + slot) % FOLLOWUP_SHAPES.length];
+// 微信搜索关键词：昵称里常带 emoji / 特殊符号 / 空格（如 "Iclyn ❄️"、"ღ᭄余生🍒安好💖"），
+// 直接整串喂给搜索框多半搜不到 → 剥掉符号只留中英文数字，实在剥空了再退回原名
+function makeSearchKey(raw: string): string {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const cleaned = s
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}]/gu, '')
+    .replace(/[^\p{Script=Han}A-Za-z0-9]/gu, '')
+    .trim();
+  return cleaned || s;
 }
 
 async function handleFollowup(
   supabaseUrl: string, serviceRoleKey: string, userId: string, accountEnabled: boolean,
   onlineFlag: boolean | null, heartbeatAt: string | null,
-  action: '' | 'start' | 'stop', wantOnline: boolean,
+  action: '' | 'start' | 'stop' | 'fail', wantOnline: boolean,
   llmKey: string, llmBase: string, llmModel: string,
-  appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> }
+  appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> },
+  targetSessionId = '',
+  screenContext = ''
 ): Promise<Record<string, any>> {
   const q = appConfig.quota_params || {};
   const enabled = q.followup_enabled !== 0; // 0=关；其余（含缺省）视为开
@@ -1698,12 +1704,12 @@ async function handleFollowup(
   const windowText = `${String(startH).padStart(2, '0')}:00-${String(endH).padStart(2, '0')}:00`;
   const heartbeatNow = new Date().toISOString();
 
+  const sbHeaders = { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' };
+
   const patchProfile = async (body: Record<string, any>): Promise<void> => {
     try {
       await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
-        body: JSON.stringify(body),
+        method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal' }, body: JSON.stringify(body),
       });
     } catch (e: any) {
       console.warn('followup profile patch failed:', e.message);
@@ -1714,9 +1720,36 @@ async function handleFollowup(
   if (action === 'stop') {
     await patchProfile({ followup_online: false, followup_heartbeat_at: heartbeatNow });
     return {
-      stopped: true, online: false, followup: [], skipped: [],
+      targets: [], followup: [], skipped: [], online: false, stopped: true,
       window: windowText, session_cap: sessionCap, disabled: false,
     };
+  }
+
+  // [v242] action=fail：脚本已生成但没发出去（找不到会话/发送异常）→ 撤回，不算补发
+  //   只撤"最近 15 分钟内该会话的最后一条 followup"，避免误删历史
+  if (action === 'fail') {
+    await patchProfile({ followup_heartbeat_at: heartbeatNow });
+    if (!targetSessionId) {
+      return { targets: [], followup: [], skipped: [], error: 'session_id_required', rolled_back: false, online: onlineFlag !== false };
+    }
+    let rolled = false;
+    try {
+      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      const delResp = await fetch(
+        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(targetSessionId)}&kind=eq.followup&created_at=gte.${encodeURIComponent(since)}`,
+        { method: 'DELETE', headers: { ...sbHeaders, 'Prefer': 'return=representation' } }
+      );
+      if (delResp.ok) {
+        const gone = await delResp.json().catch(() => []);
+        rolled = Array.isArray(gone) && gone.length > 0;
+      }
+      await fetch(`${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(targetSessionId)}`, {
+        method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal' }, body: JSON.stringify({ followup_at: null }),
+      });
+    } catch (e: any) {
+      console.warn('followup rollback failed:', e.message);
+    }
+    return { targets: [], followup: [], skipped: [], rolled_back: rolled, online: onlineFlag !== false };
   }
 
   // 心跳（每次轮询刷新，仅观测）+ 上线标记（action=start 或 online:true）
@@ -1728,7 +1761,7 @@ async function handleFollowup(
   const onlineNow: boolean | null = autoOnline ? true : onlineFlag;
 
   const empty = (extra: Record<string, any> = {}) => ({
-    followup: [], skipped: [], window: windowText, session_cap: sessionCap,
+    targets: [], followup: [], skipped: [], window: windowText, session_cap: sessionCap,
     disabled: false, online: onlineNow !== false, heartbeat_at: heartbeatNow,
     last_heartbeat_before: heartbeatAt, ...extra,
   });
@@ -1744,31 +1777,31 @@ async function handleFollowup(
   const bjHour = getBeijingHour();
   if (!(bjHour >= startH && bjHour < endH)) return empty();
 
-  // 1) 候选会话：一次 RPC 查完
-  //    判定全在 SQL：最后一条是我发的、kind≠followup、距今在阈值区间、该会话今日补发次数 < 上限
+  // 1) 候选/指定会话：一次 RPC 查完（判定全在 SQL：最后一条是我发的、kind≠followup、
+  //    距今在阈值区间、该会话今日补发次数 < 上限；传 p_session_id 则只查这一个）
+  const wantGen = !!targetSessionId;
   let rows: any[] = [];
   try {
-    const fuResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_candidates`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+    const fuResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_targets`, {
+      method: 'POST', headers: sbHeaders,
       body: JSON.stringify({
-        p_user_id: userId, p_min_minutes: minutes,
-        p_max_minutes: maxMinutes, p_session_cap: sessionCap,
+        p_user_id: userId, p_min_minutes: minutes, p_max_minutes: maxMinutes,
+        p_session_cap: sessionCap, p_session_id: wantGen ? targetSessionId : null,
       }),
     });
     if (!fuResp.ok) {
       const t = await fuResp.text().catch(() => '');
-      console.warn('followup_candidates failed:', fuResp.status, t.slice(0, 200));
-      return empty({ error: 'followup_candidates_failed', hint: '请先执行 supabase/sql/034_followup_cap_online.sql' });
+      console.warn('followup_targets failed:', fuResp.status, t.slice(0, 200));
+      return empty({ error: 'followup_targets_failed', hint: '请先执行 supabase/sql/035_followup_targets.sql' });
     }
     rows = await fuResp.json().catch(() => []);
   } catch (e: any) {
-    console.warn('followup_candidates error:', e.message);
-    return empty({ error: 'followup_candidates_failed' });
+    console.warn('followup_targets error:', e.message);
+    return empty({ error: 'followup_targets_failed' });
   }
 
   // 2) 阶段过滤（陌生阶段不补） + 组装候选项
-  const candidates: { id: string; name: string; stage: string; card: any; lastAt: number; waited: number; used: number }[] = [];
+  const candidates: { id: string; name: string; note: string; stage: string; card: any; lastAt: number; waited: number; used: number }[] = [];
   for (const r of Array.isArray(rows) ? rows : []) {
     if (!r || !r.session_id) continue;
     // memory_card 是 text 列（存 JSON 字符串），RPC 返回 string；兼容 object
@@ -1784,35 +1817,57 @@ async function handleFollowup(
     const lastAt = r.last_at ? new Date(r.last_at).getTime() : 0;
     if (!lastAt) continue;
     candidates.push({
-      id: r.session_id,
-      name: r.friend_name || '',
-      stage,
-      card,
-      lastAt,
-      waited: Number(r.waited_min) || minutes,
-      used: Number(r.used_today) || 0,
+      id: r.session_id, name: r.friend_name || '', note: r.note || '', stage, card, lastAt,
+      waited: Number(r.waited_min) || minutes, used: Number(r.used_today) || 0,
     });
   }
 
-  // 3) 等得最久的先补；单次最多 scanLimit 个（默认 3，防脚本一轮连发引爆）
-  candidates.sort((a, b) => a.lastAt - b.lastAt);
-  const picked = candidates.slice(0, scanLimit);
+  // 3-A) 扫描模式（脚本第一次轮询）：只回目标，不生成、不写库、不花钱
+  if (!wantGen) {
+    candidates.sort((a, b) => a.lastAt - b.lastAt);
+    const targets = candidates.slice(0, scanLimit).map((c) => ({
+      session_id: c.id,
+      // note=微信备注（脚本优先用它搜），friend_name=昵称（备注为空时用）
+      note: c.note,
+      friend_name: c.name,
+      // search_key=去掉 emoji/符号后的纯文本（脚本用它精准搜会话）
+      search_key: makeSearchKey(c.note || c.name),
+      waited_min: c.waited,
+      used_today: c.used,
+    }));
+    return empty({ targets, phase: 'scan' });
+  }
 
-  const followup: { session_id: string; friend_name: string; text: string; shape: string; waited_min: number; used_today: number }[] = [];
-  const skipped: { session_id: string; friend_name: string; reason: string }[] = [];
+  // 3-B) 生成模式（脚本已打开该好友聊天页）：只处理这一个会话
+  const picked = candidates.slice(0, 1);
+  if (!picked.length) {
+    return empty({
+      skipped: [{ session_id: targetSessionId, reason: 'target_not_eligible' }],
+      phase: 'generate',
+    });
+  }
+
+  const followup: { session_id: string; friend_name: string; note: string; search_key: string; text: string; shape: string; waited_min: number; used_today: number }[] = [];
+  const skipped: { session_id: string; friend_name?: string; reason: string }[] = [];
 
   for (const c of picked) {
     try {
-      // 上下文：最近 6 条（判断她刚才在聊什么、别补到无关话题上）
+      // 上下文：最近 6 条（判断她刚才在聊什么、别补到无关话题上）+ 今日已补的话术（防复读）
       let recentLines = '';
+      let todayFu: string[] = [];
       try {
         const hResp = await fetch(
-          `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(c.id)}&select=role,content&order=created_at.desc&limit=6`,
+          `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(c.id)}&select=role,content,kind,created_at&order=created_at.desc&limit=12`,
           { headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey } }
         );
         if (hResp.ok) {
-          const rows = await hResp.json();
-          recentLines = (Array.isArray(rows) ? rows : []).reverse()
+          const hist = await hResp.json().catch(() => []);
+          const arr = Array.isArray(hist) ? hist : [];
+          const bjMidnight = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+          bjMidnight.setHours(0, 0, 0, 0);
+          todayFu = arr.filter((r: any) => r.kind === 'followup' && new Date(r.created_at).getTime() >= bjMidnight.getTime())
+            .map((r: any) => String(r.content || '').slice(0, 40)).reverse();
+          recentLines = arr.slice(0, 6).reverse()
             .map((r: any) => `${r.role === 'assistant' ? '我' : '她'}：${String(r.content || '').slice(0, 120)}`)
             .join('\n');
         }
@@ -1820,7 +1875,8 @@ async function handleFollowup(
         console.warn('followup history failed:', e.message);
       }
 
-      const shape = pickFollowupShape(c.id);
+      // 形态：按今天已补次数循环（第 1 次自说自话、第 2 次给台阶、第 3 次半句钩子）
+      const shape = FOLLOWUP_SHAPES[c.used % FOLLOWUP_SHAPES.length];
       const timeText = formatCurrentTime();
       const profile = c.card.profile || {};
       const personaBits = [profile.personality, profile.relationship_note]
@@ -1829,9 +1885,10 @@ async function handleFollowup(
 
       const sys = '你是用户本人，一个有自己生活节奏、有神秘感、不缺女人的真人。你不追人，你是奖品。';
       const prompt = [
-        `背景：你上一条消息发给「${c.name}」已经 ${c.waited} 分钟，她还没回。现在要再发一条。`,
+        `背景：你上一条消息发给「${c.note || c.name}」已经 ${c.waited} 分钟，她还没回。现在要再发一条。`,
         `当前时间：${timeText}${persona}`,
         recentLines ? `最近对话：\n${recentLines}` : '',
+        screenContext ? `她那边最新的聊天界面内容（可信）：\n${screenContext.slice(0, 600)}` : '',
         '',
         `这次用【${shape}】这个形态：`,
         `- 自说自话：说你自己此刻在干的一件具体小事，或抛一个跟她有关的新话题，全程不提她不回，不问她问题。`,
@@ -1841,15 +1898,20 @@ async function handleFollowup(
         '硬性红线（违反即废）：',
         '- 绝不催：禁止出现"在吗""怎么不回""忙完了吗""怎么不理我""看到没""是不是在忙"这类追问或暗示',
         '- 禁止连续问句，禁止质问语气，禁止讨好、撒气、卖惨',
+        '- 禁止用"刚""刚刚""今天""在忙"开头，直接从具体画面或动作写起（例如"汤炖过头了 有点咸"）',
         '- 语气要像随手发的一样轻，就算她一辈子不回，你这句话也不掉价',
         '- 8-20 字，口语化，不用标点，用空格断句',
         '- 直接输出消息本体，不要解释、不要前缀、不要引号',
-      ].filter(Boolean).join('\n');
+      ].filter(Boolean).join('\n') + (todayFu.length ? [
+        '',
+        `今天你已经给她补过这几句，禁止再用相同的开头两个字、相同的句式，必须换个开场：`,
+        ...todayFu.map((t, i) => `${i + 1}. ${t}`),
+      ].join('\n') : '');
 
       const content = await llmChat(llmKey, llmBase, llmModel, [
         { role: 'system', content: sys },
         { role: 'user', content: prompt },
-      ], { temperature: 0.66, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.35, _stage: 'followup' });
+      ], { temperature: 0.72, maxTokens: 200, frequencyPenalty: 0.8, presencePenalty: 0.4, _stage: 'followup' });
 
       const text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
       // [v240 兜底] 模型偶尔仍会写出催的句子 → 命中即丢弃，宁可这轮不补也不发掉价的话
@@ -1860,24 +1922,22 @@ async function handleFollowup(
       }
 
       // 4) 落库（kind='followup' → 直连 readDirectHistory 上下文连续 + 下一轮判定天然防重）
+      //    注意：脚本发送失败必须回传 action=fail，否则这条会算成"补过"（v241 前的坑）
       const nowIso = new Date().toISOString();
       try {
         const insResp = await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+          method: 'POST', headers: { ...sbHeaders, 'Prefer': 'return=minimal' },
           body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, kind: 'followup', created_at: nowIso }]),
         });
         if (!insResp.ok) {
-          // 033 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术
+          // 035 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术
           await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json', 'Prefer': 'return=minimal' },
+            method: 'POST', headers: { ...sbHeaders, 'Prefer': 'return=minimal' },
             body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, created_at: nowIso }]),
           });
         }
         await fetch(`${supabaseUrl}/rest/v1/chat_sessions?id=eq.${encodeURIComponent(c.id)}`, {
-          method: 'PATCH',
-          headers: { 'Authorization': `Bearer ${serviceRoleKey}`, 'apikey': serviceRoleKey, 'Content-Type': 'application/json' },
+          method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=minimal' },
           body: JSON.stringify({ updated_at: nowIso, followup_at: nowIso }),
         });
       } catch (e: any) {
@@ -1886,7 +1946,8 @@ async function handleFollowup(
         continue;
       }
       followup.push({
-        session_id: c.id, friend_name: c.name, text, shape,
+        session_id: c.id, friend_name: c.name, note: c.note,
+        search_key: makeSearchKey(c.note || c.name), text, shape,
         waited_min: c.waited, used_today: c.used + 1,
       });
     } catch (e: any) {
@@ -1895,9 +1956,8 @@ async function handleFollowup(
     }
   }
 
-  return empty({ followup, skipped });
+  return empty({ followup, skipped, phase: 'generate' });
 }
-
 // [v209 直连 API] 三个辅助函数（service_role 通道，绕过 RLS）
 //   仅直连模式（api_key）使用；网页模式走前端 JWT + RLS，不受影响
 // ============================================================
