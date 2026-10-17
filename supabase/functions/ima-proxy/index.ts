@@ -332,7 +332,7 @@ Deno.serve(async (req) => {
     currentRequestId = crypto.randomUUID();
 
     // [v209 直连 API] 注意用 let：session_id/history 可能在直连分支被重新赋值（会话解析/补历史）
-    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode, action, online, screen_context } = await req.json();
+    let { query, knowledge_base_id, history, system_prompt, session_id, api_key, friend_name, mode, action, online, screen_context, main_idle } = await req.json();
     // [B方案] 完全本地检索，不再使用 IMA knowledge_base_id（保留解构以兼容前端请求体）
     // [v209 直连 API] 新增可选参数：
     //   api_key      直连令牌（脚本免 JWT 直连，映射到账号身份，走账号配额）
@@ -487,13 +487,14 @@ Deno.serve(async (req) => {
       const fuResult = await handleFollowup(
         supabaseUrl, serviceRoleKey, directUserId, directFollowupEnabled,
         directFollowupOnline, directFollowupHeartbeat,
-        (action === 'stop' || action === 'start' || action === 'fail') ? action : '',
+        (action === 'stop' || action === 'start' || action === 'fail' || action === 'sent') ? action : '',
         online === true,
         Deno.env.get('LLM_API_KEY') || '', Deno.env.get('LLM_BASE_URL') || 'https://api.deepseek.com',
         Deno.env.get('LLM_MODEL') || 'deepseek-v4-flash',
         appConfig,
         fuSessionId,
-        fuScreenContext
+        fuScreenContext,
+        main_idle === true
       );
       // [v186] 补发话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
       await persistLlUsage();
@@ -1645,15 +1646,17 @@ function matchStoryBank(query: string, storyBank: string): { label: string; line
 }
 
 // ============================================================
-// [v242 补发两阶段] 生成与实际发出解耦：先把"目标"给脚本，脚本打开聊天页后再来生成
+// [v243 补发] 两阶段 + 主线空闲门控 + 发送回执
 //   脚本协议：
-//     ① 轮询 {"mode":"followup","api_key":"..."}            → targets[]（不调 LLM、不写库、不计数）
+//     ① 轮询 {"mode":"followup","api_key":"...","main_idle":true}
+//          → targets[]（不调 LLM、不写库、不计数）；main_idle 不是 true 一律不介入
 //     ② 打开该好友聊天页成功后 {"mode":"followup","api_key":"...","session_id":"<id>"}
-//                                                          → 生成 1 条 → 落库 kind='followup'
-//     ③ 发送失败 {"mode":"followup","api_key":"...","session_id":"<id>","action":"fail"}
-//                                                          → 撤回刚才那条（删除）→ 不计入当日次数
-//   这样"没走到生成"就一分钱不花，也不会把没发出去的话算成补发（旧版正是这个 bug：
-//   轮询时就生成并落库，脚本发不出去 → DB 里 18 条、微信里 0 条）
+//          → 生成 1 条 → 落库 kind='followup'，followup_sent=null（待确认）
+//     ③ 发送成功 {"action":"sent"}  → followup_sent=true（回执，仅统计用）
+//        发送失败 {"action":"fail"}  → 撤回该条（删除），不计入当日次数
+//     ④ 脚本退出 {"action":"stop"}  → 下线 + 清空所有"已生成未确认"的补发（排队任务）
+//   为什么两阶段：v241 在轮询时就生成+落库，脚本发不出去 → 线上 18 条 DB 有、微信 0 条，
+//   token 白花、污染上下文、还占掉当日额度。
 // ============================================================
 const FOLLOWUP_STAGES = new Set(['吸引', '舒适', '恋爱', '追求', '挽回', '暧昧']);
 
@@ -1667,9 +1670,6 @@ function getBeijingHour(): number {
     return new Date().getHours();
   }
 }
-
-// 三种形态：按"该会话今天已补次数"循环，保证同一人不会被同一招连打
-const FOLLOWUP_SHAPES = ['自说自话', '给台阶', '半句钩子'] as const;
 
 // 微信搜索关键词：昵称里常带 emoji / 特殊符号 / 空格（如 "Iclyn ❄️"、"ღ᭄余生🍒安好💖"），
 // 直接整串喂给搜索框多半搜不到 → 剥掉符号只留中英文数字，实在剥空了再退回原名
@@ -1686,11 +1686,12 @@ function makeSearchKey(raw: string): string {
 async function handleFollowup(
   supabaseUrl: string, serviceRoleKey: string, userId: string, accountEnabled: boolean,
   onlineFlag: boolean | null, heartbeatAt: string | null,
-  action: '' | 'start' | 'stop' | 'fail', wantOnline: boolean,
+  action: '' | 'start' | 'stop' | 'fail' | 'sent', wantOnline: boolean,
   llmKey: string, llmBase: string, llmModel: string,
   appConfig: { system_prompt: string; llm_params: LlmParams; quota_params: Record<string, any> },
   targetSessionId = '',
-  screenContext = ''
+  screenContext = '',
+  mainIdle = false
 ): Promise<Record<string, any>> {
   const q = appConfig.quota_params || {};
   const enabled = q.followup_enabled !== 0; // 0=关；其余（含缺省）视为开
@@ -1717,12 +1718,47 @@ async function handleFollowup(
   };
 
   // [v241] action=stop：脚本退出 → 立即下线，之后任何轮询都不再生成（防退出后残留定时器）
+  // [v243] 同时清空"补话排队任务"：删掉所有已生成但未确认发出的 followup（followup_sent 非 true）
+  //   脚本都退出了，这些排着的补发不该再等，也不该占当日次数
   if (action === 'stop') {
     await patchProfile({ followup_online: false, followup_heartbeat_at: heartbeatNow });
+    let purged = 0;
+    try {
+      const pr = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_purge_unsent`, {
+        method: 'POST', headers: sbHeaders,
+        body: JSON.stringify({ p_user_id: userId, p_older_than_minutes: 0 }),
+      });
+      if (pr.ok) purged = Number(await pr.json().catch(() => 0)) || 0;
+    } catch (e: any) {
+      console.warn('followup purge on stop failed:', e.message);
+    }
     return {
-      targets: [], followup: [], skipped: [], online: false, stopped: true,
+      targets: [], followup: [], skipped: [], online: false, stopped: true, purged_unsent: purged,
       window: windowText, session_cap: sessionCap, disabled: false,
     };
+  }
+
+  // [v243] action=sent：脚本发送成功回执 → 打上 followup_sent=true（仅统计与排障用）
+  if (action === 'sent') {
+    await patchProfile({ followup_heartbeat_at: heartbeatNow });
+    if (!targetSessionId) {
+      return { targets: [], followup: [], skipped: [], error: 'session_id_required', confirmed: false };
+    }
+    let confirmed = false;
+    try {
+      const since = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      const upResp = await fetch(
+        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(targetSessionId)}&kind=eq.followup&followup_sent=is.null&created_at=gte.${encodeURIComponent(since)}`,
+        { method: 'PATCH', headers: { ...sbHeaders, 'Prefer': 'return=representation' }, body: JSON.stringify({ followup_sent: true }) }
+      );
+      if (upResp.ok) {
+        const rows = await upResp.json().catch(() => []);
+        confirmed = Array.isArray(rows) && rows.length > 0;
+      }
+    } catch (e: any) {
+      console.warn('followup sent confirm failed:', e.message);
+    }
+    return { targets: [], followup: [], skipped: [], confirmed, online: onlineFlag !== false };
   }
 
   // [v242] action=fail：脚本已生成但没发出去（找不到会话/发送异常）→ 撤回，不算补发
@@ -1736,7 +1772,7 @@ async function handleFollowup(
     try {
       const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       const delResp = await fetch(
-        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(targetSessionId)}&kind=eq.followup&created_at=gte.${encodeURIComponent(since)}`,
+        `${supabaseUrl}/rest/v1/chat_messages?session_id=eq.${encodeURIComponent(targetSessionId)}&kind=eq.followup&followup_sent=is.null&created_at=gte.${encodeURIComponent(since)}`,
         { method: 'DELETE', headers: { ...sbHeaders, 'Prefer': 'return=representation' } }
       );
       if (delResp.ok) {
@@ -1777,9 +1813,26 @@ async function handleFollowup(
   const bjHour = getBeijingHour();
   if (!(bjHour >= startH && bjHour < endH)) return empty();
 
+  // [v243 主线门控] 只有脚本主线这一轮跑完、确认"当前没有可回复的消息"时才介入补话。
+  //   主线还在处理消息时（她刚回/正在生成回复），补话会让两条消息撞在一起。
+  //   扫描阶段必须显式带 main_idle:true；生成阶段（脚本已打开聊天页）不再要求。
+  const wantGen = !!targetSessionId;
+  if (!wantGen && !mainIdle) {
+    return empty({ phase: 'wait_main', reason: 'main_busy', hint: '主线这轮还有可回复消息，未介入补话' });
+  }
+
+  // [v243 打扫] 30 分钟前生成却没收到发送回执的补发 → 视为失败，清掉（避免占额度/污染上下文）
+  try {
+    await fetch(`${supabaseUrl}/rest/v1/rpc/followup_purge_unsent`, {
+      method: 'POST', headers: sbHeaders,
+      body: JSON.stringify({ p_user_id: userId, p_older_than_minutes: 30 }),
+    });
+  } catch (e: any) {
+    console.warn('followup stale purge failed:', e.message);
+  }
+
   // 1) 候选/指定会话：一次 RPC 查完（判定全在 SQL：最后一条是我发的、kind≠followup、
   //    距今在阈值区间、该会话今日补发次数 < 上限；传 p_session_id 则只查这一个）
-  const wantGen = !!targetSessionId;
   let rows: any[] = [];
   try {
     const fuResp = await fetch(`${supabaseUrl}/rest/v1/rpc/followup_targets`, {
@@ -1875,8 +1928,7 @@ async function handleFollowup(
         console.warn('followup history failed:', e.message);
       }
 
-      // 形态：按今天已补次数循环（第 1 次自说自话、第 2 次给台阶、第 3 次半句钩子）
-      const shape = FOLLOWUP_SHAPES[c.used % FOLLOWUP_SHAPES.length];
+      // [v243] 不预设策略：直接接着刚才的聊天上下文往下说一句（用户定的口径）
       const timeText = formatCurrentTime();
       const profile = c.card.profile || {};
       const personaBits = [profile.personality, profile.relationship_note]
@@ -1885,33 +1937,32 @@ async function handleFollowup(
 
       const sys = '你是用户本人，一个有自己生活节奏、有神秘感、不缺女人的真人。你不追人，你是奖品。';
       const prompt = [
-        `背景：你上一条消息发给「${c.note || c.name}」已经 ${c.waited} 分钟，她还没回。现在要再发一条。`,
+        `背景：你最后一条发给「${c.note || c.name}」的消息已经 ${c.waited} 分钟没回。现在接着刚才的话往下说一句。`,
         `当前时间：${timeText}${persona}`,
-        recentLines ? `最近对话：\n${recentLines}` : '',
+        recentLines ? `刚才的聊天（按时间顺序）：\n${recentLines}` : '',
         screenContext ? `她那边最新的聊天界面内容（可信）：\n${screenContext.slice(0, 600)}` : '',
         '',
-        `这次用【${shape}】这个形态：`,
-        `- 自说自话：说你自己此刻在干的一件具体小事，或抛一个跟她有关的新话题，全程不提她不回，不问她问题。`,
-        `- 给台阶：轻描淡写表示你这边也在忙/要忙，让她零压力，回不回都行。`,
-        `- 半句钩子：一句话说到一半留个缺口，让她好奇，不要求她回应。`,
+        '怎么写：',
+        '- 就着上面最后在聊的话题自然接一句，像聊天没断过，不要另起话头、不要换话题',
+        '- 说你自己这边相关的状态或补充，不要问她问题，不要等她接',
+        '- 语气轻，像随手发的，她回不回都无所谓',
         '',
         '硬性红线（违反即废）：',
         '- 绝不催：禁止出现"在吗""怎么不回""忙完了吗""怎么不理我""看到没""是不是在忙"这类追问或暗示',
         '- 禁止连续问句，禁止质问语气，禁止讨好、撒气、卖惨',
-        '- 禁止用"刚""刚刚""今天""在忙"开头，直接从具体画面或动作写起（例如"汤炖过头了 有点咸"）',
-        '- 语气要像随手发的一样轻，就算她一辈子不回，你这句话也不掉价',
+        '- 禁止用"刚""刚刚""今天"开头，直接从内容写起',
         '- 8-20 字，口语化，不用标点，用空格断句',
         '- 直接输出消息本体，不要解释、不要前缀、不要引号',
       ].filter(Boolean).join('\n') + (todayFu.length ? [
         '',
-        `今天你已经给她补过这几句，禁止再用相同的开头两个字、相同的句式，必须换个开场：`,
+        `今天你已经给她补过这几句，禁止重复相同开头和句式：`,
         ...todayFu.map((t, i) => `${i + 1}. ${t}`),
       ].join('\n') : '');
 
       const content = await llmChat(llmKey, llmBase, llmModel, [
         { role: 'system', content: sys },
         { role: 'user', content: prompt },
-      ], { temperature: 0.72, maxTokens: 200, frequencyPenalty: 0.8, presencePenalty: 0.4, _stage: 'followup' });
+      ], { temperature: 0.7, maxTokens: 200, frequencyPenalty: 0.7, presencePenalty: 0.3, _stage: 'followup' });
 
       const text = stripRoleTags(content).replace(/["'“”‘’]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
       // [v240 兜底] 模型偶尔仍会写出催的句子 → 命中即丢弃，宁可这轮不补也不发掉价的话
@@ -1922,7 +1973,8 @@ async function handleFollowup(
       }
 
       // 4) 落库（kind='followup' → 直连 readDirectHistory 上下文连续 + 下一轮判定天然防重）
-      //    注意：脚本发送失败必须回传 action=fail，否则这条会算成"补过"（v241 前的坑）
+      //    v243：followup_sent 先留 null（待确认），脚本发成功调 action=sent 置 true，
+      //    发失败调 action=fail 撤回；30 分钟没回执会被自动清掉
       const nowIso = new Date().toISOString();
       try {
         const insResp = await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
@@ -1930,7 +1982,7 @@ async function handleFollowup(
           body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, kind: 'followup', created_at: nowIso }]),
         });
         if (!insResp.ok) {
-          // 035 未执行（无 kind 列）→ 降级不带 kind 落库，至少不丢话术
+          // 036 未执行（无 followup_sent 列不影响插入；无 kind 列才降级）
           await fetch(`${supabaseUrl}/rest/v1/chat_messages`, {
             method: 'POST', headers: { ...sbHeaders, 'Prefer': 'return=minimal' },
             body: JSON.stringify([{ session_id: c.id, role: 'assistant', content: text, created_at: nowIso }]),
@@ -1947,7 +1999,7 @@ async function handleFollowup(
       }
       followup.push({
         session_id: c.id, friend_name: c.name, note: c.note,
-        search_key: makeSearchKey(c.note || c.name), text, shape,
+        search_key: makeSearchKey(c.note || c.name), text, shape: '延续',
         waited_min: c.waited, used_today: c.used + 1,
       });
     } catch (e: any) {

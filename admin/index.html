@@ -503,13 +503,19 @@
                 </div>
                 <!-- [v240 追加发话] 直连专属（配置并入 quota_params，随下方"保存配额参数"一并提交） -->
                 <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border, #333);">
-                    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">追加发话（直连专属 · v240）</div>
+                    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">补话（追加发话 · 直连专属）</div>
+                    <!-- [v243] 本地一键开关：点了立即生效，不用去下面点保存 -->
+                    <div style="display:flex;align-items:center;gap:12px;margin:10px 0 12px;padding:10px 12px;background:rgba(128,128,128,0.10);border-radius:8px;">
+                        <span style="font-size:13px;font-weight:500;">补话总开关</span>
+                        <span id="followup-toggle-state" style="font-size:12px;color:var(--muted);">读取中…</span>
+                        <button id="followup-toggle-btn" class="btn btn-sm" style="margin-left:auto;min-width:96px;">切换</button>
+                    </div>
                     <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
-                        仅 Shizuku 脚本 api_key 直连生效，网页版不参与。判定：你发出话术后
-                        <b>超过触发阈值分钟</b>（默认 5）她还没回，且在该会话最后一条消息之后
-                        <b>超过上限分钟</b>（默认 60）就不再补。每次沉默期只补一条（对方回复后重新计时），
-                        每个会话每天最多补 <b>每会话上限</b> 次（默认 3；补满必须她回过，每次沉默仍只补一条）。话术只走三种形态（自说自话 / 给台阶 / 半句钩子），
-                        绝不催问。22h 沉默唤醒（v210）已下线。
+                        仅手机脚本 api_key 直连生效。规则：脚本主线这一轮跑完、确认<b>当前没有可回复的消息</b>时才介入；
+                        你发出话术后超过 <b>触发阈值分钟</b>（默认 5）她还没回，接着刚才的聊天上下文补一句
+                        （不预设策略、不换话题、绝不催问）；超过 <b>有效上限分钟</b>（默认 60）就不再补。
+                        每次沉默期只补一条（她回复后重新计时），每个会话每天最多补 <b>每会话上限</b> 次。
+                        脚本退出（action=stop）会立即停止补话并清空未发出的排队任务。
                     </p>
                     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-items:end;">
                         <label style="font-size:12px;color:var(--muted);display:block;">总开关
@@ -951,6 +957,7 @@
                 document.getElementById('followup-session-cap').value = qp.followup_session_cap ?? 3;
                 document.getElementById('followup-start').value = qp.followup_start_hour ?? 9;
                 document.getElementById('followup-end').value = qp.followup_end_hour ?? 23;
+                updateFollowupToggleUI();
                 status.textContent = data.system_prompt
                     ? '已加载（最后更新于后台数据库）'
                     : '当前为空，可填写后保存';
@@ -1050,6 +1057,21 @@
             } finally {
                 saveBtn.disabled = false;
             }
+        }
+
+        // [v243 补话开关] 一键开关的显示同步（只是个按钮外观，真实状态在 followup-enabled 复选框中）
+        function updateFollowupToggleUI() {
+            const cb = document.getElementById('followup-enabled');
+            const st = document.getElementById('followup-toggle-state');
+            const btn = document.getElementById('followup-toggle-btn');
+            if (!cb || !st || !btn) return;
+            const on = cb.checked;
+            st.textContent = on ? '● 已开启（主线空闲时自动补话）' : '○ 已关闭（不补话）';
+            st.style.color = on ? '#4ade80' : 'var(--muted)';
+            btn.textContent = on ? '关闭补话' : '开启补话';
+            btn.className = on ? 'btn btn-sm' : 'btn btn-primary btn-sm';
+            btn.style.marginLeft = 'auto';
+            btn.style.minWidth = '96px';
         }
 
         // [v20260812 配额参数] 保存（prompt-update 后台校验管理员 + 白名单校验数值）
@@ -1218,6 +1240,21 @@
             document.getElementById('llm-save-btn').addEventListener('click', saveLlmParams);
             // [配额参数] 保存
             document.getElementById('quota-save-btn').addEventListener('click', saveQuotaParams);
+            // [v243 补话开关] 一键开/关：点了立即保存生效（不用再点"保存配额参数"）
+            document.getElementById('followup-toggle-btn').addEventListener('click', async (ev) => {
+                const btn = ev.currentTarget;
+                const cb = document.getElementById('followup-enabled');
+                cb.checked = !cb.checked;
+                updateFollowupToggleUI();
+                btn.disabled = true;
+                try {
+                    await saveQuotaParams();
+                } finally {
+                    btn.disabled = false;
+                    updateFollowupToggleUI();
+                    toast(cb.checked ? '补话已开启' : '补话已关闭');
+                }
+            });
 
             // 清理幽灵设备（调 cleanup_ghost_devices RPC：先 dry_run 预览 → 确认真删）
             document.getElementById('cleanup-ghost-btn').addEventListener('click', cleanupGhostDevices);
