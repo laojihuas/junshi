@@ -710,8 +710,9 @@ const Friends = {
         fuBtn.style.color = this._followupEnabled ? '#07C160' : '';
     },
 
-    // [v217 约会方向] 加载/切换约会开关（profiles.date_mode，RPC date_mode_mgmt，游客与账号均可用）
-    //   开 = 所有话题自然往见面/约会发展（不硬转）；关 = 约会点到为止不做真实邀约
+    // [v217→v248 约会方向] 加载/切换约会开关（profiles.date_mode，RPC date_mode_mgmt，游客与账号均可用）
+    //   开 = 促成约会（所有话题自然往见面带，有机会就约）
+    //   关 = 吊着不见（不实际见面，但可擦边/调情/挑逗，给画面不给兑现）
     async _loadDateMode() {
         const btn = document.getElementById('date-mode-btn');
         if (!btn) return;
@@ -729,7 +730,7 @@ const Friends = {
                 }
                 this._dateMode = data === true;
                 this._updateDateModeBtn(btn);
-                Utils.toast(this._dateMode ? '已开启约会模式：聊天自然往见面发展' : '已关闭约会模式：约会点到为止');
+                Utils.toast(this._dateMode ? '已开启：促成约会（有机会就约）' : '已关闭：吊着模式（调情挑逗，不实际见面）');
             };
         }
         const sb = getSupabaseClient();
