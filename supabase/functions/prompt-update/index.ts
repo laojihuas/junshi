@@ -43,10 +43,15 @@ const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   followup_start_hour: [0, 24],   // 时间窗开始（北京时间，默认 9）
   followup_end_hour: [0, 24],     // 时间窗结束（北京时间，默认 23）
   followup_scan_limit: [1, 20],   // 单次调用最多处理会话数（默认 10）
-  // [v247 推进节奏] 关系递进节奏（配合即兴趣，L1 就允许捅破一层）
-  push_every_turns: [1, 10],      // 每几轮至少递进一次（默认 2 = 多试探）
-  interest_tier_min: [1, 3],      // 最低按到几层信号就算兴趣指标（默认 1 = 配合/不冷场即算）
-  retreat_cool_turns: [1, 10],    // 试探被她打太极后的冷却轮数（默认 3）
+  // [v249 破层水位] 关系水位推进（水往下渗：蓄水→试探→接住升层/没接回稳）
+  hold_turns: [1, 6],             // 每层蓄水几轮才允许试探（默认 2；暧昧层自动 +1）
+  probe_cool_turns: [1, 8],       // 试探没接住后的冷却轮数（默认 2）
+  demote_after: [2, 10],          // 连续几轮冷场才掉一层（默认 4）
+  fast_mode: [0, 1],              // 极速模式：1=蓄水门槛全压到 1 轮（默认 0）
+  // [v247 已废弃] 旧推进节奏三键（v249 起不再读取，仅为兼容存量配置保留）
+  push_every_turns: [1, 10],
+  interest_tier_min: [1, 3],
+  retreat_cool_turns: [1, 10],
 };
 function validateQuotaParams(v: any): string | null {
   if (typeof v !== 'object' || Array.isArray(v) || v === null) return 'quota_params 必须为 JSON 对象';

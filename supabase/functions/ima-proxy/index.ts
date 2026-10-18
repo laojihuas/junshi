@@ -216,9 +216,9 @@ const SPLIT_RE = /[，。！？；、,.!?;:\s\n\r"'""''（）()【】\[\]]+/;
 //   [v182 用户拍板] 六关系阶段废弃，统一为三阶段；"诱惑"对外一律显示为"恋爱"
 //   [v188 社交地位心法] 每阶段追加社交地位主线：吸引=压对方地位到你之下；舒适=让她靠努力表现把地位往上提；恋爱=地位平等
 const STAGE_HINTS: Record<string, string> = {
-  '吸引': '线上吸引期：核心是展示面与聊天节奏，不是高频聊天。每天 1-2 个高质量话题优于刷屏；可以有态度、带点轻度调侃制造张力，别无意义盘问（年龄/照片/住哪这类信息交换允许自然提问），更别一味顺着对方。递进职责（v247）：本阶段允许把话题往"咱俩"方向带、做语言层面的半步试探（假设性亲近"以后…"/轻度曲解/角色扮演），只要她不躲、不冷场就继续往前；但不用表白和正式邀约来定义关系——捅破一层不等于表白。社交地位心法：把她的社交地位压在你之下——你定调、她追随；可以轻度调侃、慢半拍回应、不急于捧她，让她感觉到你在上位；压制要轻、要带笑，落在"她可爱有趣"的钩子上，绝不贬低。',
-  '舒适': '线上舒适期：建立信任与情感连接——先回应再分享，多聊生活与共同点，制造"咱们是一类人"的感觉；聊天自然升温，多用"咱们/我们都"，对方分享经历时先接住再连接自己的相似故事；不必再端着。递进职责（v247）：她配合、不躲、不冷场就继续往前——允许明确暧昧（"咱俩"、占有欲玩笑、调情、把她放进你的生活画面里），把关系往"已经在里面"的方向说；只是别把"喜欢你/做我女朋友"这类直球定义说出口，让她默认而不让你宣判。社交地位心法：给她向上的台阶——她主动分享、关心、努力表现时，明确接住并给予具体认可（"你懂我""这点真不错"），让她靠努力表现赢得地位上升；认可要具体、不廉价，形成"她表现→你认可"的正向循环。',
-  '恋爱': '线上恋爱期：关系已确立，用文字张力保鲜——回复温暖有生活感、关注细节，但别过度客气生分；可以斗嘴、可以小调侃、可以抛见面邀约与调情，测试一点服从性；守住边界但不温吞，敢于把暧昧兑现成见面。递进职责（v247）：本阶段不再收着——该拉近就拉近、该调情就调情、该约就约，把线上温度兑现成真实见面。社交地位心法：你俩地位平等——互相调情、互相给予、互相接招，谁都不跪谁都不端；可以自然表露在乎，也可以坦然要求她回馈，把暧昧兑现成见面。',
+  '吸引': '线上初识层（吸引）：本层任务=让她觉得你有意思、愿意继续聊。破层动作（本层唯一的试探）：把话题从"信息交换"切到"她的感受/偏好"——问一句她怎么想、为什么喜欢，或自我暴露一句真实的小事（"我最近也…"），看她接不接。她接住（不躲、不冷场、往下说）就往下渗一层；只敷衍就停在本层继续聊，不追问、不解释。别查户口，也别一味顺着。社交地位心法：把你放在她之上——你定调、她追随；轻度调侃带笑、慢半拍回应，绝不贬低。',
+  '舒适': '线上熟悉层（舒适）：本层任务=建立"咱们是一类人"的信任。破层动作（本层唯一的试探）：暧昧玩笑、轻度曲解、"咱俩"式表达、把她放进你的生活画面（"你要是来肯定…"），看她接不接。她接住（反打、补细节、也开玩笑）就往下渗一层；她打太极或变正经就立刻收回，继续聊生活拉连接，过几轮再试。社交地位心法：给她向上的台阶——她表现就具体认可，形成"她表现→你认可"的循环。',
+  '恋爱': '线上暧昧层：本层任务=把暧昧坐实成"你们之间有事"。破层动作（本层唯一的试探）：模糊邀约（"哪天带你去吃那家"）→ 具体邀约（给两个时间二选一）；约会开关关闭时改为更进一步的挑逗与画面想象，但不落地见面。她接住（应约、接梗、主动加码）就推进；她回避就退回来继续调情，不追问。社交地位心法：地位平等——互相调情、互相接招，谁都不跪谁都不端。',
 };
 
 // [v182 三阶段统一] 存量记忆卡/LLM 输出可能仍是旧六阶段（陌生/朋友/追求/暧昧/恋爱/挽回）
@@ -560,9 +560,11 @@ Deno.serve(async (req) => {
       const n = Number(v);
       return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : dflt;
     };
-    const pushEveryTurns = numQp(qpRaw.push_every_turns, 2, 1, 10);
-    const interestTierMin = numQp(qpRaw.interest_tier_min, 1, 1, 3);
-    const retreatCoolTurns = numQp(qpRaw.retreat_cool_turns, 3, 1, 10);
+    // [v249 破层水位] 蓄水/冷却/降层阈值（后台 quota_params 可调）
+    const holdTurns = numQp(qpRaw.hold_turns, 2, 1, 6);
+    const probeCoolTurns = numQp(qpRaw.probe_cool_turns, 2, 1, 8);
+    const demoteAfter = numQp(qpRaw.demote_after, 4, 2, 10);
+    const fastMode = qpRaw.fast_mode === true || qpRaw.fast_mode === 'true' || Number(qpRaw.fast_mode) === 1;
 
     // ---- LLM 凭证（[B方案] 完全移除 IMA，仅保留 LLM）----
     const llmKey = Deno.env.get('LLM_API_KEY') || '';
@@ -667,7 +669,7 @@ Deno.serve(async (req) => {
     // [v11] 节奏建议（buildSystemContent 产出 → updateMemoryCard 回写；同样提到顶层防作用域事故）
     let pulseAdvice: { delay?: boolean; short?: boolean } | null = null;
     // [v247 推进节奏] 本轮递进计划（buildSystemContent 消费 + updateMemoryCard 记账；顶层声明防作用域事故）
-    let pushPlan: { due: boolean; tier: 0 | 1 | 2 | 3; level: 0 | 1 | 2 | 3; cool: boolean } | null = null;
+    let ladderPlan: LadderPlan | null = null;
     // [v57] 长期记忆本轮注入条数（_debug 用；同样提到顶层防作用域事故）
     let factsInjected = 0;
     // [v76] 输出后时间校验命中词（_debug 用；null=未触发）
@@ -854,21 +856,18 @@ Deno.serve(async (req) => {
     if (!switchTopic && storyBank && !isLite && !storyHit && !unintelligible) {
       storyNudge = STORY_NUDGE_RE.test(String(query || ''));
     }
-        // [v247 推进节奏] 本轮递进计划（纯规则，零 LLM、零延迟）
-        //   轮次账本存 memory_card.push（updateMemoryCard 回写）；tier 取她最近一条消息的反馈质量
-        if (!isLite) {
-          const ps = memoryCard?.push || {};
-          const roundNo = Number(ps.round || 0) + 1;
-          const interest = assessInterestTier(history, switchTopic ? '' : String(query || ''));
-          // 用户口径：配合即兴趣 → 默认 interestTierMin=1，L1 就算通过
-          const level = (interest.tier >= interestTierMin ? pushLevelOf(interest.tier) : 0) as 0 | 1 | 2 | 3;
-          const cool = Number(ps.cool || 0) > 0;
-          const sinceLast = roundNo - Number(ps.last || 0);
-          // 正常节奏：每 pushEveryTurns 轮递进一次；她给到 L2/L3 时可以连推（配合就往前走）
-          const due = !cool && level >= 1 && (sinceLast >= pushEveryTurns || (level >= 2 && sinceLast >= 1));
-          pushPlan = { due, tier: interest.tier, level, cool };
-        }
-        const built = buildSystemContent({
+    // [v249 破层水位] 本轮水位计划（纯规则，零 LLM、零延迟）
+    //   账本存 memory_card.ladder（updateMemoryCard 回写）；tier 取她这句话的反馈质量
+    if (!isLite) {
+      const interest = assessInterestTier(history, switchTopic ? '' : String(query || ''));
+      ladderPlan = computeLadder(memoryCard, interest.tier, switchTopic ? '' : String(query || ''), {
+        holdTurns, probeCool: probeCoolTurns, demoteAfter, fast: fastMode,
+        dateMode,
+        manual: memoryCard?.profile?.stage_source === 'manual',
+      });
+      console.info(`[ladder] layer=${ladderPlan.layer} hold=${ladderPlan.hold}/${ladderPlan.need} probe=${ladderPlan.probe} cool=${ladderPlan.cool} action=${ladderPlan.action} tier=${interest.tier}(${interest.reason})`);
+    }
+    const built = buildSystemContent({
           systemPrompt: effectivePrompt,
           userBio,
           memoryCard,
@@ -906,8 +905,8 @@ Deno.serve(async (req) => {
           storyHit,
           // [v218 经历库语义兜底] 本轮是否触发"挑一条经历带出"轻提醒（无精准命中时的兜底）
           storyNudge,
-          // [v247 推进节奏] 本轮该不该递进、允许递进到哪一层（纯规则算出）
-          push: pushPlan,
+          // [v249 破层水位] 本轮水位计划（该蓄水/该试探/该冷却/该降层）
+          ladder: ladderPlan,
           // [v212 方案Y] full 也注入分诊+策略（替代战术卡组）；lite 不注入
           wb: isWb,
           wbTriage: !isLite ? wbTriage : null,
@@ -1048,9 +1047,8 @@ Deno.serve(async (req) => {
           currentReply: (reply && reply !== '掉线了') ? reply : null,
           // [v195 逻辑记忆] 本轮生成的逻辑脉络（覆盖写入 logic_summary；null=保留旧值）
           logicSummary,
-          // [v247 推进节奏] 试探账本：轮次自增 / 递进记录 / 冷场冷却
-          push: pushPlan,
-          retreatCoolTurns,
+          // [v249 破层水位] 水位账本：蓄水/试探/冷却/降层（纯规则，随卡落库）
+          ladder: ladderPlan,
         });
       } catch (e: any) {
         console.error('记忆卡更新失败:', e.message);
@@ -1130,8 +1128,8 @@ Deno.serve(async (req) => {
         // [v183] 锚点注入模式（验证三态：full=她提梗/light=每4轮提醒/none=不注入）
         anchor_mode: anchorMode,
         memory_stage: memoryCard?.profile?.stage || null,
-        // [v247 推进节奏] 本轮递进计划（验证兴趣分层/递进节奏是否生效）
-        push: pushPlan ? { due: pushPlan.due, tier: pushPlan.tier, level: pushPlan.level, cool: pushPlan.cool } : null,
+        // [v249 破层水位] 本轮水位计划（验证蓄水/试探/冷却/降层是否生效）
+        ladder: ladderPlan ? { layer: ladderPlan.layer, hold: ladderPlan.hold, need: ladderPlan.need, probe: ladderPlan.probe, cool: ladderPlan.cool, action: ladderPlan.action, probe_result: ladderPlan.probeResult, tier: ladderPlan.tier } : null,
         // [v195 逻辑记忆] 本轮生成的逻辑脉络（验证生成/注入；null=未生成或关闭）
         logic_summary: (logicSummary && logicSummary.text) || memoryCard?.logic_summary?.text || null,
         // [v58] 关系目标（验证目标引导注入）
@@ -1500,7 +1498,7 @@ type EmotionTone = {
 };
 
 type MemoryCard = {
-  profile?: { stage?: string; personality?: string; relationship_note?: string; recent_events?: string };
+  profile?: { stage?: string; stage_source?: string; personality?: string; relationship_note?: string; recent_events?: string; anchor?: string; age?: string; region?: string };
   recent_user_messages?: string[];
   // [v9] 军师(自己)发过的话：窗口 history 丢失后仍能知道自己说过什么，防重复（按 session_id 隔离）
   recent_self_messages?: string[];
@@ -1513,9 +1511,13 @@ type MemoryCard = {
   // [v195→v201 逻辑记忆] 最近 N 条消息的逻辑脉络（过去+现在 ≤60 字 + 未来推进方向 ≤40 字，覆盖式单条）：
   //   每轮 LLM 生成 → 下一轮注入动态区作既定事实基准（防前后矛盾/忘约定）+ 推进线索（往哪想）
   logic_summary?: { text: string; direction?: string; round: number; at: string };
-  // [v247 试探账本] 推进节奏状态（纯规则维护，零 LLM）：
-  //   round=累计轮次；last=最近一次递进的轮次；cool=剩余冷却轮数；ok/fail=试探被接住/打太极计数
-  push?: { round?: number; last?: number; cool?: number; ok?: number; fail?: number };
+  // [v249 破层水位] 关系水位状态（纯规则维护，零 LLM；每轮即时写回）：
+  //   layer=1吸引/2舒适/3暧昧/4已约见；hold=本层蓄水轮数；probe=待判定的试探(0/1)；
+  //   cool=剩余冷却轮数；fails=本层连续冷场数（到阈值降层）；round=总轮次；ok/fail=累计接住/没接
+  ladder?: {
+    layer: number; hold: number; probe: number; cool: number; fails: number;
+    round: number; ok: number; fail: number; last: number; stage_at?: string;
+  };
   // [v11] 迷男OS 引擎层：节奏 / 情绪基线（毫秒级规则统计，随记忆卡落库）
   pulse?: PulseState;
   balance?: BalanceState;
@@ -2160,6 +2162,8 @@ async function readMemoryCard(supabaseUrl: string, token: string, anonKey: strin
       delete parsed.topic_sovereignty;
       delete parsed.last_transition_type;
       delete parsed.bridge_hook_planted;
+      // [v249 破层水位] v247 的 push 账本已废弃（合并进 ladder），读入即剥离
+      delete parsed.push;
       if (parsed.profile && typeof parsed.profile.stage === 'string') {
         parsed.profile.stage = normalizeStage(parsed.profile.stage);
       }
@@ -2200,9 +2204,8 @@ async function updateMemoryCard(ctx: {
   currentReply?: string | null;
   // [v195→v201 逻辑记忆] 本轮生成的逻辑脉络（非空 → 覆盖写入 logic_summary；null=保留旧值）
   logicSummary?: { text: string; direction: string } | null;
-  // [v247 推进节奏] 本轮递进计划 + 冷却轮数配置（写"试探账本"，纯规则）
-  push?: { due: boolean; tier: 0 | 1 | 2 | 3; level: 0 | 1 | 2 | 3; cool: boolean } | null;
-  retreatCoolTurns?: number;
+  // [v249 破层水位] 本轮水位计划（写"水位账本"，纯规则）
+  ladder?: LadderPlan | null;
 }): Promise<void> {
   const card: MemoryCard = ctx.existingCard || { profile: {}, recent_user_messages: [] };
   // [v20260812 仅评价过滤] 本会话尚无任何"女生原话"历史 → 本轮 query 是首条（用户投喂资料）
@@ -2322,30 +2325,30 @@ async function updateMemoryCard(ctx: {
     card.updated_at = new Date().toISOString();
   }
 
-  // [v247 推进节奏] 试探账本（纯规则，随记忆卡落库）
-  //   round=累计轮次；last=最近一次递进的轮次；cool=剩余冷却轮数；ok/fail=试探接住/冷场计数
-  //   回撤判定：她这轮明显冷场（tier=0，单字敷衍/没接话）→ 立即冷却 retreatCoolTurns 轮
-  if (ctx.push) {
-    const ps = card.push || {};
-    const roundNo = Number(ps.round || 0) + 1;
-    const coolTurns = Math.max(1, Math.min(10, Number(ctx.retreatCoolTurns ?? 3)));
-    let cool = Math.max(0, Number(ps.cool || 0) - 1);
-    let last = Number(ps.last || 0);
-    let ok = Number(ps.ok || 0);
-    let fail = Number(ps.fail || 0);
-    if (ctx.push.tier === 0) {
-      // 她这轮冷淡/敷衍 → 本轮不能再递进，冷却若干轮
-      cool = coolTurns;
-      fail += 1;
-    } else if (ctx.push.due) {
-      // 本轮正常递进 → 记账（若上一轮刚递进且她这轮配合，算接住一次）
-      if (last === roundNo - 1) ok += 1;
-      last = roundNo;
-    } else if (last === roundNo - 1) {
-      // 上轮递进了，她这轮没冷场 → 算接住
-      ok += 1;
+  // [v249 破层水位] 水位账本（纯规则，随记忆卡落库）
+  //   layer/hold/probe/cool/fails 由 computeLadder 算好；这里只累计 round/ok/fail 与升层时间
+  if (ctx.ladder) {
+    const p = ctx.ladder;
+    const prev: any = card.ladder || {};
+    const round = Number(prev.round || 0) + 1;
+    const leveledUp = p.probeResult === 'ok' && Number(prev.layer || 0) !== p.layer;
+    card.ladder = {
+      layer: p.layer,
+      hold: p.hold,
+      probe: p.probe,
+      cool: p.cool,
+      fails: p.fails,
+      round,
+      ok: Number(prev.ok || 0) + (p.probeResult === 'ok' ? 1 : 0),
+      fail: Number(prev.fail || 0) + (p.probeResult === 'fail' ? 1 : 0),
+      last: p.action === 'probe' ? round : Number(prev.last || 0),
+      stage_at: leveledUp ? new Date().toISOString() : prev.stage_at,
+    };
+    // stage 只是 layer 的投影（手动标注时 computeLadder 已锁定层级，映射回来值不变）
+    card.profile = { ...(card.profile || {}) };
+    if (card.profile.stage_source !== 'manual') {
+      card.profile.stage = LAYER_STAGE[p.layer] || '吸引';
     }
-    card.push = { round: roundNo, last, cool, ok, fail };
   }
 
   // [v195→v201 逻辑记忆] 本轮生成成功 → 覆盖写入（单条，记录轮次/时间）；失败/未生成 → 保留旧值
@@ -2388,8 +2391,7 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       return (isProfileFeed(text) ? '[背景资料] ' : '[对话] ') + `对方：${truncateText(text, 200)}`;
     })
     .join('\n');
-  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近内容：\n${recentDialogue || '（无）'}\n说明：[背景资料] 行是你的用户粘贴的对方背景资料（非对方原话），可用于提取静态画像字段（age/region/personality 等），但**不算真实对话，不得据此判定"聊过某个话题"、不得作为关系阶段推进依据**；[对话] 行才是对方本人说的话。\n要求：输出合并更新后的 JSON，字段：stage（关系阶段，只能是"吸引/舒适/恋爱"）、personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）。\n`
-    + `[v60→v182 阶段推进] 你是主动推进方：她给密集兴趣信号（主动追问/发照片/秒回/调侃/话变长/约你），或你试探邀约后她积极接住（应约/回撩/延长话题/发照片/接梗）→ stage 按"吸引→舒适→恋爱"升一级（最多一级，不越级）；她连续冷淡/回避/转移/争吵 → 降级到"吸引"；拿不准保持现状。只输出 JSON 对象，不要任何其他文字。`;
+  const prompt = `你是恋爱顾问的档案整理助手。根据最近的对话，维护"对方"的画像档案。\n当前档案：${cur}\n最近内容：\n${recentDialogue || '（无）'}\n说明：[背景资料] 行是你的用户粘贴的对方背景资料（非对方原话），可用于提取静态画像字段（age/region/personality 等），但**不算真实对话，不得据此判定"聊过某个话题"、不得作为关系阶段推进依据**；[对话] 行才是对方本人说的话。\n要求：输出合并更新后的 JSON，字段：personality（性格描述，≤50字）、relationship_note（关系背景，≤80字）、recent_events（最近重要事件，≤100字）、anchor（你俩对话中的长期话题锚点：反复出现或充满笑点的具体意象，如宠物/店/地名/共同物件/口头禅，≤20字；无则空字符串）、age（对方年龄，如"25岁"或"25"；对方没明确说过则空字符串，保留已有值不清空）、region（对方提到的地点/地址信息——城市或小地方都算，不限大小：如"北京""上海浦东""平南""XX县""XX村"；对方说"我是XX人/我住XX/我在XX/我家在XX"这类话都算，只要不是开玩笑；同时提到多个地点时选最小最具体的那个（如"广西"和"平南"同时出现→"平南"）；对方完全没提及则空字符串，保留已有值不清空）。\n`
   try {
     const content = await llmChat(llmKey, llmBase, llmModel, [{ role: 'user', content: prompt }], {
       temperature: 0.3, maxTokens: 500, _stage: 'extract_profile',
@@ -2404,7 +2406,6 @@ async function extractProfile(llmKey: string, llmBase: string, llmModel: string,
       .slice(0, 3);
     return {
       profile: {
-        stage: typeof p.stage === 'string' && p.stage ? normalizeStage(p.stage) : '吸引',
         personality: typeof p.personality === 'string' ? p.personality.slice(0, 50) : '',
         relationship_note: typeof p.relationship_note === 'string' ? p.relationship_note.slice(0, 80) : '',
         recent_events: typeof p.recent_events === 'string' ? p.recent_events.slice(0, 100) : '',
@@ -2785,13 +2786,109 @@ function assessInterestTier(history: any[], currentText = ''): { tier: 0 | 1 | 2
   return { tier: 0, reason: '疑似冷场' };
 }
 
-// [v247] 递进动作阶梯：tier 决定本轮"允许递进到哪一层"，不跳级
-//   0=不递进（先把她拉回来），1=语言半步，2=明确暧昧，3=拉近+邀约
-function pushLevelOf(tier: number): 0 | 1 | 2 | 3 {
-  if (tier >= 3) return 3;
-  if (tier === 2) return 2;
-  if (tier === 1) return 1;
-  return 0;
+// ============================================================
+// [v249 破层水位] 关系水位状态机（纯规则，零 LLM，每轮即时推进）
+//   用户口径（2026-10-18）：关系不是"等成熟才升级"，而是水往下渗——
+//   每层先蓄水到站稳 → 做一个破层动作试探 → 她接住就立刻渗下一层；
+//   没接不降层，退回本层重新蓄水；连续冷场才掉一层。
+//   层：1=吸引 2=舒适 3=暧昧 4=已约见（线下）
+//   上层由 extractProfile 判 stage 的旧逻辑已删除，stage 现在只是 layer 的投影。
+// ============================================================
+const LAYER_NAMES: Record<number, string> = { 1: '吸引', 2: '舒适', 3: '暧昧', 4: '已约见' };
+const LAYER_STAGE: Record<number, string> = { 1: '吸引', 2: '舒适', 3: '恋爱', 4: '恋爱' };
+// 邀约层的"接住"必须更硬：应约词或 tier>=2，避免一句"哈哈"就被判成已约见
+const MEET_YES_RE = /(有空|可以|行啊|好啊|好呀|没问题|哪天|周末|见|约|出去|来找|安排|几点|哪儿|去哪|你想)/;
+
+type LadderPlan = {
+  layer: number; hold: number; need: number; cool: number; probe: number; fails: number;
+  action: 'settle' | 'probe' | 'cool' | 'demote' | 'done';
+  probeResult: 'ok' | 'fail' | 'none';
+  tier: number;
+};
+
+function stageToLayer(stage?: string): number {
+  if (stage === '恋爱') return 3;
+  if (stage === '舒适') return 2;
+  return 1;
+}
+
+// 蓄水门槛：暧昧层比前两层多蓄一轮（防"两句话就约见面"）；fast_mode 全压到 1
+function holdNeedOf(layer: number, holdTurns: number, fast: boolean): number {
+  const base = fast ? 1 : Math.max(1, Math.min(6, Number(holdTurns) || 2));
+  return layer >= 3 ? base + 1 : base;
+}
+
+function computeLadder(
+  card: MemoryCard | null,
+  tier: number,
+  text: string,
+  opts: { holdTurns: number; probeCool: number; demoteAfter: number; fast: boolean; dateMode: boolean; manual: boolean },
+): LadderPlan {
+  const prev: any = (card && card.ladder) || {};
+  let layer = Number(prev.layer) >= 1 && Number(prev.layer) <= 4 ? Number(prev.layer) : stageToLayer(card?.profile?.stage);
+  let hold = Math.max(0, Number(prev.hold) || 0);
+  let probe = Number(prev.probe) === 1 ? 1 : 0;
+  let cool = Math.max(0, Number(prev.cool) || 0);
+  let fails = Math.max(0, Number(prev.fails) || 0);
+  const cap = opts.dateMode ? 4 : 3;
+  const need = holdNeedOf(layer, opts.holdTurns, opts.fast);
+  const coolTurns = Math.max(1, Math.min(8, Number(opts.probeCool) || 2));
+
+  // 手动标注层级：锁定，不升不降，只回报当前水位（前端手动设置优先）
+  if (opts.manual) {
+    return { layer, hold: Math.min(hold, need), need, cool: 0, probe: 0, fails: 0, action: 'settle', probeResult: 'none', tier };
+  }
+
+  let action: LadderPlan['action'] = 'settle';
+  let probeResult: LadderPlan['probeResult'] = 'none';
+
+  // 冷却递减（每轮开始扣一格）
+  cool = Math.max(0, cool - 1);
+
+  if (probe === 1) {
+    // 1) 先判"上一轮那个破层动作"的结果——她这句话就是对它的回应
+    const hardOk = layer >= 3 ? (tier >= 2 || MEET_YES_RE.test(String(text || ''))) : true;
+    if (tier >= 1 && hardOk && layer < cap) {
+      layer += 1; hold = 0; fails = 0; probe = 0;
+      probeResult = 'ok';
+      action = layer >= 4 ? 'done' : 'settle';
+    } else if (tier >= 1 && layer >= cap) {
+      // 已经到当前模式的上限（吊着模式=暧昧层）：她接住了也没有下一层，继续留在本层
+      probe = 0; probeResult = 'ok';
+      hold = Math.min(hold + 1, need);
+      action = 'settle';
+    } else {
+      // 没接住：不降层，退回本层重新蓄水 + 冷却（这就是"水渗不下去先蓄着"）
+      probe = 0; probeResult = 'fail';
+      cool = coolTurns; fails += 1;
+      action = 'cool';
+    }
+  } else if (tier >= 1) {
+    // 2) 没在等结果：她配合 → 蓄水
+    hold += 1; fails = 0;
+  } else {
+    // 3) 她这轮敷衍/回避 → 不试探；连续到阈值才掉一层
+    fails += 1;
+    if (fails >= Math.max(1, Math.min(10, Number(opts.demoteAfter) || 4)) && layer > 1) {
+      layer -= 1; hold = 0; fails = 0; cool = coolTurns;
+      action = 'demote';
+    } else {
+      cool = Math.max(cool, 1);
+      action = 'cool';
+    }
+  }
+
+  // 4) 试探机会：站稳 + 不在冷却 + 还有下一层 → 本轮做一次破层动作
+  if (probe === 0 && action !== 'demote' && action !== 'done' && cool <= 0 && layer < cap) {
+    const needNow = holdNeedOf(layer, opts.holdTurns, opts.fast);
+    if (hold >= needNow) {
+      action = 'probe'; probe = 1;
+    }
+  }
+  if (layer >= cap && action === 'settle') action = 'settle';
+
+  const needOut = holdNeedOf(layer, opts.holdTurns, opts.fast);
+  return { layer, hold: Math.min(hold, needOut), need: needOut, cool, probe, fails, action, probeResult, tier };
 }
 
 // [v73→v182 三阶段统一] 战术类别与阶段判定（每轮一次，纯规则零 LLM）
@@ -2907,9 +3004,8 @@ function buildSystemContent(opts: {
   storyHit?: { label: string; line: string } | null;
   // [v218 经历库语义兜底] 无精准命中但聊到生活/吃喝玩乐话题 → 动态区轻提醒"挑最搭的一条"
   storyNudge?: boolean;
-  // [v247 推进节奏] 本轮递进计划（main 处纯规则算出，零 LLM）：
-  //   due=本轮该递进；tier=她当前信号层级；level=本轮允许递进到的层级；cool=试探刚被回避，冷却中
-  push?: { due: boolean; tier: 0 | 1 | 2 | 3; level: 0 | 1 | 2 | 3; cool: boolean } | null;
+  // [v249 破层水位] 本轮水位计划（main 处纯规则算出，零 LLM）
+  ladder?: LadderPlan | null;
 }): { systemContent: string; dynamicContent: string; pulseAdvice: { delay?: boolean; short?: boolean } | null; factsInjected: number } {
   // [v20260813 缓存重构] 结构：systemContent=字节级稳定块（进 system 前缀，整段命中缓存）；
   //   dynamicContent=每轮/低频变化块（由组装处注入最后一条 user 消息【军师内参】区，
@@ -3066,20 +3162,18 @@ function buildSystemContent(opts: {
       + `- 目标：每一次互动都让她更想见你一点，同时保持你随时能抽身的姿态——若即若离才是最高价值。`;
   }
 
-  // [v247 推进节奏] 关系递进总纲（用户口径 2026-10-18：配合即兴趣，L1 就允许捅破一层）
-  //   放在固定区 = 字节级稳定，命中 DeepSeek 前缀缓存（≈0 成本/轮）；
-  //   lite 不注入（低配版保持极简固定区）。
+  // [v249 破层水位] 关系推进总纲：水往下渗（替换 v247【推进节奏】）
+  //   固定区 = 字节级稳定，命中 DeepSeek 前缀缓存（≈0 成本/轮）；lite 不注入
   if (!opts.lite) {
-    s += `\n\n【推进节奏】(全程生效，优先级高于"别着急/慢慢来"这类保守倾向)\n`
-      + `- 你的主线不是陪聊，是把关系往前挪。只接话不递进=原地踏步，聊再久也进不了暧昧；该递进不递进和她拒绝你一样掉价。\n`
-      + `- 兴趣怎么算（她不主动也算）：她只要配合、不躲避、不冷场、愿意接着聊，就是兴趣指标——不必等她主动表态。\n`
-      + `  · L1 配合：不躲敏感/共谋话题、接你的梗、不冷场 → 允许捅破一层（语言半步）。\n`
-      + `  · L2 加料：接梗反打、主动补细节、开始反问你 → 允许明确暧昧调情（"咱俩"、占有欲玩笑）。\n`
-      + `  · L3 投入：主动找你、发照片、提见面 → ${opts.dateMode ? '允许拉近关系 + 顺势邀约' : '允许拉近关系 + 明确暧昧挑逗（本账号为吊着模式，不给任何真实见面安排）'}。\n`
-      + `- 递进阶梯（一层一层来，不跳级）：语言半步（"以后…"/轻度曲解/角色扮演）→ 明确暧昧（"咱俩"/占有欲玩笑/调情）→ ${opts.dateMode ? '见面邀约' : '暧昧挑逗与想象画面（吊着模式：阶梯到调情为止，不落地成见面）'}。\n`
-      + `- 捅破≠表白：不出现"我喜欢你/做我女朋友/我们在一起吧"这类直球定义；用行动化、画面化的说法让她默认你们已经在里面。\n`
-      + `- 回撤条款：她打太极、只回"嗯/哦/哈哈"不接话、转移话题、明确回避 → 立刻退回上一层，冷却几轮不再递进；不追问、不解释、不重复试探。\n`
-      + `- 多试探：只要她还在配合，每隔一两轮就往前挪半步，别等她给足信号才动。`;
+    s += `\n\n【破层法则】(全程生效，优先级高于"别着急/慢慢来"这类保守倾向)\n`
+      + `- 关系是渗下去的，不是等出来的：四层——吸引→舒适→暧昧→约见。每层都能在一两个小时内走完，也能卡几十轮；快慢由她接不接决定，不由日历决定。\n`
+      + `- 每层只有一个破层动作，不跳级、不跨层出招：吸引=把话题从信息交换切到她的感受/偏好；舒适=暧昧玩笑/轻度曲解/"咱俩"；暧昧=模糊邀约→具体邀约（约会开关关闭时改为挑逗，不落地见面）。\n`
+      + `- 蓄水：她在本层配合满几轮才算站稳（系统每轮告诉你进度）。没站稳就把这一层聊舒服、留钩子，不要急着试探；站稳了就必须试，不许一直拖着。\n`
+      + `- 试探只是一句话：说完就停，看她怎么接。她接住（不躲、不冷场、反打、补细节、往下说）= 立刻往下渗一层；她打太极/转移/变正经 = 不降层，退回来把这一层重新聊稳，过几轮再试。\n`
+      + `- 试探没接住时：不追问、不解释、不把同一句换个说法再说一遍、不道歉。当作没发生过，继续自然聊。\n`
+      + `- 只有连着几轮冷淡/回避才会掉一层——掉层不是失败，是重新蓄水。\n`
+      + `- 目标始终是线下见面：网聊只是手段。到暧昧层就把见面当成默认下一步，别在线上无限期拖。\n`
+      + `- 捅破≠表白：不出现"我喜欢你/做我女朋友/我们在一起吧"这类直球定义；用行动化、画面化的说法让她默认你们已经在里面。`;
   }
 
   // [v20260813 缓存重构] ===== 动态区（注入最后一条 user 消息的【军师内参】，不占 system）=====
@@ -3167,29 +3261,39 @@ function buildSystemContent(opts: {
     }
   }
 
-  // [v247 推进节奏] 本轮推进位：系统按"她的实际反馈"给动作，专治"全程只接话不递进"
-  //   纯规则产出（零 LLM），所以每轮都即时；lite 不注入（低配版零机制）
-  if (opts.push && !opts.lite) {
-    const p = opts.push;
+  // [v249 破层水位] 本轮破层位：系统按她的反馈 + 水位账本给动作
+  //   纯规则产出（零 LLM），每轮即时；lite 不注入
+  if (opts.ladder && !opts.lite) {
+    const p = opts.ladder;
+    const layerName = LAYER_NAMES[p.layer] || '吸引';
     const tierText = p.tier >= 3 ? 'L3 投入（主动找你/发照片/提见面）'
       : p.tier === 2 ? 'L2 加料（接梗反打/补细节/反问你）'
       : p.tier === 1 ? 'L1 配合（不躲避、不冷场、愿意接着聊）'
       : 'L0 冷场（单字敷衍/没接话）';
-    d += `\n\n【本轮推进位】(系统按她的反馈算的本轮动作，仅执行，不复述)\n- 她当前信号：${tierText}\n`;
-    if (p.cool) {
-      d += `- 本轮动作：试探冷却中（她前一轮打了太极/回避）→ 本轮不递进，正常接话、把气氛拉回来即可；不追问、不解释、不重复试探。\n`;
-    } else if (!p.due) {
-      d += `- 本轮动作：不必强推，先接住她这句话并留个钩子（下一轮该递进）；不许只当客服回话。\n`;
+    d += `\n\n【本轮破层位】(系统按她的反馈和水位算的，仅执行、不复述)\n`
+      + `- 当前层：${layerName}（蓄水 ${p.hold}/${p.need}）　她这轮信号：${tierText}\n`;
+    if (p.probeResult === 'ok') {
+      d += `- 上一轮那个试探：她接住了 → 已经渗到「${layerName}」层。本轮在这层重新蓄水，别马上又试。\n`;
+    } else if (p.probeResult === 'fail') {
+      d += `- 上一轮那个试探：她没接 → 不降层，退回本层重新蓄水。本轮不许再试探、不许提这件事。\n`;
+    }
+    if (p.action === 'probe') {
+      const act = p.layer >= 3
+        ? (opts.dateMode ? '模糊邀约（"哪天带你去吃那家"）并给两个时间让她二选一' : '更进一步的挑逗与画面想象（吊着模式：不敲定任何真实见面）')
+        : p.layer === 2
+        ? '暧昧方向的玩笑：曲解她的话、把"咱俩"说出来、或把她放进你的生活画面（例如"改到九点还能笑 咱俩这命挺配"）'
+        : '把话题切到她的感受/偏好（问一句她怎么想、为什么喜欢，或自我暴露一句真实的小事）';
+      d += `- 本轮动作：这一层已经站稳 → 做一个破层动作：${act}。一句话完成，说完就停。\n`
+        + `- 这一句必须明显比上一轮更近：不是接话、不是夸奖、不是安慰、不是信息交换——是把她往你这边拉。\n`
+        + `- 不许铺垫、不许解释、不许问"可以吗"，也不许表白。`;
+    } else if (p.action === 'cool') {
+      d += `- 本轮动作：${p.cool > 0 ? '冷却中（刚试探过她没接）' : '她这轮偏冷'} → 不试探，正常接住她的话把气氛拉回来，可以留个钩子；不追问、不解释。\n`;
+    } else if (p.action === 'demote') {
+      d += `- 本轮动作：她连着冷了几轮，水位退到「${layerName}」层 → 放低强度，先把聊天聊回自然，别再往前拱。\n`;
+    } else if (p.action === 'done' || p.layer >= 4) {
+      d += `- 本轮动作：已经约到线下，这一层任务结束——线上只维持温度，不再做破层试探。\n`;
     } else {
-      const levelText = p.level >= 3
-        ? (opts.dateMode
-          ? '拉近关系 + 顺势提见面（借她的话头带，不生硬）'
-          : '拉近关系 + 暧昧挑逗（吊着模式：给画面、给期待，但不敲定任何真实见面）')
-        : p.level === 2
-        ? '明确暧昧调情（"咱俩"、占有欲玩笑、把她放进你的生活画面）'
-        : '语言半步（"以后…"式的假设性亲近/轻度曲解/角色扮演）';
-      d += `- 本轮动作：接住她这句话之后，把关系往前捅一层——本轮允许到「${levelText}」。一句话完成，不解释、不铺垫、不问"可以吗"。\n`
-        + `- 铁律：捅破≠表白，不说"我喜欢你/做我女朋友/我们在一起吧"这类直球定义。`;
+      d += `- 本轮动作：继续蓄水（还差 ${Math.max(0, p.need - p.hold)} 轮站稳）——把这一层聊舒服、留个钩子，本轮不试探。\n`;
     }
   }
 
