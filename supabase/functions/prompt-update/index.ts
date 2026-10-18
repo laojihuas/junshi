@@ -26,7 +26,7 @@ const LLM_PARAM_RANGE: Record<string, [number, number] | string[]> = {
 };
 
 // [v20260812 配额参数搬后台] 允许的配额键 + 数值区间（v20260813：加 guest_daily；cap 允许 0=不封顶）
-// [v210 主动唤醒] 新增 wake_* 四键（唤醒配置并入配额参数卡，随"保存配额参数"一并提交）
+// [v244] v210 的 wake_* 四键已随 22h 唤醒功能一并移除（配置、列、RPC 全部清理）
 const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   guest_daily: [1, 10000],        // 游客每日（默认 20）
   free_daily_tier1: [1, 10000],   // 注册用户 0-3 天（默认 50）
@@ -35,11 +35,7 @@ const QUOTA_PARAM_RANGE: Record<string, [number, number]> = {
   vip_daily_limit: [1, 10000],    // 激活码日配额（默认 500）
   invite_bonus_each: [1, 1000],   // 邀请奖励每次（默认 50）
   invite_bonus_cap: [0, 10000],   // 邀请累计封顶（默认 0=不封顶）
-  wake_enabled: [0, 1],           // [v210→v240 下线] 22h 唤醒总开关（保留 key 兼容存量配置，已不生效）
-  wake_hours: [1, 720],           // [v210→v240 下线] 保留兼容
-  wake_start_hour: [0, 24],       // [v210→v240 下线] 保留兼容
-  wake_end_hour: [0, 24],         // [v210→v240 下线] 保留兼容
-  // [v240 追加发话] 发出后 N 分钟没回复 → 补一条（账号日上限）；只服务手机直连
+  // [v240 追加发话] 发出后 N 分钟没回复 → 补一条；只服务手机直连
   followup_enabled: [0, 1],       // 总开关（0=关 1=开，默认 1）
   followup_minutes: [1, 240],     // 沉默触发阈值（默认 5 分钟）
   followup_max_minutes: [1, 720], // 上限：超过这么久就不补了（默认 60 分钟）

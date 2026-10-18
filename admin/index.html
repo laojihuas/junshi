@@ -237,11 +237,67 @@
             </div>
         </div>
 
+        <!-- [v244 补话总开关] 从"配额参数"里提到首页顶部：一眼看到、一键开关 + 脚本在线/今日补话状态 -->
+        <div class="card" id="followup-card" style="margin-top:20px;">
+            <div class="card-title">
+                <span>补话（主动补发） <span style="font-size:12px;color:var(--muted);font-weight:400;">手机脚本直连专属 · 主线确认没有可回消息时才补</span></span>
+                <span id="fu-script-badge" class="badge badge-free" style="background:#ECEFF1;color:#546E7A;">脚本状态读取中…</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
+                <span id="followup-toggle-state" style="font-size:13px;font-weight:500;color:var(--muted);">读取中…</span>
+                <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">
+                    <input id="followup-enabled" type="checkbox" style="transform:scale(1.25);"> 总开关
+                </label>
+                <button id="followup-toggle-btn" class="btn btn-primary btn-sm" style="min-width:96px;">切换</button>
+                <button id="followup-refresh-btn" class="btn btn-outline btn-sm">🔄 刷新状态</button>
+                <span style="font-size:12px;color:var(--muted);margin-left:auto;">阈值 / 上限 / 时间窗 / 每会话次数 在「提示词管理 → 配额参数」里调</span>
+            </div>
+            <div class="stats-grid" style="gap:12px;">
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">今日已发出</div>
+                    <div class="value" style="font-size:22px;" id="fu-today-sent">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">今日已生成</div>
+                    <div class="value" style="font-size:22px;" id="fu-today-generated">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">待确认（未回执）</div>
+                    <div class="value" style="font-size:22px;" id="fu-unsent">-</div>
+                </div>
+                <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
+                    <div class="label">脚本心跳</div>
+                    <div class="value" style="font-size:16px;" id="fu-heartbeat">-</div>
+                </div>
+            </div>
+            <div style="margin-top:14px;">
+                <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">最近补话（今天，最多 8 条）</div>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr><th>时间</th><th>好友</th><th>补的话术</th><th>状态</th></tr>
+                        </thead>
+                        <tbody id="fu-recent-tbody">
+                            <tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px;">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <!-- [v187] LLM 成本统计（数据源 llm_usage_log；口径=一轮 request_id 合计；精确计价 峰谷×三档） -->
         <div class="card" id="llm-cost-card" style="margin-top:20px;">
             <div class="card-title">
-                <span>LLM 成本统计 <span style="font-size:12px;color:var(--muted);font-weight:400;">（近 7 天逐日 · 每小时自动刷新 · V4-Flash 精确计价）</span></span>
-                <span style="font-size:12px;color:var(--muted);" id="llm-refresh-time">-</span>
+                <span>LLM 成本统计 <span style="font-size:12px;color:var(--muted);font-weight:400;">（逐日 token 消耗 · 每小时自动刷新 · V4-Flash 精确计价）</span></span>
+                <span style="display:flex;gap:10px;align-items:center;">
+                    <select id="llm-daily-days" class="input" style="width:110px;height:30px;padding:2px 8px;font-size:12px;">
+                        <option value="7">近 7 天</option>
+                        <option value="14" selected>近 14 天</option>
+                        <option value="30">近 30 天</option>
+                        <option value="90">近 90 天</option>
+                    </select>
+                    <span style="font-size:12px;color:var(--muted);" id="llm-refresh-time">-</span>
+                </span>
             </div>
             <div class="stats-grid">
                 <div class="stat-card" style="box-shadow:none;border:1px solid var(--border);">
@@ -270,19 +326,21 @@
                         <tr>
                             <th>日期</th>
                             <th>轮数</th>
+                            <th>输入 token</th>
+                            <th>输出 token</th>
                             <th>总 token</th>
-                            <th>平均 token/轮</th>
-                            <th>总费用（元）</th>
+                            <th>费用（元）</th>
                             <th>平均 元/轮</th>
                             <th>缓存命中率</th>
                         </tr>
                     </thead>
                     <tbody id="llm-daily-tbody">
-                        <tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">加载中...</td></tr>
+                        <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">加载中...</td></tr>
                     </tbody>
                 </table>
             </div>
-            <div style="display:flex;gap:24px;margin-top:12px;font-size:12px;color:var(--muted);">
+            <div style="display:flex;gap:24px;margin-top:12px;font-size:12px;color:var(--muted);flex-wrap:wrap;">
+                <span id="llm-range-summary">区间合计：-</span>
                 <span id="llm-month-summary">本月：-</span>
                 <span>计价：缓存命中/未命中/输出三档 × 峰谷（高峰 9-12、14-18 双倍）· 2026-09-10 起官方新价 0.02/1/4 元每百万 token</span>
             </div>
@@ -293,6 +351,7 @@
             <div class="tab active" data-tab="users">用户管理</div>
             <div class="tab" data-tab="codes">激活码管理</div>
             <div class="tab" data-tab="feedback">用户反馈</div>
+            <div class="tab" data-tab="chatlog">聊天记录</div>
             <div class="tab" data-tab="prompt">提示词管理</div>
         </div>
 
@@ -394,6 +453,46 @@
                         </thead>
                         <tbody id="feedback-tbody">
                             <tr><td colspan="5" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- [v244 聊天昵称记录] 查所有好友会话：昵称/备注/阶段/消息数/补话数/最后一条 -->
+        <div id="tab-chatlog" class="tab-content">
+            <div class="card">
+                <div class="card-title">
+                    <span>聊天昵称记录</span>
+                    <span style="font-size:12px;color:var(--muted);" id="chatlog-count">-</span>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+                    <input id="chatlog-q" class="input" placeholder="搜好友昵称 / 备注 / 聊天内容…" style="max-width:340px;">
+                    <select id="chatlog-limit" class="input" style="width:110px;">
+                        <option value="50">50 条</option>
+                        <option value="100" selected>100 条</option>
+                        <option value="200">200 条</option>
+                        <option value="500">500 条</option>
+                    </select>
+                    <button id="chatlog-search-btn" class="btn btn-primary">查询</button>
+                    <span style="font-size:12px;color:var(--muted);">回车也可查询；按最后活跃时间倒序</span>
+                </div>
+                <div style="overflow-x:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>好友昵称</th>
+                                <th>备注</th>
+                                <th>阶段</th>
+                                <th>消息数（我 / 她）</th>
+                                <th>补话</th>
+                                <th>最后一条</th>
+                                <th>最后活跃</th>
+                                <th>创建时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="chatlog-tbody">
+                            <tr><td colspan="8" style="text-align:center;color:var(--muted);padding:40px;">加载中...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -503,24 +602,15 @@
                 </div>
                 <!-- [v240 追加发话] 直连专属（配置并入 quota_params，随下方"保存配额参数"一并提交） -->
                 <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border, #333);">
-                    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">补话（追加发话 · 直连专属）</div>
-                    <!-- [v243] 本地一键开关：点了立即生效，不用去下面点保存 -->
-                    <div style="display:flex;align-items:center;gap:12px;margin:10px 0 12px;padding:10px 12px;background:rgba(128,128,128,0.10);border-radius:8px;">
-                        <span style="font-size:13px;font-weight:500;">补话总开关</span>
-                        <span id="followup-toggle-state" style="font-size:12px;color:var(--muted);">读取中…</span>
-                        <button id="followup-toggle-btn" class="btn btn-sm" style="margin-left:auto;min-width:96px;">切换</button>
-                    </div>
-                    <p style="font-size:12px;color:var(--muted);margin-bottom:10px;">
-                        仅手机脚本 api_key 直连生效。规则：脚本主线这一轮跑完、确认<b>当前没有可回复的消息</b>时才介入；
+                    <div style="font-size:13px;font-weight:500;margin-bottom:4px;">补话参数（追加发话 · 直连专属）</div>
+                    <p style="font-size:12px;color:var(--muted);margin:6px 0 10px;">
+                        开关在上方「补话（主动补发）」卡片里，这里只调数值。规则：脚本主线这一轮跑完、确认<b>当前没有可回复的消息</b>时才介入；
                         你发出话术后超过 <b>触发阈值分钟</b>（默认 5）她还没回，接着刚才的聊天上下文补一句
-                        （不预设策略、不换话题、绝不催问）；超过 <b>有效上限分钟</b>（默认 60）就不再补。
+                        （不预设策略、不换话题、绝不催问）；超过 <b>有效上限分钟</b>（默认 60）就放弃。
                         每次沉默期只补一条（她回复后重新计时），每个会话每天最多补 <b>每会话上限</b> 次。
                         脚本退出（action=stop）会立即停止补话并清空未发出的排队任务。
                     </p>
                     <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;align-items:end;">
-                        <label style="font-size:12px;color:var(--muted);display:block;">总开关
-                            <input id="followup-enabled" type="checkbox" checked style="margin-top:8px;transform:scale(1.3);">
-                        </label>
                         <label style="font-size:12px;color:var(--muted);display:block;">触发阈值（分钟）
                             <input id="followup-minutes" class="input input-num" type="number" min="1" max="240" style="margin-top:4px;width:100%;">
                         </label>
@@ -528,7 +618,7 @@
                             <input id="followup-max-minutes" class="input input-num" type="number" min="1" max="720" style="margin-top:4px;width:100%;">
                         </label>
                         <label style="font-size:12px;color:var(--muted);display:block;">每会话每日上限（次）
-                            <input id="followup-session-cap" class="input input-num" type="number" min="0" max="50" style="margin-top:4px;width:100%;">
+                            <input id="followup-session-cap" class="input input-num" type="number" min="1" max="50" style="margin-top:4px;width:100%;">
                         </label>
                         <label style="font-size:12px;color:var(--muted);display:block;">时间窗开始（时）
                             <input id="followup-start" class="input input-num" type="number" min="0" max="24" style="margin-top:4px;width:100%;">
@@ -615,50 +705,191 @@
             }
         }
 
-        // [v187] LLM 成本统计（admin_llm_stats RPC：近7天逐日 + 本周 + 本月）
-        //   缓存命中率 = hit/(hit+miss)，未命中=0 显示 "-"
-        async function loadLlmStats() {
+        // [v244] 时间格式化 + 昵称里的数字实体还原（存量昵称存成了 &#127826; 形式）
+        function fmtTime(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return '-';
+            return d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        }
+        function fmtAgo(iso) {
+            if (!iso) return '-';
+            const ms = Date.now() - new Date(iso).getTime();
+            if (isNaN(ms)) return '-';
+            const min = Math.floor(ms / 60000);
+            if (min < 1) return '刚刚';
+            if (min < 60) return min + ' 分钟前';
+            const h = Math.floor(min / 60);
+            if (h < 24) return h + ' 小时前';
+            return Math.floor(h / 24) + ' 天前';
+        }
+        function decodeName(s) {
+            return String(s == null ? '' : s).replace(/&#(\d+);/g, (m, c) => {
+                try { return String.fromCodePoint(parseInt(c, 10)); } catch (e) { return ''; }
+            });
+        }
+
+        // [v244 补话状态] 控制台顶部卡片：账号开关 + 脚本在线/心跳 + 今日发送/待确认 + 最近 8 条
+        async function loadFollowupStatus() {
             if (!sb) return;
-            const { data, error } = await sb.rpc('admin_llm_stats');
+            const badge = document.getElementById('fu-script-badge');
+            const setTxt = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+            const { data, error } = await sb.rpc('admin_followup_status');
             if (error || !data || data.error) {
-                console.warn('admin_llm_stats 失败:', error || data);
+                console.warn('admin_followup_status 失败:', error || data);
+                if (badge) { badge.textContent = '状态接口异常'; badge.style.background = '#FFEBEE'; badge.style.color = '#C62828'; }
                 return;
             }
+            // 账号开关（以服务端为准回填复选框）
+            const cb = document.getElementById('followup-enabled');
+            if (cb) cb.checked = data.enabled !== false;
+            updateFollowupToggleUI();
+
+            // 脚本在线徽标
+            if (badge) {
+                if (data.online === true) {
+                    badge.textContent = '● 脚本在线';
+                    badge.style.background = '#E8F5E9'; badge.style.color = '#2E7D32';
+                } else if (data.online === false) {
+                    badge.textContent = '○ 脚本已退出（不补话）';
+                    badge.style.background = '#ECEFF1'; badge.style.color = '#546E7A';
+                } else {
+                    badge.textContent = '○ 脚本未上报（按离线处理）';
+                    badge.style.background = '#FFF8E1'; badge.style.color = '#F57F17';
+                }
+            }
+            setTxt('fu-today-sent', data.today_sent ?? 0);
+            setTxt('fu-today-generated', data.today_generated ?? 0);
+            setTxt('fu-unsent', data.unsent ?? 0);
+            setTxt('fu-heartbeat', data.heartbeat_at ? fmtAgo(data.heartbeat_at) : '无心跳');
+
+            const recent = Array.isArray(data.recent) ? data.recent : [];
+            const tb = document.getElementById('fu-recent-tbody');
+            if (!tb) return;
+            if (recent.length === 0) {
+                tb.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:18px;">今天还没有补过话</td></tr>';
+                return;
+            }
+            tb.innerHTML = recent.map(r => {
+                let st = '<span class="badge badge-free" style="background:#FFF8E1;color:#F57F17;">待确认</span>';
+                if (r.followup_sent === true) st = '<span class="badge badge-vip" style="background:#E8F5E9;color:#2E7D32;">已发出</span>';
+                else if (r.followup_sent === false) st = '<span class="badge badge-expired">已撤回</span>';
+                return '<tr>' +
+                    '<td style="white-space:nowrap;">' + fmtTime(r.created_at) + '</td>' +
+                    '<td>' + decodeName(r.friend_name) + '</td>' +
+                    '<td>' + decodeName(r.content) + '</td>' +
+                    '<td>' + st + '</td></tr>';
+            }).join('');
+        }
+
+        // [v244] 逐日 token 明细（admin_llm_daily，支持 7/14/30/90 天）
+        //   本周汇总仍走 admin_llm_stats（口径：一轮 request_id 合计）
+        async function loadLlmStats() {
+            if (!sb) return;
             const fmt = (v, d = 0) => v == null ? '-' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: d });
             const fmtCost = (v) => v == null ? '-' : '¥' + Number(v).toFixed(4);
             const hitRate = (r) => r == null ? null : (Number(r) * 100).toFixed(1) + '%';
+            const daysEl = document.getElementById('llm-daily-days');
+            const days = parseInt((daysEl && daysEl.value) || '14', 10);
 
-            const w = data.weekly || {};
-            document.getElementById('llm-week-calls').textContent = fmt(w.calls);
-            document.getElementById('llm-week-avg-tokens').textContent = fmt(w.avg_tokens);
-            document.getElementById('llm-week-avg-cost').textContent = fmtCost(w.avg_cost);
-            const hitPct = w.cache_hit_rate == null ? null : Math.round(Number(w.cache_hit_rate) * 100);
-            document.getElementById('llm-week-hit-rate').textContent = hitPct == null ? '-' : hitPct + '%';
-            document.getElementById('llm-week-hit-bar').style.width = (hitPct == null ? 0 : hitPct) + '%';
+            // 1) 本周 / 本月汇总
+            const { data, error } = await sb.rpc('admin_llm_stats');
+            if (!error && data && !data.error) {
+                const w = data.weekly || {};
+                document.getElementById('llm-week-calls').textContent = fmt(w.calls);
+                document.getElementById('llm-week-avg-tokens').textContent = fmt(w.avg_tokens);
+                document.getElementById('llm-week-avg-cost').textContent = fmtCost(w.avg_cost);
+                const hitPct = w.cache_hit_rate == null ? null : Math.round(Number(w.cache_hit_rate) * 100);
+                document.getElementById('llm-week-hit-rate').textContent = hitPct == null ? '-' : hitPct + '%';
+                document.getElementById('llm-week-hit-bar').style.width = (hitPct == null ? 0 : hitPct) + '%';
 
-            const m = data.monthly || {};
-            document.getElementById('llm-month-summary').textContent =
-                '本月：' + fmt(m.calls) + ' 轮 · ' + fmt(m.total_tokens) + ' token · ' + fmtCost(m.total_cost) +
-                ' 元 · 平均 ' + fmt(m.avg_tokens) + ' token/轮 · 平均 ' + fmtCost(m.avg_cost) + ' 元/轮 · 命中率 ' + hitRate(m.cache_hit_rate);
+                const m = data.monthly || {};
+                document.getElementById('llm-month-summary').textContent =
+                    '本月：' + fmt(m.calls) + ' 轮 · ' + fmt(m.total_tokens) + ' token · ' + fmtCost(m.total_cost) +
+                    ' 元 · 平均 ' + fmt(m.avg_tokens) + ' token/轮 · 平均 ' + fmtCost(m.avg_cost) + ' 元/轮 · 命中率 ' + hitRate(m.cache_hit_rate);
+            } else {
+                console.warn('admin_llm_stats 失败:', error || data);
+            }
 
-            const daily = Array.isArray(data.daily) ? data.daily : [];
+            // 2) 逐日明细（新接口；旧库未迁移时回退 admin_llm_stats.daily）
+            let daily = [];
+            const dr = await sb.rpc('admin_llm_daily', { p_days: days });
+            if (!dr.error && Array.isArray(dr.data)) {
+                daily = dr.data;
+            } else {
+                console.warn('admin_llm_daily 失败，回退旧口径:', dr.error || dr.data);
+                if (data && Array.isArray(data.daily)) daily = data.daily;
+            }
+
             const tbody = document.getElementById('llm-daily-tbody');
             if (daily.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px;">暂无数据（从部署起累计，先跑几天）</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">暂无数据（从部署起累计，先跑几天）</td></tr>';
             } else {
-                tbody.innerHTML = daily.map(d => `
-                    <tr>
-                        <td>${d.period || '-'}</td>
-                        <td>${fmt(d.calls)}</td>
-                        <td>${fmt(d.total_tokens)}</td>
-                        <td>${fmt(d.avg_tokens)}</td>
-                        <td>${fmtCost(d.total_cost)}</td>
-                        <td>${fmtCost(d.avg_cost)}</td>
-                        <td>${hitRate(d.cache_hit_rate) || '-'}</td>
-                    </tr>`).join('');
+                let sumCalls = 0, sumIn = 0, sumOut = 0, sumTokens = 0, sumCost = 0;
+                tbody.innerHTML = daily.map(d => {
+                    const inTok = d.prompt_tokens, outTok = d.completion_tokens;
+                    sumCalls += Number(d.calls || 0);
+                    sumIn += Number(inTok || 0);
+                    sumOut += Number(outTok || 0);
+                    sumTokens += Number(d.total_tokens || 0);
+                    sumCost += Number(d.total_cost || 0);
+                    return '<tr>' +
+                        '<td>' + (d.day || d.period || '-') + '</td>' +
+                        '<td>' + fmt(d.calls) + '</td>' +
+                        '<td>' + fmt(inTok) + '</td>' +
+                        '<td>' + fmt(outTok) + '</td>' +
+                        '<td>' + fmt(d.total_tokens) + '</td>' +
+                        '<td>' + fmtCost(d.total_cost) + '</td>' +
+                        '<td>' + fmtCost(d.avg_cost) + '</td>' +
+                        '<td>' + (hitRate(d.cache_hit_rate) || '-') + '</td></tr>';
+                }).join('');
+                const sumEl = document.getElementById('llm-range-summary');
+                if (sumEl) {
+                    sumEl.textContent = '近 ' + days + ' 天合计：' + sumCalls + ' 轮 · 输入 ' + sumIn.toLocaleString('zh-CN') +
+                        ' / 输出 ' + sumOut.toLocaleString('zh-CN') + ' token · ' +
+                        (sumIn + sumOut).toLocaleString('zh-CN') + ' token · ¥' + sumCost.toFixed(4);
+                }
             }
             document.getElementById('llm-refresh-time').textContent =
                 '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        }
+
+        // [v244 聊天昵称记录] 查会话列表：昵称/备注/阶段/消息数/补话数/最后一条
+        async function loadChatSessions() {
+            if (!sb) return;
+            const qEl = document.getElementById('chatlog-q');
+            const limEl = document.getElementById('chatlog-limit');
+            const q = (qEl && qEl.value || '').trim();
+            const limit = parseInt((limEl && limEl.value) || '100', 10);
+            const tb = document.getElementById('chatlog-tbody');
+            const cnt = document.getElementById('chatlog-count');
+            tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">查询中...</td></tr>';
+            const { data, error } = await sb.rpc('admin_chat_sessions', { p_q: q, p_limit: limit });
+            if (error || !Array.isArray(data)) {
+                console.error('admin_chat_sessions 失败:', error || data);
+                tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#C62828;padding:24px;">查询失败（请确认 037 迁移已执行）</td></tr>';
+                cnt.textContent = '-';
+                return;
+            }
+            cnt.textContent = '共 ' + data.length + ' 个会话' + (q ? '（匹配「' + q + '」）' : '');
+            if (data.length === 0) {
+                tb.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px;">没有匹配的会话</td></tr>';
+                return;
+            }
+            tb.innerHTML = data.map(r => {
+                const stageTxt = r.stage || '<span style="color:var(--muted);">-</span>';
+                return '<tr>' +
+                    '<td><b>' + decodeName(r.friend_name || '-') + '</b></td>' +
+                    '<td>' + (r.note ? decodeName(r.note) : '<span style="color:var(--muted);">-</span>') + '</td>' +
+                    '<td>' + stageTxt + '</td>' +
+                    '<td>' + (r.my_msgs ?? 0) + ' / ' + (r.girl_msgs ?? 0) + '<span style="color:var(--muted);">（共 ' + (r.total_msgs ?? 0) + '）</span></td>' +
+                    '<td>' + (r.followup_msgs ? '<b style="color:#F57F17;">' + r.followup_msgs + '</b>' : '0') + '</td>' +
+                    '<td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="' + decodeName(r.last_preview || '').replace(/"/g, '&quot;') + '">' +
+                        (r.last_role === 'user' ? '<span style="color:#2E7D32;">她：</span>' : '<span style="color:#1565C0;">我：</span>') + decodeName(r.last_preview || '-') + '</td>' +
+                    '<td style="white-space:nowrap;">' + fmtTime(r.last_at) + '</td>' +
+                    '<td style="white-space:nowrap;color:var(--muted);">' + fmtTime(r.created_at) + '</td>' +
+                '</tr>';
+            }).join('');
         }
 
         // 获取统计数据（[v20260805] 改走 admin_stats RPC：设备维度真实口径）
@@ -944,6 +1175,7 @@
                 syncThinkingUi();
                 // [v20260812 配额参数] 填充（缺省回退原默认值）
                 const qp = data.quota_params || {};
+                window.__quotaParams = qp;   // [v244] 保存时以此为基底合并，避免丢掉表单里没有的键
                 document.getElementById('qp-guest').value = qp.guest_daily ?? 20;
                 document.getElementById('qp-tier1').value = qp.free_daily_tier1 ?? 50;
                 document.getElementById('qp-tier2').value = qp.free_daily_tier2 ?? 20;
@@ -1080,7 +1312,9 @@
             const status = document.getElementById('quota-status');
             const saveBtn = document.getElementById('quota-save-btn');
             const readInt = (id) => parseInt(document.getElementById(id).value, 10);
+            // [v244] 以已加载的 quota_params 为基底（保留 followup_scan_limit / free_daily_tier3 等表单外键），再覆盖表单值
             const quota_params = {
+                ...(window.__quotaParams || {}),
                 guest_daily: readInt('qp-guest'),
                 free_daily_tier1: readInt('qp-tier1'),
                 free_daily_tier2: readInt('qp-tier2'),
@@ -1160,8 +1394,11 @@
                     loadFeedback();
                     loadPrompt();
                     loadLlmStats();
-                    // [v187] LLM 成本每小时自动刷新
+                    loadFollowupStatus();
+                    loadChatSessions();
+                    // [v187] LLM 成本每小时自动刷新；[v244] 补话状态每分钟刷新
                     setInterval(loadLlmStats, 60 * 60 * 1000);
+                    setInterval(loadFollowupStatus, 60 * 1000);
                 }
             }
 
@@ -1190,7 +1427,10 @@
                 loadFeedback();
                 loadPrompt();
                 loadLlmStats();
+                loadFollowupStatus();
+                loadChatSessions();
                 setInterval(loadLlmStats, 60 * 60 * 1000);
+                setInterval(loadFollowupStatus, 60 * 1000);
             });
 
             // 退出
@@ -1211,6 +1451,8 @@
                     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                     tab.classList.add('active');
                     document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+                    // [v244] 每次切到聊天记录都拉最新
+                    if (tab.dataset.tab === 'chatlog') loadChatSessions();
                 });
             });
 
@@ -1240,6 +1482,16 @@
             document.getElementById('llm-save-btn').addEventListener('click', saveLlmParams);
             // [配额参数] 保存
             document.getElementById('quota-save-btn').addEventListener('click', saveQuotaParams);
+            // [v244] 逐日 token 区间切换
+            document.getElementById('llm-daily-days').addEventListener('change', loadLlmStats);
+            // [v244] 补话状态刷新
+            document.getElementById('followup-refresh-btn').addEventListener('click', loadFollowupStatus);
+            // [v244] 聊天昵称记录查询（按钮 / 回车 / 改条数）
+            document.getElementById('chatlog-search-btn').addEventListener('click', loadChatSessions);
+            document.getElementById('chatlog-q').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); loadChatSessions(); }
+            });
+            document.getElementById('chatlog-limit').addEventListener('change', loadChatSessions);
             // [v243 补话开关] 一键开/关：点了立即保存生效（不用再点"保存配额参数"）
             document.getElementById('followup-toggle-btn').addEventListener('click', async (ev) => {
                 const btn = ev.currentTarget;

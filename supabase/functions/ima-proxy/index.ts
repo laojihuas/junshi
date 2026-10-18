@@ -339,10 +339,10 @@ Deno.serve(async (req) => {
     //   friend_name  直连按昵称查/建会话（免 session_id）；仅 api_key 模式生效
     // [v240 追加发话] mode='followup'：直连专属，无需 query，脚本拉取"该补发一条的会话名单"
     //   （判定规则见 handleFollowup；网页版不参与，本机制只服务手机直连）
-    //   [v240 下线 v210 唤醒] mode='wake'（22h 沉默唤醒）已按要求砍掉，保留 200 空返回防老脚本报错
+    //   [v244] v210 的 22h 唤醒已彻底移除（列/配置/RPC/分支全部清空，老脚本调 mode=wake 会走普通聊天校验）
 
-    // [v240] followup / wake 模式无需 query（脚本零状态拉名单）
-    if (mode !== 'followup' && mode !== 'wake' && (!query || !query.trim())) {
+    // [v240] followup 模式无需 query（脚本零状态拉名单）
+    if (mode !== 'followup' && (!query || !query.trim())) {
       return new Response(JSON.stringify({ error: 'query 不能为空' }), { headers, status: 400 });
     }
 
@@ -499,15 +499,6 @@ Deno.serve(async (req) => {
       // [v186] 补发话术的 LLM usage 落库（llmChat 已 push 到 llmUsageLog）
       await persistLlUsage();
       return new Response(JSON.stringify(fuResult), { headers, status: 200 });
-    }
-
-    // [v240 下线] v210 的 22h 沉默唤醒已砍掉：老脚本仍在调 mode=wake 时返回 200 空名单，
-    //   不让脚本侧因为 400/500 反复重试或报错（静默退役）
-    if (mode === 'wake') {
-      return new Response(JSON.stringify({
-        wake: [], skipped: [], disabled: true, retired: true,
-        message: 'wake 已下线（v240），请改用 mode=followup',
-      }), { headers, status: 200 });
     }
 
     // 配额检查 + 原子扣次（RPC 内 SECURITY DEFINER 事务；双身份）
